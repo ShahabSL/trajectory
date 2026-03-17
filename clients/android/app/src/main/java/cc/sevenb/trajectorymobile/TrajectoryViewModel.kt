@@ -23,9 +23,10 @@ import uniffi.trajectorymobile.TrajectoryMobileController
 import uniffi.trajectorymobile.mobileCoreVersion
 
 class TrajectoryViewModel(
+    private val appContext: Context,
     private val settingsStore: SettingsStore,
 ) : ViewModel() {
-    private val controller = TrajectoryMobileController()
+    private val controller = TunnelControllerStore.controller
     private val _uiState = MutableStateFlow(MobileUiState(version = mobileCoreVersion()))
     val uiState: StateFlow<MobileUiState> = _uiState.asStateFlow()
 
@@ -68,6 +69,7 @@ class TrajectoryViewModel(
                 }
                 return@launch
             }
+            TrajectoryTunnelService.start(appContext)
             withContext(Dispatchers.IO) {
                 try {
                     controller.start(config)
@@ -79,6 +81,7 @@ class TrajectoryViewModel(
             }
         }.invokeOnCompletion { throwable ->
             if (throwable != null) {
+                TrajectoryTunnelService.stop(appContext)
                 _uiState.update {
                     it.copy(
                         state = MobileTunnelState.FAILED,
@@ -94,6 +97,7 @@ class TrajectoryViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 controller.stop()
+                TrajectoryTunnelService.stop(appContext)
             } catch (error: MobileException) {
                 _uiState.update {
                     it.copy(
@@ -173,7 +177,6 @@ class TrajectoryViewModel(
 
     override fun onCleared() {
         pollJob?.cancel()
-        controller.close()
     }
 
     companion object {
@@ -181,7 +184,10 @@ class TrajectoryViewModel(
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return TrajectoryViewModel(SettingsStore(context.applicationContext)) as T
+                    return TrajectoryViewModel(
+                        appContext = context.applicationContext,
+                        settingsStore = SettingsStore(context.applicationContext),
+                    ) as T
                 }
             }
     }
