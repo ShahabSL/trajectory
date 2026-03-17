@@ -11,3 +11,5 @@ It provides:
 - diagnostic logging
 
 Why this matters: the desktop app is a thin product wrapper around `trajectory-core`, not a separate transport implementation.
+
+Release bundles for end users are produced by `scripts/package_release.py` locally and by `.github/workflows/release.yml` in CI.

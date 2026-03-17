@@ -1,4 +1,5 @@
 target/
+dist/
 .secrets/
 __pycache__/
 *.pyc

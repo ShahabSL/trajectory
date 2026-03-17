@@ -3,6 +3,7 @@ name = "trajectory-cli"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+description = "CLI client and server binaries for the Trajectory recursive-DNS tunnel"
 
 [dependencies]
 anyhow.workspace = true
@@ -16,4 +17,3 @@ path = "src/bin/trajectory-client.rs"
 [[bin]]
 name = "trajectory-server"
 path = "src/bin/trajectory-server.rs"
-

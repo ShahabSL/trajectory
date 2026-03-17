@@ -60,6 +60,19 @@ cargo run -p trajectory-desktop
 
 The desktop app configures and runs the same shared Rust client core used by the CLI.
 
+## Downloads
+
+End users should download release artifacts from GitHub Releases instead of building from source.
+
+Each release publishes:
+
+- Linux CLI and desktop bundles
+- Windows CLI and desktop bundles
+- macOS CLI and desktop bundles
+- checksum manifests
+
+Maintainer release flow is documented in [RELEASING.md](RELEASING.md).
+
 ## Browser Path
 
 Once the client is running, create a local SOCKS proxy on top of the tunnel:
@@ -100,6 +113,22 @@ End-to-end browser harness:
 ```bash
 /tmp/run-trajectory-browser-5.sh
 ```
+
+## Release Packaging
+
+Build portable Linux bundles locally:
+
+```bash
+python3 scripts/package_release.py --target x86_64-unknown-linux-gnu --output-dir dist/local
+```
+
+This produces:
+
+- `trajectory-vVERSION-x86_64-unknown-linux-gnu-cli.tar.gz`
+- `trajectory-vVERSION-x86_64-unknown-linux-gnu-desktop.tar.gz`
+- `trajectory-vVERSION-x86_64-unknown-linux-gnu-SHA256SUMS.txt`
+
+The GitHub Actions workflows under `.github/workflows/` build the Windows, macOS, and Linux release bundles and publish them on tags.
 
 ## Deploy
 

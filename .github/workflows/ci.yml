@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  workspace-checks:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Run workspace tests
+        run: cargo test --workspace
+
+      - name: Run desktop smoke test
+        run: cargo run -p trajectory-desktop -- --smoke-test
+
+      - name: Build Linux release bundles
+        run: python3 scripts/package_release.py --target x86_64-unknown-linux-gnu --output-dir dist/ci
+
+      - name: Upload Linux CI bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-linux-release-bundles
+          path: dist/ci/*
+          if-no-files-found: error
+          retention-days: 7
+
+  cross-platform-build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+          - os: windows-2022
+          - os: macos-13
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build workspace
+        run: cargo build --release --workspace
