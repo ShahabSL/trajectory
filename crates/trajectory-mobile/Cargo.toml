@@ -1,0 +1,20 @@
+[package]
+name = "trajectory-mobile"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "UniFFI mobile bindings and controller surface for the Trajectory DNS tunnel"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+trajectory-core = { path = "../trajectory-core" }
+uniffi = { workspace = true, features = ["cli"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"

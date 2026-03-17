@@ -1,11 +1,26 @@
 # Trajectory iOS
 
-Planned iOS client wrapper for `trajectory-core`.
+`clients/ios` contains the native iPhone client for the shared Rust tunnel core.
 
-Recommended direction:
+Architecture:
 
-- iOS app shell
-- Network Extension / Packet Tunnel integration
-- Rust core bridged into the native app layer
+- SwiftUI app UI
+- UniFFI-generated Swift bindings in `TrajectoryMobileApp/Sources/Generated`
+- XcodeGen-compatible project description in `project.yml`
+- Packet Tunnel extension target layout for the future Network Extension path
 
-Why this matters: iOS should stay a thin platform wrapper around the shared transport engine.
+What works repo-side:
+
+- real SwiftUI application sources
+- real view model wired to the generated Rust bindings
+- persistent configuration path via `@AppStorage`
+- packet-tunnel extension source and project structure
+
+What still depends on external Apple tooling:
+
+- Xcode / xcodebuild
+- Swift toolchain on macOS
+- code signing and Apple entitlements
+- iOS device/simulator runtime
+
+Why this matters: the shared Rust core and Swift bindings are in place, but this Linux host cannot compile or sign iOS targets.

@@ -1,0 +1,192 @@
+import SwiftUI
+
+struct ContentView: View {
+    @EnvironmentObject private var model: TunnelViewModel
+    @AppStorage("trajectory.domain") private var domain = defaultMobileConfig().domain
+    @AppStorage("trajectory.listenPort") private var listenPort = String(defaultMobileConfig().listenPort)
+    @AppStorage("trajectory.keepAliveMs") private var keepAliveMs = String(defaultMobileConfig().keepAliveMs)
+    @AppStorage("trajectory.resolvers") private var resolvers = defaultMobileConfig().resolvers.joined(separator: "\n")
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 18) {
+                    hero
+                    configurationCard
+                    telemetryGrid
+                    diagnosticsCard
+                }
+                .padding(20)
+            }
+            .background(
+                LinearGradient(
+                    colors: [Color(red: 0.04, green: 0.08, blue: 0.13), Color(red: 0.06, green: 0.12, blue: 0.10)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+            )
+            .navigationTitle("Trajectory")
+        }
+        .task {
+            model.applyStoredConfig(
+                domain: domain,
+                listenPort: listenPort,
+                keepAliveMs: keepAliveMs,
+                resolvers: resolvers
+            )
+        }
+    }
+
+    private var hero: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Recursive DNS tunnel control", systemImage: "network")
+                .font(.headline)
+                .foregroundStyle(Color.white)
+            Text(model.snapshot.statusText)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Color.white)
+            if let error = model.snapshot.lastError {
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(Color(red: 1.0, green: 0.78, blue: 0.75))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(20)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+    }
+
+    private var configurationCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Tunnel profile")
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(.white)
+
+            Group {
+                TextField("Authoritative domain", text: $domain)
+                TextField("Listen port", text: $listenPort)
+                    .keyboardType(.numberPad)
+                TextField("Keep-alive ms", text: $keepAliveMs)
+                    .keyboardType(.numberPad)
+                TextEditor(text: $resolvers)
+                    .frame(minHeight: 160)
+                    .scrollContentBackground(.hidden)
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .foregroundStyle(.white)
+
+            HStack(spacing: 12) {
+                Button {
+                    model.applyStoredConfig(
+                        domain: domain,
+                        listenPort: listenPort,
+                        keepAliveMs: keepAliveMs,
+                        resolvers: resolvers
+                    )
+                    model.startTunnel()
+                } label: {
+                    Label("Start", systemImage: "bolt.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.canStart)
+
+                Button {
+                    model.stopTunnel()
+                } label: {
+                    Label("Stop", systemImage: "stop.circle.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .tint(.white)
+                .disabled(!model.canStop)
+            }
+        }
+        .padding(20)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+    }
+
+    private var telemetryGrid: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                metricCard(title: "State", value: model.snapshot.state.label)
+                metricCard(title: "Resolvers", value: "\(model.snapshot.activeResolvers)")
+            }
+            HStack(spacing: 12) {
+                metricCard(title: "Listen", value: model.snapshot.listenAddress)
+                metricCard(title: "Core", value: model.version)
+            }
+        }
+    }
+
+    private func metricCard(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.headline)
+                .foregroundStyle(.white)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+
+    private var diagnosticsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Diagnostics")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Button("Clear") {
+                    model.clearLogs()
+                }
+            }
+
+            if model.logs.isEmpty {
+                Text("No events yet. Start the tunnel to watch the Rust control layer report status changes.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(model.logs.prefix(20), id: \.self) { entry in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(entry.timestamp)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        Text(entry.message)
+                            .foregroundStyle(.white)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+            }
+
+            Text("Packet Tunnel mode is scaffolded but not yet wired to packet forwarding. The app currently controls the real Rust loopback tunnel session.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+    }
+}
+
+private extension MobileTunnelState {
+    var label: String {
+        switch self {
+        case .idle:
+            return "Idle"
+        case .starting:
+            return "Starting"
+        case .running:
+            return "Running"
+        case .stopping:
+            return "Stopping"
+        case .failed:
+            return "Failed"
+        }
+    }
+}

@@ -6,9 +6,10 @@ The repository now follows a standard workspace layout:
 
 - `crates/trajectory-core`: shared transport, protocol, client, and server logic
 - `crates/trajectory-cli`: CLI binaries for `trajectory-client` and `trajectory-server`
+- `crates/trajectory-mobile`: UniFFI-powered mobile bridge over the shared Rust client core
 - `clients/desktop`: desktop control application built on `eframe/egui`
-- `clients/android`: Android wrapper plan for the shared core
-- `clients/ios`: iOS wrapper plan for the shared core
+- `clients/android`: Android client project that consumes the shared mobile bridge
+- `clients/ios`: iPhone app and packet-tunnel extension scaffold that consume the shared mobile bridge
 - `scripts/`: benchmark and support tooling
 - `deploy/`: service units and deployment assets
 
@@ -24,6 +25,13 @@ Build the desktop client:
 
 ```bash
 cargo build --release -p trajectory-desktop
+```
+
+Build the mobile bridge used by Android and iOS:
+
+```bash
+cargo build -p trajectory-mobile
+python3 scripts/generate_mobile_bindings.py --profile debug
 ```
 
 ## Run the CLI
@@ -59,6 +67,26 @@ cargo run -p trajectory-desktop
 ```
 
 The desktop app configures and runs the same shared Rust client core used by the CLI.
+
+## Mobile Clients
+
+The mobile apps live under:
+
+- `clients/android`
+- `clients/ios`
+
+They share the same Rust tunnel logic through `crates/trajectory-mobile`, which exposes a stable UniFFI API to Kotlin and Swift.
+
+What is implemented now:
+
+- Android app structure with Compose UI, persisted settings, status/log views, and a real bridge to the Rust tunnel controller
+- iPhone app structure with SwiftUI, persisted settings, status/log views, and a real bridge to the Rust tunnel controller
+- packet-tunnel service scaffolding on both platforms so full-device mode can be added without changing the shared core boundary
+
+What still depends on external platform toolchains:
+
+- Android APK/AAB builds require a full Android SDK + Gradle environment
+- iOS app builds require Xcode/Swift on macOS
 
 ## Downloads
 
@@ -129,6 +157,13 @@ This produces:
 - `trajectory-vVERSION-x86_64-unknown-linux-gnu-SHA256SUMS.txt`
 
 The GitHub Actions workflows under `.github/workflows/` build the Windows, macOS, and Linux release bundles and publish them on tags.
+
+## Licensing
+
+Trajectory is dual-licensed under either:
+
+- [MIT](LICENSE-MIT)
+- [Apache-2.0](LICENSE-APACHE)
 
 ## Deploy
 

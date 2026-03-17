@@ -1,6 +1,9 @@
 target/
 dist/
+.tooling/
 .secrets/
+clients/android/.gradle/
+clients/android/app/build/
 __pycache__/
 *.pyc
 .env
