@@ -4,6 +4,7 @@ dist/
 .secrets/
 clients/android/.gradle/
 clients/android/app/build/
+clients/android/app/src/main/jniLibs/
 __pycache__/
 *.pyc
 .env

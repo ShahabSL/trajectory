@@ -1,9 +1,56 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.io.File
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+}
+
+val repoRoot = rootDir.parentFile.parentFile
+val rustManifestPath = repoRoot.resolve("crates/trajectory-mobile/Cargo.toml")
+val rustJniLibsDir = layout.buildDirectory.dir("generated/rustJniLibs")
+val androidNdkVersion = "29.0.14206865"
+
+fun requireAndroidSdkRoot(): String =
+    System.getenv("ANDROID_SDK_ROOT")
+        ?: System.getenv("ANDROID_HOME")
+        ?: throw GradleException("Set ANDROID_SDK_ROOT or ANDROID_HOME before building the Android client")
+
+fun configureRustBridgeTask(task: Exec, release: Boolean) {
+    task.group = "build"
+    task.description = if (release) {
+        "Builds the Trajectory Rust mobile bridge for Android release packaging"
+    } else {
+        "Builds the Trajectory Rust mobile bridge for Android debug packaging"
+    }
+    task.outputs.dir(rustJniLibsDir)
+    task.doFirst {
+        val sdkRoot = requireAndroidSdkRoot()
+        val ndkHome = File(sdkRoot, "ndk/$androidNdkVersion").absolutePath
+        val outputDir = rustJniLibsDir.get().asFile
+
+        task.environment("ANDROID_SDK_ROOT", sdkRoot)
+        task.environment("ANDROID_HOME", sdkRoot)
+        task.environment("ANDROID_NDK_HOME", ndkHome)
+        task.workingDir = repoRoot
+        task.commandLine(
+            "cargo",
+            "ndk",
+            "-t",
+            "arm64-v8a",
+            "-t",
+            "x86_64",
+            "-P",
+            "28",
+            "-o",
+            outputDir.absolutePath,
+            "--manifest-path",
+            rustManifestPath.absolutePath,
+            "build",
+            *if (release) arrayOf("--release") else emptyArray(),
+        )
+    }
 }
 
 android {
@@ -51,6 +98,8 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    sourceSets.getByName("main").jniLibs.srcDir(rustJniLibsDir)
 }
 
 dependencies {
@@ -71,4 +120,22 @@ dependencies {
 
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+}
+
+val buildRustBridgeDebug = tasks.register<Exec>("buildRustBridgeDebug") {
+    configureRustBridgeTask(this, release = false)
+}
+
+val buildRustBridgeRelease = tasks.register<Exec>("buildRustBridgeRelease") {
+    configureRustBridgeTask(this, release = true)
+}
+
+afterEvaluate {
+    tasks.named("preDebugBuild").configure {
+        dependsOn(buildRustBridgeDebug)
+    }
+
+    tasks.named("preReleaseBuild").configure {
+        dependsOn(buildRustBridgeRelease)
+    }
 }

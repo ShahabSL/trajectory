@@ -82,10 +82,11 @@ What is implemented now:
 - Android app structure with Compose UI, persisted settings, status/log views, and a real bridge to the Rust tunnel controller
 - iPhone app structure with SwiftUI, persisted settings, status/log views, and a real bridge to the Rust tunnel controller
 - packet-tunnel service scaffolding on both platforms so full-device mode can be added without changing the shared core boundary
+- Android Gradle build integration that compiles and packages `libtrajectory_mobile.so` into the debug APK
 
 What still depends on external platform toolchains:
 
-- Android APK/AAB builds require a full Android SDK + Gradle environment
+- Android APK/AAB builds require a full Android SDK + NDK + Gradle environment plus `cargo-ndk`
 - iOS app builds require Xcode/Swift on macOS
 
 ## Downloads
