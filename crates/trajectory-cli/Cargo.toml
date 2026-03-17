@@ -1,0 +1,19 @@
+[package]
+name = "trajectory-cli"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+trajectory-core = { path = "../trajectory-core" }
+
+[[bin]]
+name = "trajectory-client"
+path = "src/bin/trajectory-client.rs"
+
+[[bin]]
+name = "trajectory-server"
+path = "src/bin/trajectory-server.rs"
+

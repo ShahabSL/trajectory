@@ -1,91 +1,119 @@
 # Trajectory
 
-Trajectory is a pure-Rust DNS tunnel optimized for public-resolver throughput. It uses a pipelined request/ack protocol over DNS TXT queries, resolver-aware scheduling, and a lightweight downlink path for interactive traffic.
+Trajectory is a pure-Rust DNS tunnel optimized for recursive resolvers on raw UDP DNS transport.
 
-The repo ships two binaries:
+The repository now follows a standard workspace layout:
 
-- `trajectory-server`: authoritative UDP DNS server that forwards tunnel sessions to a TCP target
-- `trajectory-client`: local TCP listener that carries a session over one or more public DNS resolvers
+- `crates/trajectory-core`: shared transport, protocol, client, and server logic
+- `crates/trajectory-cli`: CLI binaries for `trajectory-client` and `trajectory-server`
+- `clients/desktop`: desktop control application built on `eframe/egui`
+- `clients/android`: Android wrapper plan for the shared core
+- `clients/ios`: iOS wrapper plan for the shared core
+- `scripts/`: benchmark and support tooling
+- `deploy/`: service units and deployment assets
 
 ## Build
 
-```bash
-cargo build --release --bin trajectory-client --features client
-cargo build --release --bin trajectory-server --features server
-```
-
-## Local Smoke Test
-
-Start a local TCP sink:
+Build the CLI binaries:
 
 ```bash
-python3 - <<'PY'
-import socket, pathlib
-out = pathlib.Path("/tmp/trajectory-smoke.out")
-s = socket.socket()
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("127.0.0.1", 5201))
-s.listen(1)
-c, _ = s.accept()
-with c, out.open("wb") as handle:
-    while True:
-        chunk = c.recv(65536)
-        if not chunk:
-            break
-        handle.write(chunk)
-PY
+cargo build --release -p trajectory-cli --bins
 ```
 
-Start the server:
+Build the desktop client:
+
+```bash
+cargo build --release -p trajectory-desktop
+```
+
+## Run the CLI
+
+Server:
 
 ```bash
 ./target/release/trajectory-server \
-  --dns-listen-port 8853 \
-  --target-address 127.0.0.1:5201 \
-  --domain test.com
+  --dns-listen-port 53 \
+  --target-address 127.0.0.1:22 \
+  --domain t.7-b.cc
 ```
 
-Start the client:
+Client:
 
 ```bash
 ./target/release/trajectory-client \
   --tcp-listen-port 7000 \
-  --resolver 127.0.0.1:8853 \
-  --domain test.com \
+  --resolver 1.1.1.1:53 \
+  --resolver 1.0.0.1:53 \
+  --resolver 8.8.8.8:53 \
+  --resolver 8.8.4.4:53 \
+  --resolver 9.9.9.9:53 \
+  --domain t.7-b.cc \
   --congestion-control bbr \
   --keep-alive-interval 50
 ```
 
-Send a payload:
+## Run the Desktop Client
 
 ```bash
-python3 - <<'PY'
-import socket, time
-payload = b"hello-fast-path\n" * 64
-s = socket.create_connection(("127.0.0.1", 7000), timeout=5)
-s.sendall(payload)
-time.sleep(1)
-s.shutdown(socket.SHUT_WR)
-s.close()
-PY
+cargo run -p trajectory-desktop
+```
+
+The desktop app configures and runs the same shared Rust client core used by the CLI.
+
+## Browser Path
+
+Once the client is running, create a local SOCKS proxy on top of the tunnel:
+
+```bash
+ssh -N -D 127.0.0.1:1080 \
+  -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null \
+  -o PreferredAuthentications=password \
+  -o PubkeyAuthentication=no \
+  -p 7000 root@127.0.0.1
+```
+
+Then point Firefox at:
+
+- SOCKS host: `127.0.0.1`
+- Port: `1080`
+- SOCKS v5
+- Proxy DNS enabled
+
+## Tests
+
+Core and CLI:
+
+```bash
+cargo test
+```
+
+Desktop smoke test:
+
+```bash
+cargo test -p trajectory-desktop
+cargo run -p trajectory-desktop -- --smoke-test
+```
+
+End-to-end browser harness:
+
+```bash
+/tmp/run-trajectory-browser-5.sh
 ```
 
 ## Deploy
 
-Install the release binaries and service unit:
+Install the server binary and service unit:
 
 ```bash
-install -d -m 755 /opt/trajectory /opt/trajectory/certs
+install -d -m 755 /opt/trajectory
 install -m 755 target/release/trajectory-server /opt/trajectory/trajectory-server
-install -m 755 target/release/trajectory-client /opt/trajectory/trajectory-client
 install -m 644 deploy/trajectory.service /etc/systemd/system/trajectory.service
 systemctl daemon-reload
 systemctl enable --now trajectory.service
 ```
 
-Why this matters: the server binds UDP `:53`, so a host-local resolver such as `systemd-resolved` cannot stay on that port at the same time.
-
-If the host previously used `systemd-resolved`, replace `/etc/resolv.conf` with real upstream resolvers before or after stopping it, for example:
+If the host previously used `systemd-resolved`, replace `/etc/resolv.conf` with upstream resolvers before or after stopping it:
 
 ```bash
 rm -f /etc/resolv.conf
@@ -97,32 +125,10 @@ options edns0
 EOF
 ```
 
-Why this matters: SSH dynamic forwarding with `-D` relies on remote hostname resolution. If `/etc/resolv.conf` still points at `127.0.0.53` after `systemd-resolved` is stopped, browser traffic through the SOCKS proxy will hang on DNS lookups even though raw SSH through the tunnel still works.
-
-## Public Resolver Benchmark
-
-Benchmark the current build against upstream Slipstream:
-
-```bash
-python3 scripts/benchmark_public.py --size-bytes 16384 --timeout-seconds 180 --stall-seconds 30
-```
-
-Benchmark the saved translated baseline against upstream Slipstream:
-
-```bash
-python3 scripts/benchmark_public.py \
-  --resolver 1.1.1.1:53 \
-  --size-bytes 16384 \
-  --timeout-seconds 180 \
-  --stall-seconds 30 \
-  --trajectory-client-bin /tmp/trajectory-baseline/trajectory-client.translated \
-  --trajectory-server-bin /tmp/trajectory-baseline/trajectory-server.translated
-```
-
 Learning Notes:
-- Public DNS throughput is dominated by query budget, in-flight window sizing, resolver behavior, and retransmit policy more than language choice.
-- Recursive resolvers may issue non-TXT zone probes; the server answers those authoritatively instead of timing out so the real tunnel queries keep flowing.
+- A shared core plus thin platform wrappers is the normal open source structure for networked Rust applications that need desktop and mobile clients.
+- Keeping the transport engine separate from UI code makes it easier to test protocol behavior and port it to new platforms.
 
 Why This Matters:
-- A direct authoritative test can hide resolver behavior that decides real-world throughput.
-- Keeping the benchmark harness in-repo makes it easy to compare the current fast path, the old baseline, and upstream Slipstream under the same network conditions.
+- The CLI, desktop app, and future mobile wrappers all share one transport implementation.
+- Product code and experimental legacy code are no longer mixed together in the main build path.

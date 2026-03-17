@@ -1,0 +1,13 @@
+[package]
+name = "trajectory-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+data-encoding = "2.8"
+hickory-proto = "0.25"
+rand.workspace = true
+tokio.workspace = true
+
