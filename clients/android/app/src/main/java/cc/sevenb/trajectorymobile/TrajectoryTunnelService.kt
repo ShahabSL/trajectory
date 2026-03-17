@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 
 class TrajectoryTunnelService : Service() {
@@ -21,14 +22,16 @@ class TrajectoryTunnelService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                Log.i(TAG, "Stopping foreground tunnel service")
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
             }
 
             else -> {
+                Log.i(TAG, "Starting foreground tunnel service")
                 startInForeground()
-                return START_NOT_STICKY
+                return START_STICKY
             }
         }
     }
@@ -39,6 +42,7 @@ class TrajectoryTunnelService : Service() {
             title = "Trajectory tunnel active",
             text = snapshot.statusText.ifBlank { "Keeping the DNS tunnel alive in the background" },
         )
+        Log.i(TAG, "Promoting tunnel service to foreground with state=${snapshot.state} status='${snapshot.statusText}'")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -76,6 +80,7 @@ class TrajectoryTunnelService : Service() {
     }
 
     companion object {
+        private const val TAG = "TrajectoryTunnelSvc"
         private const val CHANNEL_ID = "trajectory_tunnel"
         private const val NOTIFICATION_ID = 7001
         private const val ACTION_START = "cc.sevenb.trajectorymobile.action.START_TUNNEL"

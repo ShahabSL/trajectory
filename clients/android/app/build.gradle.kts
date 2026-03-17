@@ -116,7 +116,7 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons)
     implementation(libs.google.material)
-    implementation(libs.jna)
+    implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
 
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)

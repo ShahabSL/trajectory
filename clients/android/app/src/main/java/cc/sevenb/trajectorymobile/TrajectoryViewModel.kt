@@ -1,6 +1,7 @@
 package cc.sevenb.trajectorymobile
 
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -26,6 +27,7 @@ class TrajectoryViewModel(
     private val appContext: Context,
     private val settingsStore: SettingsStore,
 ) : ViewModel() {
+    private val tag = "TrajectoryViewModel"
     private val controller = TunnelControllerStore.controller
     private val _uiState = MutableStateFlow(MobileUiState(version = mobileCoreVersion()))
     val uiState: StateFlow<MobileUiState> = _uiState.asStateFlow()
@@ -60,6 +62,7 @@ class TrajectoryViewModel(
             val config = try {
                 currentConfig()
             } catch (error: IllegalArgumentException) {
+                Log.w(tag, "Rejected invalid tunnel configuration", error)
                 _uiState.update {
                     it.copy(
                         state = MobileTunnelState.FAILED,
@@ -69,6 +72,7 @@ class TrajectoryViewModel(
                 }
                 return@launch
             }
+            Log.i(tag, "Starting tunnel with ${config.resolvers.size} resolvers on port ${config.listenPort.toInt()}")
             TrajectoryTunnelService.start(appContext)
             withContext(Dispatchers.IO) {
                 try {
@@ -77,10 +81,12 @@ class TrajectoryViewModel(
                     throw error
                 }
             }.let {
+                Log.i(tag, "Tunnel controller started successfully")
                 refreshFromController()
             }
         }.invokeOnCompletion { throwable ->
             if (throwable != null) {
+                Log.e(tag, "Tunnel start failed", throwable)
                 TrajectoryTunnelService.stop(appContext)
                 _uiState.update {
                     it.copy(
@@ -96,9 +102,11 @@ class TrajectoryViewModel(
     fun stopTunnel() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                Log.i(tag, "Stopping tunnel controller")
                 controller.stop()
                 TrajectoryTunnelService.stop(appContext)
             } catch (error: MobileException) {
+                Log.e(tag, "Tunnel stop failed", error)
                 _uiState.update {
                     it.copy(
                         state = MobileTunnelState.FAILED,

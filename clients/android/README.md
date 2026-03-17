@@ -40,4 +40,18 @@ The resulting debug APK is written to:
 clients/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+Run the emulator smoke test once an Android emulator is booted and visible to `adb`:
+
+```bash
+scripts/test_android_emulator.sh
+```
+
+The smoke test verifies:
+
+- the APK installs cleanly
+- the app launches with an autostart hook for deterministic testing
+- the foreground service starts
+- the tunnel listens on `127.0.0.1:7000`
+- the service survives after the app is backgrounded
+
 Why this matters: the app code is real, the Kotlin layer calls the shared Rust tunnel controller, and the APK now bundles the Rust mobile bridge instead of stopping at UI scaffolding.

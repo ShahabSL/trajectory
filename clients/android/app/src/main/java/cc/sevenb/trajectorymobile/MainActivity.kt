@@ -18,5 +18,14 @@ class MainActivity : ComponentActivity() {
                 TrajectoryApp(viewModel)
             }
         }
+        if (intent?.getBooleanExtra(EXTRA_AUTOSTART, false) == true) {
+            window.decorView.post {
+                viewModel.startTunnel()
+            }
+        }
+    }
+
+    companion object {
+        const val EXTRA_AUTOSTART = "cc.sevenb.trajectorymobile.extra.AUTOSTART"
     }
 }
