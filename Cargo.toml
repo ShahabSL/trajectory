@@ -1,0 +1,39 @@
+[package]
+name = "trajectory"
+version = "0.1.0"
+edition = "2021"
+publish = false
+autobins = false
+
+[features]
+default = []
+client = []
+server = []
+
+[lib]
+name = "trajectory"
+path = "lib.rs"
+
+[[bin]]
+name = "trajectory-client"
+path = "bin/trajectory-client.rs"
+required-features = ["client"]
+
+[[bin]]
+name = "trajectory-server"
+path = "bin/trajectory-server.rs"
+required-features = ["server"]
+
+[dependencies]
+anyhow = "1.0"
+bytes = "1.7"
+data-encoding = "2.8"
+hickory-proto = "0.25"
+rand = "0.8"
+tokio = { version = "1.48", features = ["full"] }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+strip = "debuginfo"
