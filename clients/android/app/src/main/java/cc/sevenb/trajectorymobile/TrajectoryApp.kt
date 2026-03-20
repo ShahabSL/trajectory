@@ -33,9 +33,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -43,6 +46,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import cc.sevenb.trajectorymobile.model.AndroidConnectionMode
 import cc.sevenb.trajectorymobile.model.MobileUiState
 import cc.sevenb.trajectorymobile.model.canStart
 import cc.sevenb.trajectorymobile.model.canStop
@@ -50,21 +54,17 @@ import uniffi.trajectorymobile.MobileTunnelState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TrajectoryApp(viewModel: TrajectoryViewModel) {
+fun TrajectoryApp(
+    viewModel: TrajectoryViewModel,
+    onConnectRequested: (AndroidConnectionMode) -> Unit,
+) {
     val state by viewModel.uiState.collectAsState()
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text("Trajectory Mobile", fontWeight = FontWeight.Bold)
-                        Text(
-                            "Recursive DNS control surface",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    Text("Trajectory", fontWeight = FontWeight.Bold)
                 },
             )
         },
@@ -83,11 +83,11 @@ fun TrajectoryApp(viewModel: TrajectoryViewModel) {
                 modifier = Modifier
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState())
-                    .padding(16.dp),
+                .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 HeroCard(state = state)
-                ConfigCard(state = state, viewModel = viewModel)
+                ConfigCard(state = state, viewModel = viewModel, onConnectRequested = onConnectRequested)
                 StatsRow(state = state)
                 LogsCard(state = state, onClear = viewModel::clearLogs)
             }
@@ -116,7 +116,7 @@ private fun HeroCard(state: MobileUiState) {
                     }
                 }
                 Column {
-                    Text("Fast local tunnel control", style = MaterialTheme.typography.headlineSmall, color = Color.White)
+                    Text("Trajectory", style = MaterialTheme.typography.headlineSmall, color = Color.White)
                     Text(
                         state.status,
                         style = MaterialTheme.typography.bodyMedium,
@@ -136,56 +136,93 @@ private fun HeroCard(state: MobileUiState) {
 }
 
 @Composable
-private fun ConfigCard(state: MobileUiState, viewModel: TrajectoryViewModel) {
+private fun ConfigCard(
+    state: MobileUiState,
+    viewModel: TrajectoryViewModel,
+    onConnectRequested: (AndroidConnectionMode) -> Unit,
+) {
+    val showAdvanced = remember { mutableStateOf(false) }
+
     Card(
         colors = CardDefaults.cardColors(containerColor = Color(0xFF161E24)),
         shape = RoundedCornerShape(24.dp),
     ) {
         Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Tunnel profile", style = MaterialTheme.typography.titleLarge, color = Color.White)
-            OutlinedTextField(
-                value = state.domain,
-                onValueChange = viewModel::updateDomain,
-                label = { Text("Authoritative domain") },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = state.canStart,
-            )
+            Text("Connection", style = MaterialTheme.typography.titleLarge, color = Color.White)
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(
-                    value = state.listenPortText,
-                    onValueChange = viewModel::updateListenPort,
-                    label = { Text("Listen port") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                ModeButton(
+                    label = "VPN",
+                    selected = state.connectionMode == AndroidConnectionMode.VPN,
+                    onClick = { viewModel.updateConnectionMode(AndroidConnectionMode.VPN) },
                     modifier = Modifier.weight(1f),
-                    enabled = state.canStart,
                 )
-                OutlinedTextField(
-                    value = state.keepAliveText,
-                    onValueChange = viewModel::updateKeepAlive,
-                    label = { Text("Keep-alive ms") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                ModeButton(
+                    label = "Proxy",
+                    selected = state.connectionMode == AndroidConnectionMode.PROXY,
+                    onClick = { viewModel.updateConnectionMode(AndroidConnectionMode.PROXY) },
                     modifier = Modifier.weight(1f),
-                    enabled = state.canStart,
                 )
             }
             OutlinedTextField(
-                value = state.resolversText,
-                onValueChange = viewModel::updateResolvers,
-                label = { Text("Recursive resolvers") },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(180.dp),
-                enabled = state.canStart,
+                value = state.accessKey,
+                onValueChange = viewModel::updateAccessKey,
+                label = { Text("Access key") },
+                supportingText = { Text("Paste your key.") },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = state.state == MobileTunnelState.IDLE || state.state == MobileTunnelState.FAILED,
+                singleLine = true,
             )
+            OutlinedTextField(
+                value = state.domain,
+                onValueChange = viewModel::updateDomain,
+                label = { Text("Server") },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = state.state == MobileTunnelState.IDLE || state.state == MobileTunnelState.FAILED,
+            )
+            if (state.connectionMode == AndroidConnectionMode.PROXY) {
+                ProxyHelpCard(state = state)
+            }
+            TextButton(onClick = { showAdvanced.value = !showAdvanced.value }) {
+                Text(if (showAdvanced.value) "Hide advanced settings" else "Advanced settings")
+            }
+            if (showAdvanced.value) {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = state.listenPortText,
+                        onValueChange = viewModel::updateListenPort,
+                        label = { Text("Local proxy port") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                        enabled = state.state == MobileTunnelState.IDLE || state.state == MobileTunnelState.FAILED,
+                    )
+                    OutlinedTextField(
+                        value = state.keepAliveText,
+                        onValueChange = viewModel::updateKeepAlive,
+                        label = { Text("Keep-alive") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                        enabled = state.state == MobileTunnelState.IDLE || state.state == MobileTunnelState.FAILED,
+                    )
+                }
+                OutlinedTextField(
+                    value = state.resolversText,
+                    onValueChange = viewModel::updateResolvers,
+                    label = { Text("Resolvers") },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(180.dp),
+                    enabled = state.state == MobileTunnelState.IDLE || state.state == MobileTunnelState.FAILED,
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
-                    onClick = viewModel::startTunnel,
+                    onClick = { onConnectRequested(state.connectionMode) },
                     enabled = state.canStart,
                     modifier = Modifier.weight(1f),
                 ) {
                     Icon(Icons.Rounded.Bolt, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
-                    Text("Start")
+                    Text(if (state.connectionMode == AndroidConnectionMode.VPN) "Connect" else "Start proxy")
                 }
                 Button(
                     onClick = viewModel::stopTunnel,
@@ -194,9 +231,46 @@ private fun ConfigCard(state: MobileUiState, viewModel: TrajectoryViewModel) {
                 ) {
                     Icon(Icons.Rounded.StopCircle, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
-                    Text("Stop")
+                    Text("Disconnect")
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ModeButton(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (selected) {
+        Button(onClick = onClick, modifier = modifier) {
+            Text(label)
+        }
+    } else {
+        OutlinedButton(onClick = onClick, modifier = modifier) {
+            Text(label)
+        }
+    }
+}
+
+@Composable
+private fun ProxyHelpCard(state: MobileUiState) {
+    Surface(
+        color = Color(0xFF111A22),
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("App proxy", color = Color.White, style = MaterialTheme.typography.titleMedium)
+            Text("SOCKS5 host: 127.0.0.1", color = Color(0xFFD8E4EC))
+            Text("Port: ${state.listenPortText}", color = Color(0xFFD8E4EC))
+            Text(
+                "Use this in apps that support custom proxy settings.",
+                color = Color(0xFF9DB0BD),
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }
@@ -208,10 +282,7 @@ private fun StatsRow(state: MobileUiState) {
         StatCard("Resolvers", state.activeResolvers.toString(), Modifier.weight(1f))
     }
     Spacer(Modifier.height(12.dp))
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        StatCard("Listen", state.listenAddress, Modifier.weight(1f))
-        StatCard("Version", state.version, Modifier.weight(1f))
-    }
+    StatCard("Version", state.version, Modifier.fillMaxWidth())
 }
 
 @Composable
@@ -240,12 +311,12 @@ private fun LogsCard(state: MobileUiState, onClear: () -> Unit) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Diagnostics", style = MaterialTheme.typography.titleLarge, color = Color.White)
+                Text("Activity", style = MaterialTheme.typography.titleLarge, color = Color.White)
                 TextButton(onClick = onClear) { Text("Clear log") }
             }
             if (state.logs.isEmpty()) {
                 Text(
-                    "No events yet. Start the tunnel to watch status changes and Rust-side diagnostics.",
+                    "No activity yet.",
                     color = Color(0xFFB1BBC4),
                 )
             } else {
@@ -267,13 +338,6 @@ private fun LogsCard(state: MobileUiState, onClear: () -> Unit) {
                         }
                     }
                 }
-            }
-            if (state.state == MobileTunnelState.IDLE) {
-                Text(
-                    "Full-device VPN mode is not wired yet. This mobile client controls the real Rust tunnel core and prepares the Android VpnService integration point.",
-                    color = Color(0xFFB8C6D0),
-                    style = MaterialTheme.typography.bodySmall,
-                )
             }
         }
     }

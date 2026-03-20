@@ -8,7 +8,9 @@ description = "Shared pure-Rust transport engine for the Trajectory recursive-DN
 
 [dependencies]
 anyhow.workspace = true
+blake3 = { version = "1.8", features = ["pure"] }
 data-encoding = "2.8"
 hickory-proto = "0.25"
 rand.workspace = true
+serde.workspace = true
 tokio.workspace = true

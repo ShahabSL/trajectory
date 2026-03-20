@@ -14,7 +14,9 @@ What works repo-side:
 - real SwiftUI application sources
 - real view model wired to the generated Rust bindings
 - persistent configuration path via `@AppStorage`
+- required access key stored locally with the tunnel profile
 - packet-tunnel extension source and project structure
+- generated Swift bindings expose the same authenticated mobile controller used on Android
 
 What still depends on external Apple tooling:
 

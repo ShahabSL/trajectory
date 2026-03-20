@@ -1,3 +1,4 @@
+use crate::auth::{ClientAccessKey, AUTH_TAG_LEN};
 use crate::protocol::{
     build_probe_query, build_query, parse_dns_id, parse_response_meta, DOWNLINK_WINDOW, FLAG_DATA,
     FLAG_DOWNLINK, FLAG_FIN, KEEPALIVE_MS, MAX_INFLIGHT_PER_RESOLVER, MAX_QUERY_PAYLOAD,
@@ -18,6 +19,7 @@ pub struct ClientConfig {
     pub listen: SocketAddr,
     pub resolvers: Vec<SocketAddr>,
     pub domain: String,
+    pub access_key: ClientAccessKey,
     pub keep_alive_interval: Duration,
     pub request_timeout: Duration,
 }
@@ -52,6 +54,16 @@ enum QueryKind {
     KeepAlive,
 }
 
+fn debug_client_enabled() -> bool {
+    std::env::var_os("TRAJECTORY_DEBUG").is_some()
+}
+
+fn debug_client_log(message: impl AsRef<str>) {
+    if debug_client_enabled() {
+        eprintln!("[trajectory-client] {}", message.as_ref());
+    }
+}
+
 pub async fn run(config: ClientConfig) -> Result<()> {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     run_until(config, shutdown_rx).await
@@ -80,15 +92,27 @@ pub async fn run_until(config: ClientConfig, mut shutdown_rx: watch::Receiver<bo
 async fn handle_stream(stream: TcpStream, config: ClientConfig) -> Result<()> {
     let session_id = thread_rng().gen::<u64>();
     let (mut tcp_reader, mut tcp_writer) = stream.into_split();
+    debug_client_log(format!(
+        "accepted session {session_id:016x} for domain {} via {} resolvers",
+        config.domain,
+        config.resolvers.len()
+    ));
 
     let mut probed = Vec::with_capacity(config.resolvers.len());
     let (resp_tx, mut resp_rx) = mpsc::unbounded_channel::<(usize, Vec<u8>)>();
     for addr in config.resolvers.iter().copied() {
         let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
         socket.connect(addr).await?;
-        let srtt = probe_resolver(&socket, &config.domain, config.request_timeout)
-            .await
-            .unwrap_or(Duration::from_millis(2_000));
+        let srtt = match probe_resolver(&socket, &config.domain, config.request_timeout).await {
+            Ok(srtt) => {
+                debug_client_log(format!("resolver {addr} probe ok in {} ms", srtt.as_millis()));
+                srtt
+            }
+            Err(error) => {
+                debug_client_log(format!("resolver {addr} probe failed: {error:#}"));
+                Duration::from_millis(2_000)
+            }
+        };
         probed.push((socket, srtt));
     }
     probed.sort_by_key(|(_, srtt)| *srtt);
@@ -124,21 +148,25 @@ async fn handle_stream(stream: TcpStream, config: ClientConfig) -> Result<()> {
             penalized_until: Instant::now(),
         });
     }
+    debug_client_log(format!("session {session_id:016x} selected {} active resolvers", resolvers.len()));
     let (uplink_tx, mut uplink_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
         loop {
             match tcp_reader.read(&mut buf).await {
                 Ok(0) => {
+                    debug_client_log("local tcp stream closed");
                     let _ = uplink_tx.send(Vec::new());
                     break;
                 }
                 Ok(len) => {
+                    debug_client_log(format!("read {len} bytes from local tcp stream"));
                     if uplink_tx.send(buf[..len].to_vec()).is_err() {
                         break;
                     }
                 }
                 Err(_) => {
+                    debug_client_log("local tcp stream read failed");
                     let _ = uplink_tx.send(Vec::new());
                     break;
                 }
@@ -155,6 +183,7 @@ async fn handle_stream(stream: TcpStream, config: ClientConfig) -> Result<()> {
     let mut local_closed = false;
     let mut last_send = Instant::now() - config.keep_alive_interval;
     let mut read_closed_sent = false;
+    let mut session_bootstrapped = false;
 
     loop {
         while let Ok(chunk) = uplink_rx.try_recv() {
@@ -177,7 +206,8 @@ async fn handle_stream(stream: TcpStream, config: ClientConfig) -> Result<()> {
         }
 
         while let Ok((resolver_index, bytes)) = resp_rx.try_recv() {
-            if let Ok((dns_id, maybe_response)) = parse_response_meta(&bytes) {
+            match parse_response_meta(&bytes) {
+                Ok((dns_id, maybe_response)) => {
                 if let Some(meta) = in_flight.remove(&dns_id) {
                     if let QueryKind::Uplink(seq) = meta.kind {
                         if let Some(chunk) = pending.get_mut(&seq) {
@@ -188,10 +218,21 @@ async fn handle_stream(stream: TcpStream, config: ClientConfig) -> Result<()> {
                     resolver.in_flight = resolver.in_flight.saturating_sub(1);
                     match maybe_response {
                         Some(response) => {
+                            if !response.verify(&config.access_key).unwrap_or(false) {
+                                debug_client_log(format!(
+                                    "resolver {} returned response with invalid auth tag",
+                                    config.resolvers[resolver_index]
+                                ));
+                                resolver.timed_out += 1;
+                                let penalty = Duration::from_millis(750 * resolver.timed_out.min(4));
+                                resolver.penalized_until = Instant::now() + penalty;
+                                continue;
+                            }
                             resolver.sent += 1;
                             resolver.timed_out = resolver.timed_out.saturating_sub(1);
                             let rtt = meta.sent_at.elapsed();
                             resolver.srtt = blend_rtt(resolver.srtt, rtt);
+                            session_bootstrapped = true;
                             if response.ack > remote_ack {
                                 remote_ack = response.ack;
                                 pending.retain(|seq, _| *seq >= remote_ack);
@@ -207,6 +248,11 @@ async fn handle_stream(stream: TcpStream, config: ClientConfig) -> Result<()> {
                             }
                         }
                         None => {
+                            debug_client_log(format!(
+                                "resolver {} returned empty response for {:?}",
+                                config.resolvers[resolver_index],
+                                meta.kind
+                            ));
                             resolver.timed_out += 1;
                             let penalty = Duration::from_millis(750 * resolver.timed_out.min(4));
                             resolver.penalized_until = Instant::now() + penalty;
@@ -217,6 +263,13 @@ async fn handle_stream(stream: TcpStream, config: ClientConfig) -> Result<()> {
                             }
                         }
                     }
+                }
+                }
+                Err(error) => {
+                    debug_client_log(format!(
+                        "failed to parse dns response from resolver {}: {error:#}",
+                        config.resolvers[resolver_index]
+                    ));
                 }
             }
         }
@@ -249,8 +302,13 @@ async fn handle_stream(stream: TcpStream, config: ClientConfig) -> Result<()> {
 
         while in_flight.len() < WINDOW_SIZE {
             let candidate = pick_chunk(&mut pending, config.request_timeout);
-            let down_request = pick_down_request(down_next, &down_pending, &in_flight);
+            let down_request = if session_bootstrapped {
+                pick_down_request(down_next, &down_pending, &in_flight)
+            } else {
+                None
+            };
             let should_poll = candidate.is_none()
+                && session_bootstrapped
                 && (down_request.is_some()
                     || (pending.is_empty()
                         && (in_flight.len() < POLL_WINDOW
@@ -281,16 +339,25 @@ async fn handle_stream(stream: TcpStream, config: ClientConfig) -> Result<()> {
                 (0, down_next, Vec::new(), QueryKind::KeepAlive)
             };
             let request_id = thread_rng().gen::<u32>();
-            let request = crate::protocol::RequestPacket {
+            let mut request = crate::protocol::RequestPacket {
                 request_id,
                 session_id,
                 flags,
                 down_ack: down_next,
                 seq,
+                client_id: 0,
+                auth_tag: [0; AUTH_TAG_LEN],
                 payload,
             };
+            request.sign(&config.access_key)?;
             let (dns_id, wire) = build_query(&request, &config.domain)?;
             resolvers[resolver_index].socket.send(&wire).await?;
+            debug_client_log(format!(
+                "sent {:?} request {} via resolver {}",
+                kind,
+                dns_id,
+                config.resolvers[resolver_index]
+            ));
             resolvers[resolver_index].in_flight += 1;
             in_flight.insert(
                 dns_id,
@@ -383,11 +450,17 @@ pub fn parse_socket_addr(value: &str, default_port: u16) -> Result<SocketAddr> {
         .with_context(|| format!("invalid socket address {value}"))
 }
 
-pub fn default_client_config(listen: SocketAddr, resolvers: Vec<SocketAddr>, domain: String) -> ClientConfig {
+pub fn default_client_config(
+    listen: SocketAddr,
+    resolvers: Vec<SocketAddr>,
+    domain: String,
+    access_key: ClientAccessKey,
+) -> ClientConfig {
     ClientConfig {
         listen,
         resolvers,
         domain,
+        access_key,
         keep_alive_interval: Duration::from_millis(KEEPALIVE_MS),
         request_timeout: Duration::from_millis(QUERY_TIMEOUT_MS),
     }

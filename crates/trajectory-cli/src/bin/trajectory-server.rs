@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use trajectory_cli::load_client_registry;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
@@ -12,8 +15,9 @@ async fn main() {
 async fn run() -> Result<()> {
     let mut listen_port = 53u16;
     let mut bind_host = "0.0.0.0".to_string();
-    let mut target_address = "127.0.0.1:22".parse::<SocketAddr>().unwrap();
+    let mut target_address = "127.0.0.1:1080".parse::<SocketAddr>().unwrap();
     let mut domain = None::<String>;
+    let mut client_db = None::<PathBuf>;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -35,6 +39,9 @@ async fn run() -> Result<()> {
                     .context("invalid target address")?;
             }
             "--domain" | "-d" => domain = Some(args.next().context("missing domain")?),
+            "--client-db" => {
+                client_db = Some(PathBuf::from(args.next().context("missing client db path")?));
+            }
             "--cert" | "-c" => {
                 let _ = args.next().context("missing cert path")?;
             }
@@ -46,6 +53,15 @@ async fn run() -> Result<()> {
     }
 
     let domain = domain.context("missing required --domain")?;
+    let client_db = client_db.context("missing required --client-db")?;
+    let registry = load_client_registry(&client_db)?;
+    let active_keys = registry.active_keys()?;
+    if active_keys.is_empty() {
+        anyhow::bail!(
+            "client registry {} does not contain any enabled client keys",
+            client_db.display()
+        );
+    }
     let bind = format!("{bind_host}:{listen_port}")
         .parse()
         .with_context(|| format!("invalid bind address {bind_host}:{listen_port}"))?;
@@ -53,6 +69,7 @@ async fn run() -> Result<()> {
         bind,
         domain,
         target: target_address,
+        authorized_clients: Arc::new(active_keys),
     })
     .await
 }

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
+use trajectory_core::auth::ClientAccessKey;
 use trajectory_core::client::{
     default_client_config, parse_socket_addr, require_resolvers, run_until, ClientConfig,
 };
@@ -15,6 +16,7 @@ const DEFAULT_KEEP_ALIVE_MS: u64 = 50;
 
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct MobileTunnelConfig {
+    pub access_key: String,
     pub domain: String,
     pub listen_port: u16,
     pub keep_alive_ms: u64,
@@ -80,6 +82,7 @@ struct ControllerInner {
 #[uniffi::export]
 pub fn default_mobile_config() -> MobileTunnelConfig {
     MobileTunnelConfig {
+        access_key: String::new(),
         domain: DEFAULT_DOMAIN.to_owned(),
         listen_port: 7000,
         keep_alive_ms: DEFAULT_KEEP_ALIVE_MS,
@@ -111,7 +114,7 @@ impl TrajectoryMobileController {
             inner: Arc::new(Mutex::new(ControllerInner {
                 snapshot: MobileTunnelSnapshot {
                     state: MobileTunnelState::Idle,
-                    status_text: "Ready to start a local tunnel".to_owned(),
+                    status_text: "Disconnected".to_owned(),
                     listen_address: "127.0.0.1:7000".to_owned(),
                     active_resolvers: recommended_resolvers().len() as u32,
                     last_error: None,
@@ -156,7 +159,7 @@ impl TrajectoryMobileController {
             state.stop_tx = Some(stop_tx);
             state.snapshot = MobileTunnelSnapshot {
                 state: MobileTunnelState::Starting,
-                status_text: format!("Starting tunnel on {listen_address}"),
+                status_text: "Connecting".to_owned(),
                 listen_address: listen_address.clone(),
                 active_resolvers: resolver_count,
                 last_error: None,
@@ -172,7 +175,7 @@ impl TrajectoryMobileController {
                 let mut state = inner.lock().unwrap();
                 if state.active_run_id == Some(run_id) {
                     state.snapshot.state = MobileTunnelState::Running;
-                    state.snapshot.status_text = format!("Tunnel listening on {listen_address}");
+                    state.snapshot.status_text = "Connected".to_owned();
                     state.logs
                         .push(log_entry(&format!("Tunnel active on {listen_address}")));
                 }
@@ -206,9 +209,9 @@ impl TrajectoryMobileController {
                     let was_stopping = state.snapshot.state == MobileTunnelState::Stopping;
                     state.snapshot.state = MobileTunnelState::Idle;
                     state.snapshot.status_text = if was_stopping {
-                        "Tunnel stopped cleanly".to_owned()
+                        "Disconnected".to_owned()
                     } else {
-                        "Tunnel finished".to_owned()
+                        "Disconnected".to_owned()
                     };
                     state.snapshot.last_error = None;
                     state.logs.push(log_entry(if was_stopping {
@@ -233,7 +236,7 @@ impl TrajectoryMobileController {
                 return Err(MobileError::NotRunning);
             };
             state.snapshot.state = MobileTunnelState::Stopping;
-            state.snapshot.status_text = "Stopping tunnel".to_owned();
+            state.snapshot.status_text = "Disconnecting".to_owned();
             state.logs.push(log_entry("Stopping mobile tunnel"));
             stop_tx
         };
@@ -262,6 +265,8 @@ fn build_core_config(config: &MobileTunnelConfig) -> Result<ClientConfig, Mobile
             "domain must not be empty".to_owned(),
         ));
     }
+    let access_key = ClientAccessKey::parse(config.access_key.trim())
+        .map_err(|error| MobileError::InvalidConfiguration(format!("invalid access key: {error:#}")))?;
 
     let listen: SocketAddr = format!("127.0.0.1:{}", config.listen_port)
         .parse()
@@ -276,7 +281,8 @@ fn build_core_config(config: &MobileTunnelConfig) -> Result<ClientConfig, Mobile
     require_resolvers(&resolvers)
         .map_err(|error| MobileError::InvalidConfiguration(format!("{error:#}")))?;
 
-    let mut core_config = default_client_config(listen, resolvers, domain.to_owned());
+    let mut core_config =
+        default_client_config(listen, resolvers, domain.to_owned(), access_key);
     core_config.keep_alive_interval = Duration::from_millis(config.keep_alive_ms.max(20));
     Ok(core_config)
 }

@@ -4,11 +4,13 @@
 
 Architecture:
 
-- Jetpack Compose UI for the control surface
+- Jetpack Compose UI for the client
 - DataStore-backed settings persistence
 - UniFFI-generated Kotlin bindings in `app/src/main/java/uniffi/trajectorymobile`
 - the Rust mobile bridge crate in `crates/trajectory-mobile`
 - Gradle-driven Rust JNI packaging via `cargo ndk`
+- Android `VpnService` for the device traffic path
+- `hev-socks5-tunnel` as the tun-to-SOCKS bridge
 
 What works repo-side:
 
@@ -16,9 +18,13 @@ What works repo-side:
 - real Compose UI
 - real Kotlin code wired to the generated Rust bindings
 - persistent configuration model
+- required access key stored locally with the rest of the tunnel profile
+- real VPN service path for device traffic
 - tunnel start/stop/status/log control path
 - Gradle builds the Rust bridge for `arm64-v8a` and `x86_64`
-- debug APK assembly packages `libtrajectory_mobile.so` into the app
+- Gradle builds and packages `libhev-socks5-tunnel.so` for Android
+- debug APK assembly packages both native libraries into the app
+- emulator smoke tests can inject an access key, approve VPN consent, and verify traffic
 
 What still depends on external mobile tooling:
 
@@ -49,9 +55,10 @@ scripts/test_android_emulator.sh
 The smoke test verifies:
 
 - the APK installs cleanly
-- the app launches with an autostart hook for deterministic testing
-- the foreground service starts
-- the tunnel listens on `127.0.0.1:7000`
-- the service survives after the app is backgrounded
+- the app launches with deterministic access-key/config injection plus autostart
+- the VPN permission flow is accepted automatically in the emulator
+- the local SOCKS listener opens on `127.0.0.1:7000`
+- the VPN service starts and stays in foreground mode
+- browser traffic increases the VPN counters
 
-Why this matters: the app code is real, the Kotlin layer calls the shared Rust tunnel controller, and the APK now bundles the Rust mobile bridge instead of stopping at UI scaffolding.
+Why this matters: the Android app is no longer just a controller around the Rust client. It now owns a real `VpnService` plus a tun-to-SOCKS bridge, which is the standard way to carry normal app traffic on Android.

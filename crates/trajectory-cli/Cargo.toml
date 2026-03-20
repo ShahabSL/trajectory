@@ -8,6 +8,8 @@ description = "CLI client and server binaries for the Trajectory recursive-DNS t
 
 [dependencies]
 anyhow.workspace = true
+ratatui.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 trajectory-core = { path = "../trajectory-core" }
 
@@ -18,3 +20,7 @@ path = "src/bin/trajectory-client.rs"
 [[bin]]
 name = "trajectory-server"
 path = "src/bin/trajectory-server.rs"
+
+[[bin]]
+name = "trajectory-server-tui"
+path = "src/bin/trajectory-server-tui.rs"

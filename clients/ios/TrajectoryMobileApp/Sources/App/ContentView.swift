@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var model: TunnelViewModel
+    @AppStorage("trajectory.accessKey") private var accessKey = ""
     @AppStorage("trajectory.domain") private var domain = defaultMobileConfig().domain
     @AppStorage("trajectory.listenPort") private var listenPort = String(defaultMobileConfig().listenPort)
     @AppStorage("trajectory.keepAliveMs") private var keepAliveMs = String(defaultMobileConfig().keepAliveMs)
@@ -30,6 +31,7 @@ struct ContentView: View {
         }
         .task {
             model.applyStoredConfig(
+                accessKey: accessKey,
                 domain: domain,
                 listenPort: listenPort,
                 keepAliveMs: keepAliveMs,
@@ -38,9 +40,17 @@ struct ContentView: View {
         }
     }
 
+    private var canEditProfile: Bool {
+        model.snapshot.state == .idle || model.snapshot.state == .failed
+    }
+
+    private var canStartTunnel: Bool {
+        canEditProfile && !accessKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private var hero: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Recursive DNS tunnel control", systemImage: "network")
+            Label("Connect with your access key", systemImage: "network")
                 .font(.headline)
                 .foregroundStyle(Color.white)
             Text(model.snapshot.statusText)
@@ -59,12 +69,17 @@ struct ContentView: View {
 
     private var configurationCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Tunnel profile")
+            Text("Connection")
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(.white)
 
             Group {
-                TextField("Authoritative domain", text: $domain)
+                TextField("Access key", text: $accessKey)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                TextField("Server", text: $domain)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
                 TextField("Listen port", text: $listenPort)
                     .keyboardType(.numberPad)
                 TextField("Keep-alive ms", text: $keepAliveMs)
@@ -76,10 +91,12 @@ struct ContentView: View {
             .padding(12)
             .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .foregroundStyle(.white)
+            .disabled(!canEditProfile)
 
             HStack(spacing: 12) {
                 Button {
                     model.applyStoredConfig(
+                        accessKey: accessKey,
                         domain: domain,
                         listenPort: listenPort,
                         keepAliveMs: keepAliveMs,
@@ -91,7 +108,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!model.canStart)
+                .disabled(!canStartTunnel)
 
                 Button {
                     model.stopTunnel()
@@ -148,7 +165,7 @@ struct ContentView: View {
             }
 
             if model.logs.isEmpty {
-                Text("No events yet. Start the tunnel to watch the Rust control layer report status changes.")
+                Text("No activity yet.")
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(model.logs.prefix(20), id: \.self) { entry in
@@ -165,9 +182,6 @@ struct ContentView: View {
                 }
             }
 
-            Text("Packet Tunnel mode is scaffolded but not yet wired to packet forwarding. The app currently controls the real Rust loopback tunnel session.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
         }
         .padding(20)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))

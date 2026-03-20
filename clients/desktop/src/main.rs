@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime};
 use tokio::sync::watch;
+use trajectory_core::auth::ClientAccessKey;
 use trajectory_core::client::{
     default_client_config, parse_socket_addr, require_resolvers, ClientConfig,
 };
@@ -53,6 +54,7 @@ struct TunnelHandle {
 }
 
 struct TrajectoryDesktopApp {
+    access_key: String,
     domain: String,
     resolvers_input: String,
     listen_port: String,
@@ -69,12 +71,13 @@ impl Default for TrajectoryDesktopApp {
     fn default() -> Self {
         let (event_tx, event_rx) = mpsc::channel();
         Self {
+            access_key: String::new(),
             domain: "t.7-b.cc".to_owned(),
             resolvers_input: "1.1.1.1:53\n1.0.0.1:53\n8.8.8.8:53\n8.8.4.4:53\n9.9.9.9:53".to_owned(),
             listen_port: "7000".to_owned(),
             keep_alive_ms: "50".to_owned(),
             run_state: RunState::Stopped,
-            status_line: "Ready to start a local tunnel.".to_owned(),
+            status_line: "Ready".to_owned(),
             logs: vec![timestamped("Desktop client initialized")],
             event_tx,
             event_rx,
@@ -98,9 +101,7 @@ impl eframe::App for TrajectoryDesktopApp {
                             .color(rgb(242, 242, 235)),
                     );
                     ui.label(
-                        egui::RichText::new(
-                            "Pure-Rust recursive-DNS tunnel control room for browser and SSH traffic.",
-                        )
+                        egui::RichText::new("Connect with your access key and start browsing.")
                         .color(rgb(181, 187, 180))
                         .size(15.0),
                     );
@@ -119,6 +120,14 @@ impl eframe::App for TrajectoryDesktopApp {
                 panel_card(ui, "Connection", |ui| {
                     field_label(ui, "Authoritative domain");
                     ui.text_edit_singleline(&mut self.domain);
+                    ui.add_space(10.0);
+
+                    field_label(ui, "Access key");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.access_key)
+                            .password(true)
+                            .desired_width(f32::INFINITY),
+                    );
                     ui.add_space(10.0);
 
                     field_label(ui, "Local TCP listen port");
@@ -171,27 +180,34 @@ impl eframe::App for TrajectoryDesktopApp {
                 });
 
                 ui.add_space(14.0);
-                panel_card(ui, "How to use it", |ui| {
-                    ui.label(instruction("1. Start the tunnel here."));
-                    ui.label(instruction("2. SSH through 127.0.0.1:7000."));
-                    ui.label(instruction("3. Or run: ssh -N -D 127.0.0.1:1080 -p 7000 root@127.0.0.1"));
-                    ui.label(instruction("4. Point Firefox at SOCKS5 127.0.0.1:1080 with proxy DNS enabled."));
+                panel_card(ui, "Connection", |ui| {
+                    ui.label(instruction("Access key: required"));
+                    ui.label(instruction("Server: t.7-b.cc"));
+                    ui.label(instruction("Status and activity appear on the right."));
                 });
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.columns(2, |columns| {
                 panel_card(&mut columns[0], "Live status", |ui| {
-                    stat_row(ui, "Mode", "Recursive DNS over UDP :53");
-                    stat_row(ui, "Desktop target", "Local SOCKS / SSH endpoint");
+                    stat_row(ui, "Status", run_state_label(self.run_state));
                     stat_row(ui, "Listen", &format!("127.0.0.1:{}", self.listen_port));
                     stat_row(ui, "Domain", &self.domain);
+                    stat_row(
+                        ui,
+                        "Access key",
+                        if self.access_key.trim().is_empty() {
+                            "Not set"
+                        } else {
+                            "Configured"
+                        },
+                    );
                 });
 
                 panel_card(&mut columns[1], "Diagnostics", |ui| {
-                    stat_row(ui, "State", run_state_label(self.run_state));
                     stat_row(ui, "Resolver count", &self.active_resolver_count().to_string());
                     stat_row(ui, "Keep-alive", &format!("{} ms", self.keep_alive_ms));
+                    stat_row(ui, "State", run_state_label(self.run_state));
                 });
             });
 
@@ -283,11 +299,14 @@ impl TrajectoryDesktopApp {
             .map(|value| parse_socket_addr(value, 53))
             .collect::<Result<Vec<_>>>()?;
         require_resolvers(&resolvers)?;
+        let access_key = ClientAccessKey::parse(self.access_key.trim())
+            .context("invalid access key")?;
         let listen = format!("127.0.0.1:{port}")
             .parse()
             .context("invalid local listen address")?;
 
-        let mut config = default_client_config(listen, resolvers, self.domain.trim().to_owned());
+        let mut config =
+            default_client_config(listen, resolvers, self.domain.trim().to_owned(), access_key);
         config.keep_alive_interval = Duration::from_millis(keep_alive_ms);
         Ok(config)
     }
@@ -455,7 +474,8 @@ mod tests {
 
     #[test]
     fn parses_client_config() {
-        let app = TrajectoryDesktopApp::default();
+        let mut app = TrajectoryDesktopApp::default();
+        app.access_key = ClientAccessKey::generate().to_display_string();
         let config = app.parse_config().unwrap();
         assert_eq!(config.domain, "t.7-b.cc");
         assert_eq!(config.listen.port(), 7000);

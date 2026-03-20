@@ -1,6 +1,8 @@
 # Trajectory
 
 Trajectory is a pure-Rust DNS tunnel optimized for recursive resolvers on raw UDP DNS transport.
+Server operators generate per-client access keys, and every client must present one before the
+tunnel will pass traffic.
 
 The repository now follows a standard workspace layout:
 
@@ -36,13 +38,32 @@ python3 scripts/generate_mobile_bindings.py --profile debug
 
 ## Run the CLI
 
-Server:
+Generate client keys with the server TUI:
+
+```bash
+cargo run -p trajectory-cli --bin trajectory-server-tui -- \
+  --dns-listen-port 53 \
+  --target-address 127.0.0.1:1080 \
+  --domain t.7-b.cc \
+  --client-db trajectory-clients.json
+```
+
+Key commands:
+
+- `g`: generate a new client access key
+- `e`: enable or disable the selected client
+- `d`: delete the selected client, with confirmation
+- `s`: start or stop the authenticated server
+- `q`: quit
+
+Run the server directly once a client registry exists:
 
 ```bash
 ./target/release/trajectory-server \
   --dns-listen-port 53 \
-  --target-address 127.0.0.1:22 \
-  --domain t.7-b.cc
+  --target-address 127.0.0.1:1080 \
+  --domain t.7-b.cc \
+  --client-db trajectory-clients.json
 ```
 
 Client:
@@ -56,6 +77,7 @@ Client:
   --resolver 8.8.4.4:53 \
   --resolver 9.9.9.9:53 \
   --domain t.7-b.cc \
+  --access-key traj1_0123abcd_BASE32SECRET \
   --congestion-control bbr \
   --keep-alive-interval 50
 ```
@@ -66,7 +88,8 @@ Client:
 cargo run -p trajectory-desktop
 ```
 
-The desktop app configures and runs the same shared Rust client core used by the CLI.
+The desktop app configures and runs the same shared Rust client core used by the CLI, including
+the required access key field normal users need to paste from the server operator.
 
 ## Mobile Clients
 
@@ -79,10 +102,15 @@ They share the same Rust tunnel logic through `crates/trajectory-mobile`, which 
 
 What is implemented now:
 
-- Android app structure with Compose UI, persisted settings, status/log views, and a real bridge to the Rust tunnel controller
-- iPhone app structure with SwiftUI, persisted settings, status/log views, and a real bridge to the Rust tunnel controller
-- packet-tunnel service scaffolding on both platforms so full-device mode can be added without changing the shared core boundary
-- Android Gradle build integration that compiles and packages `libtrajectory_mobile.so` into the debug APK
+- Android app with a real `VpnService` traffic path
+- Android tun-to-SOCKS bridge via `hev-socks5-tunnel`
+- Android Compose UI, persisted settings, access-key entry, status/log views,
+  and a real bridge to the Rust tunnel controller
+- iPhone app structure with SwiftUI, persisted settings, access-key entry, status/log views,
+  and a real bridge to the Rust tunnel controller
+- packet-tunnel service scaffolding on iPhone so full-device mode can be added without changing the shared core boundary
+- Android Gradle build integration that compiles and packages both `libtrajectory_mobile.so`
+  and `libhev-socks5-tunnel.so` into the APK
 
 What still depends on external platform toolchains:
 
@@ -104,21 +132,12 @@ Maintainer release flow is documented in [RELEASING.md](RELEASING.md).
 
 ## Browser Path
 
-Once the client is running, create a local SOCKS proxy on top of the tunnel:
+Once the client is running, use the local Trajectory listener as a SOCKS5 proxy directly.
 
-```bash
-ssh -N -D 127.0.0.1:1080 \
-  -o StrictHostKeyChecking=no \
-  -o UserKnownHostsFile=/dev/null \
-  -o PreferredAuthentications=password \
-  -o PubkeyAuthentication=no \
-  -p 7000 root@127.0.0.1
-```
-
-Then point Firefox at:
+Point Firefox at:
 
 - SOCKS host: `127.0.0.1`
-- Port: `1080`
+- Port: `7000`
 - SOCKS v5
 - Proxy DNS enabled
 
@@ -140,7 +159,19 @@ cargo run -p trajectory-desktop -- --smoke-test
 End-to-end browser harness:
 
 ```bash
-/tmp/run-trajectory-browser-5.sh
+./target/release/trajectory-client \
+  --tcp-listen-port 7000 \
+  --resolver 1.1.1.1:53 \
+  --resolver 1.0.0.1:53 \
+  --resolver 8.8.8.8:53 \
+  --resolver 8.8.4.4:53 \
+  --resolver 9.9.9.9:53 \
+  --domain t.7-b.cc \
+  --access-key traj1_0123abcd_BASE32SECRET \
+  --congestion-control bbr \
+  --keep-alive-interval 50
+
+curl -I --socks5-hostname 127.0.0.1:7000 https://example.com
 ```
 
 ## Release Packaging
@@ -168,14 +199,18 @@ Trajectory is dual-licensed under either:
 
 ## Deploy
 
-Install the server binary and service unit:
+Install the server binary, local SOCKS upstream, client registry, and service units:
 
 ```bash
 install -d -m 755 /opt/trajectory
 install -m 755 target/release/trajectory-server /opt/trajectory/trajectory-server
+install -m 755 /path/to/hev-socks5-server /opt/trajectory/hev-socks5-server
+install -m 640 trajectory-clients.json /opt/trajectory/trajectory-clients.json
+install -m 644 deploy/hev-socks5-server.yml /opt/trajectory/hev-socks5-server.yml
+install -m 644 deploy/trajectory-socks.service /etc/systemd/system/trajectory-socks.service
 install -m 644 deploy/trajectory.service /etc/systemd/system/trajectory.service
 systemctl daemon-reload
-systemctl enable --now trajectory.service
+systemctl enable --now trajectory-socks.service trajectory.service
 ```
 
 If the host previously used `systemd-resolved`, replace `/etc/resolv.conf` with upstream resolvers before or after stopping it:

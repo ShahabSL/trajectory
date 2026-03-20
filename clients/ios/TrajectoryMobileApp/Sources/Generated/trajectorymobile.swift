@@ -722,6 +722,7 @@ public func FfiConverterTypeMobileLogEntry_lower(_ value: MobileLogEntry) -> Rus
 
 
 public struct MobileTunnelConfig: Equatable, Hashable {
+    public var accessKey: String
     public var domain: String
     public var listenPort: UInt16
     public var keepAliveMs: UInt64
@@ -729,7 +730,8 @@ public struct MobileTunnelConfig: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(domain: String, listenPort: UInt16, keepAliveMs: UInt64, resolvers: [String]) {
+    public init(accessKey: String, domain: String, listenPort: UInt16, keepAliveMs: UInt64, resolvers: [String]) {
+        self.accessKey = accessKey
         self.domain = domain
         self.listenPort = listenPort
         self.keepAliveMs = keepAliveMs
@@ -752,6 +754,7 @@ public struct FfiConverterTypeMobileTunnelConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileTunnelConfig {
         return
             try MobileTunnelConfig(
+                accessKey: FfiConverterString.read(from: &buf), 
                 domain: FfiConverterString.read(from: &buf), 
                 listenPort: FfiConverterUInt16.read(from: &buf), 
                 keepAliveMs: FfiConverterUInt64.read(from: &buf), 
@@ -760,6 +763,7 @@ public struct FfiConverterTypeMobileTunnelConfig: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: MobileTunnelConfig, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.accessKey, into: &buf)
         FfiConverterString.write(value.domain, into: &buf)
         FfiConverterUInt16.write(value.listenPort, into: &buf)
         FfiConverterUInt64.write(value.keepAliveMs, into: &buf)

@@ -1,0 +1,9 @@
+main:
+  workers: 2
+  port: 1080
+  listen-address: '127.0.0.1'
+  listen-ipv6-only: false
+
+misc:
+  log-file: stderr
+  log-level: warn

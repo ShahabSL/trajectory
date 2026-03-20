@@ -3,6 +3,7 @@ import SwiftUI
 
 @MainActor
 final class TunnelViewModel: ObservableObject {
+    @Published var accessKey = ""
     @Published var snapshot = MobileTunnelSnapshot(
         state: .idle,
         statusText: "Ready to start a local tunnel",
@@ -31,8 +32,10 @@ final class TunnelViewModel: ObservableObject {
         snapshot.state == .starting || snapshot.state == .running
     }
 
-    func applyStoredConfig(domain: String, listenPort: String, keepAliveMs: String, resolvers: String) {
+    func applyStoredConfig(accessKey: String, domain: String, listenPort: String, keepAliveMs: String, resolvers: String) {
+        self.accessKey = accessKey
         currentConfig = MobileTunnelConfig(
+            accessKey: accessKey.trimmingCharacters(in: .whitespacesAndNewlines),
             domain: domain.trimmingCharacters(in: .whitespacesAndNewlines),
             listenPort: UInt16(listenPort) ?? defaultMobileConfig().listenPort,
             keepAliveMs: UInt64(keepAliveMs) ?? defaultMobileConfig().keepAliveMs,
@@ -46,6 +49,13 @@ final class TunnelViewModel: ObservableObject {
     func startTunnel() {
         Task.detached {
             do {
+                guard !self.accessKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw NSError(
+                        domain: "TrajectoryMobile",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Access key is required"]
+                    )
+                }
                 try self.controller.start(config: self.currentConfig)
                 await self.refresh()
             } catch {

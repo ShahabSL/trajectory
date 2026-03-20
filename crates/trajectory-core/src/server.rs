@@ -1,3 +1,4 @@
+use crate::auth::ClientAccessKey;
 use crate::protocol::{
     build_empty_response, build_response, decode_query_request, parse_query, FLAG_DATA,
     FLAG_DOWNLINK, FLAG_FIN, DNS_MAX_PAYLOAD, MAX_RESPONSE_PAYLOAD, RESPONSE_CHUNK_SIZE,
@@ -11,17 +12,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub bind: SocketAddr,
     pub domain: String,
     pub target: SocketAddr,
+    pub authorized_clients: Arc<HashMap<u32, ClientAccessKey>>,
 }
 
 struct Session {
     writer: tokio::net::tcp::OwnedWriteHalf,
+    client_key: ClientAccessKey,
     next_uplink_seq: u32,
     pending_uplink: BTreeMap<u32, Vec<u8>>,
     next_down_seq: u32,
@@ -37,6 +40,11 @@ struct Shared {
 }
 
 pub async fn run(config: ServerConfig) -> Result<()> {
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    run_until(config, shutdown_rx).await
+}
+
+pub async fn run_until(config: ServerConfig, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
     let socket = Arc::new(UdpSocket::bind(config.bind).await?);
     let shared = Arc::new(Shared {
         sessions: Mutex::new(HashMap::new()),
@@ -58,14 +66,32 @@ pub async fn run(config: ServerConfig) -> Result<()> {
 
     let mut buf = vec![0u8; 2048];
     loop {
-        let (len, peer) = socket.recv_from(&mut buf).await?;
+        let recv = tokio::select! {
+            changed = shutdown_rx.changed() => {
+                changed.ok();
+                return Ok(());
+            }
+            result = socket.recv_from(&mut buf) => result,
+        };
+        let (len, peer) = recv?;
         let packet = buf[..len].to_vec();
         let socket = socket.clone();
         let shared = shared.clone();
         let domain = config.domain.clone();
         let target = config.target;
+        let authorized_clients = config.authorized_clients.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle_query(socket, shared, &domain, target, peer, &packet).await {
+            if let Err(error) = handle_query(
+                socket,
+                shared,
+                &domain,
+                target,
+                peer,
+                &packet,
+                authorized_clients,
+            )
+            .await
+            {
                 eprintln!("server query error: {error:#}");
             }
         });
@@ -79,6 +105,7 @@ async fn handle_query(
     target: SocketAddr,
     peer: SocketAddr,
     packet: &[u8],
+    authorized_clients: Arc<HashMap<u32, ClientAccessKey>>,
 ) -> Result<()> {
     let query = match parse_query(packet) {
         Ok(query) => query,
@@ -97,9 +124,24 @@ async fn handle_query(
             return Ok(());
         }
     };
-    let session = get_or_create_session(shared, request.session_id, target).await?;
+    let Some(access_key) = authorized_clients.get(&request.client_id).cloned() else {
+        let wire = build_empty_response(&query, ResponseCode::NoError)?;
+        socket.send_to(&wire, peer).await?;
+        return Ok(());
+    };
+    if !request.verify(&access_key).unwrap_or(false) {
+        let wire = build_empty_response(&query, ResponseCode::NoError)?;
+        socket.send_to(&wire, peer).await?;
+        return Ok(());
+    }
+    let session = get_or_create_session(shared, request.session_id, target, access_key.clone()).await?;
     let response = {
         let mut session = session.lock().await;
+        if session.client_key.client_id != access_key.client_id {
+            let wire = build_empty_response(&query, ResponseCode::NoError)?;
+            socket.send_to(&wire, peer).await?;
+            return Ok(());
+        }
         session.last_seen = Instant::now();
         apply_down_ack(&mut session, request.down_ack);
 
@@ -122,13 +164,16 @@ async fn handle_query(
             (0, Vec::new())
         };
 
-        crate::protocol::ResponsePacket {
+        let mut response = crate::protocol::ResponsePacket {
             request_id: request.request_id,
             ack: session.next_uplink_seq,
             flags,
             down_seq,
+            auth_tag: [0; crate::auth::AUTH_TAG_LEN],
             payload: down_payload,
-        }
+        };
+        response.sign(&session.client_key)?;
+        response
     };
     let wire = build_response(&query, &response)?;
     socket.send_to(&wire, peer).await?;
@@ -139,6 +184,7 @@ async fn get_or_create_session(
     shared: Arc<Shared>,
     session_id: u64,
     target: SocketAddr,
+    client_key: ClientAccessKey,
 ) -> Result<Arc<Mutex<Session>>> {
     if let Some(existing) = shared.sessions.lock().await.get(&session_id).cloned() {
         return Ok(existing);
@@ -151,6 +197,7 @@ async fn get_or_create_session(
     let (read_half, write_half) = stream.into_split();
     let session = Arc::new(Mutex::new(Session {
         writer: write_half,
+        client_key,
         next_uplink_seq: 0,
         pending_uplink: BTreeMap::new(),
         next_down_seq: 0,
@@ -251,6 +298,7 @@ fn max_down_payload(query: &crate::protocol::ParsedQuery, request_id: u32, ack: 
         ack,
         flags: FLAG_DOWNLINK,
         down_seq,
+        auth_tag: [0; crate::auth::AUTH_TAG_LEN],
         payload: Vec::new(),
     };
     let limit = (query.max_payload as usize).min(DNS_MAX_PAYLOAD as usize);

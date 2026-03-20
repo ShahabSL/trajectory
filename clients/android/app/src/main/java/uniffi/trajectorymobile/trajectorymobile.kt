@@ -1481,6 +1481,8 @@ public object FfiConverterTypeMobileLogEntry: FfiConverterRustBuffer<MobileLogEn
 
 
 data class MobileTunnelConfig (
+    var `accessKey`: kotlin.String
+    , 
     var `domain`: kotlin.String
     , 
     var `listenPort`: kotlin.UShort
@@ -1505,6 +1507,7 @@ public object FfiConverterTypeMobileTunnelConfig: FfiConverterRustBuffer<MobileT
     override fun read(buf: ByteBuffer): MobileTunnelConfig {
         return MobileTunnelConfig(
             FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
             FfiConverterUShort.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterSequenceString.read(buf),
@@ -1512,6 +1515,7 @@ public object FfiConverterTypeMobileTunnelConfig: FfiConverterRustBuffer<MobileT
     }
 
     override fun allocationSize(value: MobileTunnelConfig) = (
+            FfiConverterString.allocationSize(value.`accessKey`) +
             FfiConverterString.allocationSize(value.`domain`) +
             FfiConverterUShort.allocationSize(value.`listenPort`) +
             FfiConverterULong.allocationSize(value.`keepAliveMs`) +
@@ -1519,6 +1523,7 @@ public object FfiConverterTypeMobileTunnelConfig: FfiConverterRustBuffer<MobileT
     )
 
     override fun write(value: MobileTunnelConfig, buf: ByteBuffer) {
+            FfiConverterString.write(value.`accessKey`, buf)
             FfiConverterString.write(value.`domain`, buf)
             FfiConverterUShort.write(value.`listenPort`, buf)
             FfiConverterULong.write(value.`keepAliveMs`, buf)

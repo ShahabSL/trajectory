@@ -1,0 +1,14 @@
+[Unit]
+Description=Trajectory local SOCKS5 upstream
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/trajectory
+ExecStart=/opt/trajectory/hev-socks5-server /opt/trajectory/hev-socks5-server.yml
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

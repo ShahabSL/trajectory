@@ -1,3 +1,4 @@
+use crate::auth::{compute_auth_tag, ClientAccessKey, AUTH_TAG_LEN};
 use anyhow::{anyhow, bail, Context, Result};
 use data_encoding::BASE32_NOPAD;
 use hickory_proto::op::ResponseCode;
@@ -10,7 +11,7 @@ pub const FLAG_DATA: u8 = 1 << 0;
 pub const FLAG_FIN: u8 = 1 << 1;
 pub const FLAG_DOWNLINK: u8 = 1 << 2;
 pub const FLAG_GAP: u8 = 1 << 3;
-pub const MAX_QUERY_PAYLOAD: usize = 120;
+pub const MAX_QUERY_PAYLOAD: usize = 100;
 pub const MAX_RESPONSE_PAYLOAD: usize = 4096;
 pub const RESPONSE_CHUNK_SIZE: usize = 1024;
 pub const DNS_MAX_PAYLOAD: u16 = 1400;
@@ -28,6 +29,8 @@ pub struct RequestPacket {
     pub flags: u8,
     pub down_ack: u32,
     pub seq: u32,
+    pub client_id: u32,
+    pub auth_tag: [u8; AUTH_TAG_LEN],
     pub payload: Vec<u8>,
 }
 
@@ -37,6 +40,7 @@ pub struct ResponsePacket {
     pub ack: u32,
     pub flags: u8,
     pub down_seq: u32,
+    pub auth_tag: [u8; AUTH_TAG_LEN],
     pub payload: Vec<u8>,
 }
 
@@ -52,30 +56,49 @@ pub struct ParsedQuery {
 
 impl RequestPacket {
     pub fn encode(&self) -> Result<Vec<u8>> {
+        self.encode_with_tag(self.auth_tag)
+    }
+
+    fn encode_with_tag(&self, auth_tag: [u8; AUTH_TAG_LEN]) -> Result<Vec<u8>> {
         if self.payload.len() > u16::MAX as usize {
             bail!("request payload too large");
         }
-        let mut out = Vec::with_capacity(24 + self.payload.len());
+        let mut out = Vec::with_capacity(40 + self.payload.len());
         out.push(PROTOCOL_VERSION);
         out.push(self.flags);
         out.extend_from_slice(&self.request_id.to_be_bytes());
         out.extend_from_slice(&self.session_id.to_be_bytes());
         out.extend_from_slice(&self.down_ack.to_be_bytes());
         out.extend_from_slice(&self.seq.to_be_bytes());
+        out.extend_from_slice(&self.client_id.to_be_bytes());
+        out.extend_from_slice(&auth_tag);
         out.extend_from_slice(&(self.payload.len() as u16).to_be_bytes());
         out.extend_from_slice(&self.payload);
         Ok(out)
     }
 
+    pub fn sign(&mut self, access_key: &ClientAccessKey) -> Result<()> {
+        self.client_id = access_key.client_id;
+        self.auth_tag =
+            compute_auth_tag(&access_key.secret, &self.encode_with_tag([0; AUTH_TAG_LEN])?);
+        Ok(())
+    }
+
+    pub fn verify(&self, access_key: &ClientAccessKey) -> Result<bool> {
+        let expected =
+            compute_auth_tag(&access_key.secret, &self.encode_with_tag([0; AUTH_TAG_LEN])?);
+        Ok(self.client_id == access_key.client_id && self.auth_tag == expected)
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 24 {
+        if bytes.len() < 40 {
             bail!("short request");
         }
         if bytes[0] != PROTOCOL_VERSION {
             bail!("bad version");
         }
-        let payload_len = u16::from_be_bytes([bytes[22], bytes[23]]) as usize;
-        if bytes.len() != 24 + payload_len {
+        let payload_len = u16::from_be_bytes([bytes[38], bytes[39]]) as usize;
+        if bytes.len() != 40 + payload_len {
             bail!("bad request length");
         }
         Ok(Self {
@@ -84,36 +107,55 @@ impl RequestPacket {
             flags: bytes[1],
             down_ack: u32::from_be_bytes(bytes[14..18].try_into().unwrap()),
             seq: u32::from_be_bytes(bytes[18..22].try_into().unwrap()),
-            payload: bytes[24..].to_vec(),
+            client_id: u32::from_be_bytes(bytes[22..26].try_into().unwrap()),
+            auth_tag: bytes[26..38].try_into().unwrap(),
+            payload: bytes[40..].to_vec(),
         })
     }
 }
 
 impl ResponsePacket {
     pub fn encode(&self) -> Result<Vec<u8>> {
+        self.encode_with_tag(self.auth_tag)
+    }
+
+    fn encode_with_tag(&self, auth_tag: [u8; AUTH_TAG_LEN]) -> Result<Vec<u8>> {
         if self.payload.len() > u16::MAX as usize {
             bail!("response payload too large");
         }
-        let mut out = Vec::with_capacity(16 + self.payload.len());
+        let mut out = Vec::with_capacity(28 + self.payload.len());
         out.push(PROTOCOL_VERSION);
         out.push(self.flags);
         out.extend_from_slice(&self.request_id.to_be_bytes());
         out.extend_from_slice(&self.ack.to_be_bytes());
         out.extend_from_slice(&self.down_seq.to_be_bytes());
+        out.extend_from_slice(&auth_tag);
         out.extend_from_slice(&(self.payload.len() as u16).to_be_bytes());
         out.extend_from_slice(&self.payload);
         Ok(out)
     }
 
+    pub fn sign(&mut self, access_key: &ClientAccessKey) -> Result<()> {
+        self.auth_tag =
+            compute_auth_tag(&access_key.secret, &self.encode_with_tag([0; AUTH_TAG_LEN])?);
+        Ok(())
+    }
+
+    pub fn verify(&self, access_key: &ClientAccessKey) -> Result<bool> {
+        let expected =
+            compute_auth_tag(&access_key.secret, &self.encode_with_tag([0; AUTH_TAG_LEN])?);
+        Ok(self.auth_tag == expected)
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 16 {
+        if bytes.len() < 28 {
             bail!("short response");
         }
         if bytes[0] != PROTOCOL_VERSION {
             bail!("bad version");
         }
-        let payload_len = u16::from_be_bytes([bytes[14], bytes[15]]) as usize;
-        if bytes.len() != 16 + payload_len {
+        let payload_len = u16::from_be_bytes([bytes[26], bytes[27]]) as usize;
+        if bytes.len() != 28 + payload_len {
             bail!("bad response length");
         }
         Ok(Self {
@@ -121,7 +163,8 @@ impl ResponsePacket {
             ack: u32::from_be_bytes(bytes[6..10].try_into().unwrap()),
             flags: bytes[1],
             down_seq: u32::from_be_bytes(bytes[10..14].try_into().unwrap()),
-            payload: bytes[16..].to_vec(),
+            auth_tag: bytes[14..26].try_into().unwrap(),
+            payload: bytes[28..].to_vec(),
         })
     }
 }
@@ -498,6 +541,7 @@ fn skip_rr(bytes: &[u8], offset: usize) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::ClientAccessKey;
 
     #[test]
     fn roundtrip_packets() {
@@ -507,6 +551,8 @@ mod tests {
             flags: FLAG_DATA | FLAG_FIN,
             down_ack: 12,
             seq: 13,
+            client_id: 77,
+            auth_tag: [9; AUTH_TAG_LEN],
             payload: vec![1, 2, 3, 4, 5],
         };
         let bytes = request.encode().unwrap();
@@ -517,6 +563,7 @@ mod tests {
             ack: 14,
             flags: FLAG_DOWNLINK,
             down_seq: 2,
+            auth_tag: [7; AUTH_TAG_LEN],
             payload: vec![9, 8, 7],
         };
         let bytes = response.encode().unwrap();
@@ -531,6 +578,8 @@ mod tests {
             flags: FLAG_DATA,
             down_ack: 3,
             seq: 4,
+            client_id: 99,
+            auth_tag: [3; AUTH_TAG_LEN],
             payload: vec![5; 32],
         };
         let (_, wire) = build_query(&request, "t.7-b.cc").unwrap();
@@ -543,10 +592,39 @@ mod tests {
             ack: 5,
             flags: FLAG_DOWNLINK,
             down_seq: 6,
+            auth_tag: [4; AUTH_TAG_LEN],
             payload: vec![7; 24],
         };
         let wire = build_response(&message, &response).unwrap();
         let decoded = parse_response(&wire).unwrap();
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn signs_and_verifies_packets() {
+        let access_key = ClientAccessKey::generate();
+        let mut request = RequestPacket {
+            request_id: 11,
+            session_id: 12,
+            flags: FLAG_DATA,
+            down_ack: 0,
+            seq: 1,
+            client_id: 0,
+            auth_tag: [0; AUTH_TAG_LEN],
+            payload: vec![1, 2, 3],
+        };
+        request.sign(&access_key).unwrap();
+        assert!(request.verify(&access_key).unwrap());
+
+        let mut response = ResponsePacket {
+            request_id: 11,
+            ack: 2,
+            flags: FLAG_DOWNLINK,
+            down_seq: 4,
+            auth_tag: [0; AUTH_TAG_LEN],
+            payload: vec![9, 9],
+        };
+        response.sign(&access_key).unwrap();
+        assert!(response.verify(&access_key).unwrap());
     }
 }

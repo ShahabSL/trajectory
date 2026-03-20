@@ -3,6 +3,7 @@ dist/
 .tooling/
 .secrets/
 clients/android/.gradle/
+clients/android/build/
 clients/android/app/build/
 clients/android/app/src/main/jniLibs/
 __pycache__/
