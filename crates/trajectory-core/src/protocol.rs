@@ -11,20 +11,18 @@ pub const FLAG_DATA: u8 = 1 << 0;
 pub const FLAG_FIN: u8 = 1 << 1;
 pub const FLAG_DOWNLINK: u8 = 1 << 2;
 pub const FLAG_GAP: u8 = 1 << 3;
-pub const MAX_QUERY_PAYLOAD: usize = 100;
 pub const MAX_RESPONSE_PAYLOAD: usize = 4096;
 pub const RESPONSE_CHUNK_SIZE: usize = 1024;
 pub const DNS_MAX_PAYLOAD: u16 = 1400;
-pub const WINDOW_SIZE: usize = 80;
+pub const WINDOW_SIZE: usize = 200;
 pub const DOWNLINK_WINDOW: usize = 40;
-pub const POLL_WINDOW: usize = 80;
+pub const POLL_WINDOW: usize = 200;
 pub const QUERY_TIMEOUT_MS: u64 = 250;
 pub const KEEPALIVE_MS: u64 = 100;
-pub const MAX_INFLIGHT_PER_RESOLVER: usize = 28;
+pub const MAX_INFLIGHT_PER_RESOLVER: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestPacket {
-    pub request_id: u32,
     pub session_id: u64,
     pub flags: u8,
     pub down_ack: u32,
@@ -36,7 +34,6 @@ pub struct RequestPacket {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResponsePacket {
-    pub request_id: u32,
     pub ack: u32,
     pub flags: u8,
     pub down_seq: u32,
@@ -60,19 +57,14 @@ impl RequestPacket {
     }
 
     fn encode_with_tag(&self, auth_tag: [u8; AUTH_TAG_LEN]) -> Result<Vec<u8>> {
-        if self.payload.len() > u16::MAX as usize {
-            bail!("request payload too large");
-        }
-        let mut out = Vec::with_capacity(40 + self.payload.len());
+        let mut out = Vec::with_capacity(34 + self.payload.len());
         out.push(PROTOCOL_VERSION);
         out.push(self.flags);
-        out.extend_from_slice(&self.request_id.to_be_bytes());
         out.extend_from_slice(&self.session_id.to_be_bytes());
         out.extend_from_slice(&self.down_ack.to_be_bytes());
         out.extend_from_slice(&self.seq.to_be_bytes());
         out.extend_from_slice(&self.client_id.to_be_bytes());
         out.extend_from_slice(&auth_tag);
-        out.extend_from_slice(&(self.payload.len() as u16).to_be_bytes());
         out.extend_from_slice(&self.payload);
         Ok(out)
     }
@@ -91,25 +83,20 @@ impl RequestPacket {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 40 {
+        if bytes.len() < 34 {
             bail!("short request");
         }
         if bytes[0] != PROTOCOL_VERSION {
             bail!("bad version");
         }
-        let payload_len = u16::from_be_bytes([bytes[38], bytes[39]]) as usize;
-        if bytes.len() != 40 + payload_len {
-            bail!("bad request length");
-        }
         Ok(Self {
-            request_id: u32::from_be_bytes(bytes[2..6].try_into().unwrap()),
-            session_id: u64::from_be_bytes(bytes[6..14].try_into().unwrap()),
+            session_id: u64::from_be_bytes(bytes[2..10].try_into().unwrap()),
             flags: bytes[1],
-            down_ack: u32::from_be_bytes(bytes[14..18].try_into().unwrap()),
-            seq: u32::from_be_bytes(bytes[18..22].try_into().unwrap()),
-            client_id: u32::from_be_bytes(bytes[22..26].try_into().unwrap()),
-            auth_tag: bytes[26..38].try_into().unwrap(),
-            payload: bytes[40..].to_vec(),
+            down_ack: u32::from_be_bytes(bytes[10..14].try_into().unwrap()),
+            seq: u32::from_be_bytes(bytes[14..18].try_into().unwrap()),
+            client_id: u32::from_be_bytes(bytes[18..22].try_into().unwrap()),
+            auth_tag: bytes[22..34].try_into().unwrap(),
+            payload: bytes[34..].to_vec(),
         })
     }
 }
@@ -120,17 +107,12 @@ impl ResponsePacket {
     }
 
     fn encode_with_tag(&self, auth_tag: [u8; AUTH_TAG_LEN]) -> Result<Vec<u8>> {
-        if self.payload.len() > u16::MAX as usize {
-            bail!("response payload too large");
-        }
-        let mut out = Vec::with_capacity(28 + self.payload.len());
+        let mut out = Vec::with_capacity(22 + self.payload.len());
         out.push(PROTOCOL_VERSION);
         out.push(self.flags);
-        out.extend_from_slice(&self.request_id.to_be_bytes());
         out.extend_from_slice(&self.ack.to_be_bytes());
         out.extend_from_slice(&self.down_seq.to_be_bytes());
         out.extend_from_slice(&auth_tag);
-        out.extend_from_slice(&(self.payload.len() as u16).to_be_bytes());
         out.extend_from_slice(&self.payload);
         Ok(out)
     }
@@ -148,23 +130,18 @@ impl ResponsePacket {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 28 {
+        if bytes.len() < 22 {
             bail!("short response");
         }
         if bytes[0] != PROTOCOL_VERSION {
             bail!("bad version");
         }
-        let payload_len = u16::from_be_bytes([bytes[26], bytes[27]]) as usize;
-        if bytes.len() != 28 + payload_len {
-            bail!("bad response length");
-        }
         Ok(Self {
-            request_id: u32::from_be_bytes(bytes[2..6].try_into().unwrap()),
-            ack: u32::from_be_bytes(bytes[6..10].try_into().unwrap()),
+            ack: u32::from_be_bytes(bytes[2..6].try_into().unwrap()),
             flags: bytes[1],
-            down_seq: u32::from_be_bytes(bytes[10..14].try_into().unwrap()),
-            auth_tag: bytes[14..26].try_into().unwrap(),
-            payload: bytes[28..].to_vec(),
+            down_seq: u32::from_be_bytes(bytes[6..10].try_into().unwrap()),
+            auth_tag: bytes[10..22].try_into().unwrap(),
+            payload: bytes[22..].to_vec(),
         })
     }
 }
@@ -221,6 +198,30 @@ pub fn build_probe_query(domain: &str) -> Result<(u16, Vec<u8>)> {
         .collect::<Vec<_>>();
     let qname = encode_labels(&labels)?;
     build_query_wire(qname, u16::from(RecordType::A))
+}
+
+pub fn max_query_payload_for_domain(domain: &str) -> Result<usize> {
+    let mut best = 0usize;
+    for payload_len in 1..=255 {
+        let request = RequestPacket {
+            session_id: 0,
+            flags: 0,
+            down_ack: 0,
+            seq: 0,
+            client_id: 0,
+            auth_tag: [0; AUTH_TAG_LEN],
+            payload: vec![0; payload_len],
+        };
+        if encode_query_name(&request, domain)?.len() <= 255 {
+            best = payload_len;
+        } else {
+            break;
+        }
+    }
+    if best == 0 {
+        bail!("domain {domain} leaves no room for request payloads");
+    }
+    Ok(best)
 }
 
 pub fn parse_dns_id(bytes: &[u8]) -> Result<u16> {
@@ -546,7 +547,6 @@ mod tests {
     #[test]
     fn roundtrip_packets() {
         let request = RequestPacket {
-            request_id: 7,
             session_id: 9,
             flags: FLAG_DATA | FLAG_FIN,
             down_ack: 12,
@@ -559,7 +559,6 @@ mod tests {
         assert_eq!(RequestPacket::decode(&bytes).unwrap(), request);
 
         let response = ResponsePacket {
-            request_id: 8,
             ack: 14,
             flags: FLAG_DOWNLINK,
             down_seq: 2,
@@ -573,7 +572,6 @@ mod tests {
     #[test]
     fn roundtrip_dns() {
         let request = RequestPacket {
-            request_id: 1,
             session_id: 2,
             flags: FLAG_DATA,
             down_ack: 3,
@@ -588,7 +586,6 @@ mod tests {
         assert_eq!(decoded, request);
 
         let response = ResponsePacket {
-            request_id: request.request_id,
             ack: 5,
             flags: FLAG_DOWNLINK,
             down_seq: 6,
@@ -604,7 +601,6 @@ mod tests {
     fn signs_and_verifies_packets() {
         let access_key = ClientAccessKey::generate();
         let mut request = RequestPacket {
-            request_id: 11,
             session_id: 12,
             flags: FLAG_DATA,
             down_ack: 0,
@@ -617,7 +613,6 @@ mod tests {
         assert!(request.verify(&access_key).unwrap());
 
         let mut response = ResponsePacket {
-            request_id: 11,
             ack: 2,
             flags: FLAG_DOWNLINK,
             down_seq: 4,
@@ -626,5 +621,10 @@ mod tests {
         };
         response.sign(&access_key).unwrap();
         assert!(response.verify(&access_key).unwrap());
+    }
+
+    #[test]
+    fn short_domains_allow_larger_request_payloads() {
+        assert!(max_query_payload_for_domain("t.7-b.cc").unwrap() >= 110);
     }
 }

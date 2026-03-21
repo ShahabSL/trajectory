@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use trajectory_core::auth::ClientAccessKey;
@@ -47,6 +47,33 @@ async fn spawn_echo_target(bind: SocketAddr) -> JoinHandle<()> {
             });
         }
     })
+}
+
+async fn spawn_recording_target(
+    bind: SocketAddr,
+) -> (JoinHandle<()>, oneshot::Receiver<Vec<u8>>) {
+    let (tx, rx) = oneshot::channel();
+    let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
+    let task = tokio::spawn(async move {
+        let listener = TcpListener::bind(bind).await.expect("bind recording target");
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match timeout(Duration::from_millis(500), stream.read(&mut chunk)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(len)) => buf.extend_from_slice(&chunk[..len]),
+                Ok(Err(_)) => return,
+                Err(_) => break,
+            }
+        }
+        if let Some(sender) = tx.lock().expect("recording sender poisoned").take() {
+            let _ = sender.send(buf);
+        }
+    });
+    (task, rx)
 }
 
 async fn spawn_tcp_fallback_resolver(
@@ -161,6 +188,74 @@ async fn authenticated_client_and_server_forward_tcp() {
         .expect("tcp read timeout")
         .expect("tcp read failed");
     assert_eq!(&response[..len], b"pong:ping");
+
+    let _ = client_shutdown_tx.send(true);
+    let _ = server_shutdown_tx.send(true);
+    timeout(Duration::from_secs(5), client_task)
+        .await
+        .expect("client shutdown timeout")
+        .expect("client shutdown failed");
+    timeout(Duration::from_secs(5), server_task)
+        .await
+        .expect("server shutdown timeout")
+        .expect("server shutdown failed");
+    echo_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn authenticated_client_and_server_forward_multichunk_tcp() {
+    let access_key = ClientAccessKey::generate();
+    let echo_addr = free_tcp_addr();
+    let server_addr = free_udp_addr();
+    let client_addr = free_tcp_addr();
+
+    let (echo_task, recorded_rx) = spawn_recording_target(echo_addr).await;
+
+    let authorized_clients = Arc::new(HashMap::from([(access_key.client_id, access_key.clone())]));
+    let server_config = ServerConfig {
+        bind: server_addr,
+        domain: "t.test".to_owned(),
+        target: echo_addr,
+        authorized_clients,
+    };
+    let (server_shutdown_tx, server_shutdown_rx) = watch::channel(false);
+    let server_task = tokio::spawn(async move {
+        run_server_until(server_config, server_shutdown_rx)
+            .await
+            .expect("server should run");
+    });
+
+    let mut client_config =
+        default_client_config(client_addr, vec![server_addr], "t.test".to_owned(), access_key);
+    client_config.request_timeout = Duration::from_millis(350);
+    let (client_shutdown_tx, client_shutdown_rx) = watch::channel(false);
+    let client_task = tokio::spawn(async move {
+        run_client_until(client_config, client_shutdown_rx)
+            .await
+            .expect("client should run");
+    });
+
+    sleep(Duration::from_millis(500)).await;
+
+    let payload = vec![b'x'; 4096];
+    let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(client_addr))
+        .await
+        .expect("tcp connect timeout")
+        .expect("tcp connect failed");
+    timeout(Duration::from_secs(5), stream.write_all(&payload))
+        .await
+        .expect("tcp write timeout")
+        .expect("tcp write failed");
+    timeout(Duration::from_secs(5), stream.shutdown())
+        .await
+        .expect("tcp shutdown timeout")
+        .expect("tcp shutdown failed");
+
+    let recorded = timeout(Duration::from_secs(5), recorded_rx)
+        .await
+        .expect("recording timeout")
+        .expect("recording channel failed");
+    assert_eq!(recorded, payload);
 
     let _ = client_shutdown_tx.send(true);
     let _ = server_shutdown_tx.send(true);

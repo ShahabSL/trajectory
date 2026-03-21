@@ -36,6 +36,12 @@ REMOTE_SINK_PORT = 19000
 BENCH_SERVICE = "trajectory-bench-impl.service"
 SINK_SERVICE = "trajectory-bench-sink.service"
 TRAJECTORY_SERVICE = "trajectory.service"
+BENCH_VARIANT_SERVICES = [
+    BENCH_SERVICE,
+    SINK_SERVICE,
+    "trajectory-bench-trajectory.service",
+    "trajectory-bench-slipstream.service",
+]
 
 REMOTE_SINK_SCRIPT = textwrap.dedent(
     """\
@@ -221,21 +227,27 @@ def parse_args() -> argparse.Namespace:
         help="Public resolver to use. Repeat to benchmark multipath over several resolvers.",
     )
     parser.add_argument("--domain", default="t.7-b.cc")
-    parser.add_argument("--server-bind", default=None, help="Default: server IP from server.env")
     parser.add_argument("--size-bytes", type=int, default=65536)
     parser.add_argument("--slipstream-dir", type=pathlib.Path, default=DEFAULT_SLIPSTREAM_DIR)
     parser.add_argument("--native-cert-dir", type=pathlib.Path, default=DEFAULT_NATIVE_CERT_DIR)
     parser.add_argument("--keep-artifacts", action="store_true")
     parser.add_argument("--timeout-seconds", type=int, default=180)
     parser.add_argument("--stall-seconds", type=int, default=8)
-    parser.add_argument("--trajectory-engine", choices=("slipstream", "native", "mvp"), default="native")
     parser.add_argument("--trajectory-listen-port", type=int, default=27010)
     parser.add_argument("--slipstream-listen-port", type=int, default=27011)
-    parser.add_argument("--trajectory-poll-interval-ms", type=int, default=1)
     parser.add_argument("--trajectory-keep-alive-interval", type=int, default=0)
-    parser.add_argument("--trajectory-request-timeout-ms", type=int, default=250)
     parser.add_argument("--trajectory-client-bin", type=pathlib.Path, default=None)
     parser.add_argument("--trajectory-server-bin", type=pathlib.Path, default=None)
+    parser.add_argument(
+        "--trajectory-client-db",
+        default="/opt/trajectory/trajectory-clients.json",
+        help="Remote client registry path for the authenticated Trajectory server.",
+    )
+    parser.add_argument(
+        "--trajectory-access-key",
+        default=None,
+        help="Client access key to use when benchmarking the authenticated Trajectory client.",
+    )
     return parser.parse_args()
 
 
@@ -244,7 +256,6 @@ def main() -> int:
     if not args.resolvers:
         args.resolvers = ["1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"]
     auth = load_server_auth(args.server_env)
-    bind_host = args.server_bind or auth.host
     ssh = SshSession(auth)
     restore_trajectory = False
 
@@ -257,30 +268,32 @@ def main() -> int:
         native_cert_paths = ensure_native_certs(args.native_cert_dir)
 
         restore_trajectory = remote_is_active(ssh, TRAJECTORY_SERVICE)
-        stop_services(ssh, [BENCH_SERVICE, SINK_SERVICE, TRAJECTORY_SERVICE])
-        install_remote_files(ssh, trajectory_paths, slipstream_paths, native_cert_paths, args.domain)
+        stop_services(ssh, [*BENCH_VARIANT_SERVICES, TRAJECTORY_SERVICE])
+        install_remote_files(
+            ssh,
+            trajectory_paths,
+            slipstream_paths,
+            native_cert_paths,
+            args.domain,
+            trajectory_client_db=args.trajectory_client_db,
+        )
 
         results = []
         for implementation in ("trajectory", "slipstream"):
             result = benchmark_once(
                 ssh=ssh,
                 implementation=implementation,
-                bind_host=bind_host,
                 domain=args.domain,
                 resolvers=args.resolvers,
                 size_bytes=args.size_bytes,
                 timeout_seconds=args.timeout_seconds,
                 stall_seconds=args.stall_seconds,
-                trajectory_engine=args.trajectory_engine,
-                trajectory_poll_interval_ms=args.trajectory_poll_interval_ms,
                 trajectory_keep_alive_interval=args.trajectory_keep_alive_interval,
-                trajectory_request_timeout_ms=args.trajectory_request_timeout_ms,
                 trajectory_paths=trajectory_paths,
-                native_cert=native_cert_paths["cert"],
-                slipstream_dir=args.slipstream_dir,
                 slipstream_client=slipstream_paths["client"],
                 trajectory_listen_port=args.trajectory_listen_port,
                 slipstream_listen_port=args.slipstream_listen_port,
+                trajectory_access_key=args.trajectory_access_key,
                 resolved_active=remote_is_active(ssh, "systemd-resolved"),
             )
             results.append(result)
@@ -289,7 +302,7 @@ def main() -> int:
         print_comparison(results)
         return 0
     finally:
-        stop_services(ssh, [BENCH_SERVICE, SINK_SERVICE])
+        stop_services(ssh, [*BENCH_VARIANT_SERVICES])
         if restore_trajectory:
             ssh.remote(f"systemctl start {TRAJECTORY_SERVICE}", check=False)
         if not args.keep_artifacts:
@@ -340,12 +353,12 @@ def ensure_trajectory_build(
         return {"client": client_override, "server": server_override}
 
     run(
-        ["cargo", "build", "--release", "--bin", "trajectory-client", "--features", "client"],
+        ["cargo", "build", "--release", "-p", "trajectory-cli", "--bin", "trajectory-client"],
         cwd=REPO_ROOT,
         capture_output=False,
     )
     run(
-        ["cargo", "build", "--release", "--bin", "trajectory-server", "--features", "server"],
+        ["cargo", "build", "--release", "-p", "trajectory-cli", "--bin", "trajectory-server"],
         cwd=REPO_ROOT,
         capture_output=False,
     )
@@ -441,6 +454,7 @@ def install_remote_files(
     slipstream_paths: dict[str, pathlib.Path],
     native_cert_paths: dict[str, pathlib.Path],
     domain: str,
+    trajectory_client_db: str = "/opt/trajectory/trajectory-clients.json",
 ) -> None:
     temp = ssh.temp_path
     sink_script = temp / "bench_sink.py"
@@ -479,7 +493,7 @@ def install_remote_files(
             [Service]
             Type=simple
             WorkingDirectory={REMOTE_STAGE_DIR}
-            ExecStart={REMOTE_STAGE_DIR}/trajectory-server --dns-listen-port 53 --target-address 127.0.0.1:{REMOTE_SINK_PORT} --domain {domain} --cert {REMOTE_STAGE_DIR}/cert.pem --key {REMOTE_STAGE_DIR}/key.pem
+            ExecStart={REMOTE_STAGE_DIR}/trajectory-server --dns-listen-port 53 --target-address 127.0.0.1:{REMOTE_SINK_PORT} --domain {domain} --client-db {trajectory_client_db} --cert {REMOTE_STAGE_DIR}/cert.pem --key {REMOTE_STAGE_DIR}/key.pem
             Restart=no
 
             [Install]
@@ -564,22 +578,17 @@ def benchmark_once(
     *,
     ssh: SshSession,
     implementation: str,
-    bind_host: str,
     domain: str,
     resolvers: list[str],
     size_bytes: int,
     timeout_seconds: int,
     stall_seconds: int,
-    trajectory_engine: str,
-    trajectory_poll_interval_ms: int,
     trajectory_keep_alive_interval: int,
-    trajectory_request_timeout_ms: int,
     trajectory_paths: dict[str, pathlib.Path],
-    native_cert: pathlib.Path,
-    slipstream_dir: pathlib.Path,
     slipstream_client: pathlib.Path,
     trajectory_listen_port: int,
     slipstream_listen_port: int,
+    trajectory_access_key: str | None,
     resolved_active: bool,
 ) -> BenchResult:
     needs_resolver_port = True
@@ -598,6 +607,9 @@ def benchmark_once(
             "--congestion-control",
             "bbr",
         ]
+        if trajectory_access_key is None:
+            raise ValueError("trajectory benchmark requires --trajectory-access-key")
+        client_cmd.extend(["--access-key", trajectory_access_key])
         for resolver in resolvers:
             client_cmd.extend(["--resolver", resolver])
     else:
@@ -620,6 +632,7 @@ def benchmark_once(
     if needs_resolver_port and resolved_active:
         ssh.remote("systemctl stop systemd-resolved >/dev/null 2>&1 || true", check=False)
 
+    stop_services(ssh, BENCH_VARIANT_SERVICES)
     ssh.remote(
         textwrap.dedent(
             f"""\
@@ -667,7 +680,7 @@ def benchmark_once(
             client.wait(timeout=5)
         except subprocess.TimeoutExpired:
             client.kill()
-        stop_services(ssh, [BENCH_SERVICE, SINK_SERVICE])
+        stop_services(ssh, BENCH_VARIANT_SERVICES)
         if needs_resolver_port and resolved_active:
             ssh.remote("systemctl start systemd-resolved >/dev/null 2>&1 || true", check=False)
 

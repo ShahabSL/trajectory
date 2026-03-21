@@ -23,7 +23,7 @@ pub struct ServerConfig {
 }
 
 struct Session {
-    writer: tokio::net::tcp::OwnedWriteHalf,
+    writer: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
     client_key: ClientAccessKey,
     next_uplink_seq: u32,
     pending_uplink: BTreeMap<u32, Vec<u8>>,
@@ -31,7 +31,9 @@ struct Session {
     down_queue: VecDeque<u8>,
     down_chunks: BTreeMap<u32, Vec<u8>>,
     last_seen: Instant,
+    flush_in_progress: bool,
     client_closed: bool,
+    writer_shutdown: bool,
     remote_closed: bool,
 }
 
@@ -145,17 +147,15 @@ async fn handle_query(
         session.last_seen = Instant::now();
         apply_down_ack(&mut session, request.down_ack);
 
-        if request.flags & FLAG_DATA != 0 {
+        if request.flags & FLAG_DATA != 0 && request.seq >= session.next_uplink_seq {
             session.pending_uplink.entry(request.seq).or_insert(request.payload);
-            flush_uplink(&mut session).await?;
         }
         if request.flags & FLAG_FIN != 0 {
             session.client_closed = true;
-            let _ = session.writer.shutdown().await;
         }
 
         let mut flags = 0u8;
-        let max_down = max_down_payload(&query, request.request_id, session.next_uplink_seq, session.next_down_seq);
+        let max_down = max_down_payload(&query, session.next_uplink_seq, session.next_down_seq);
         let requested_down = (request.flags & FLAG_DATA == 0).then_some(request.seq);
         let (down_seq, down_payload) = if let Some(chunk) = next_down_chunk(&mut session, max_down, requested_down) {
             flags |= FLAG_DOWNLINK;
@@ -165,7 +165,6 @@ async fn handle_query(
         };
 
         let mut response = crate::protocol::ResponsePacket {
-            request_id: request.request_id,
             ack: session.next_uplink_seq,
             flags,
             down_seq,
@@ -175,6 +174,7 @@ async fn handle_query(
         response.sign(&session.client_key)?;
         response
     };
+    flush_uplink(session.clone()).await?;
     let wire = build_response(&query, &response)?;
     socket.send_to(&wire, peer).await?;
     Ok(())
@@ -186,17 +186,21 @@ async fn get_or_create_session(
     target: SocketAddr,
     client_key: ClientAccessKey,
 ) -> Result<Arc<Mutex<Session>>> {
-    if let Some(existing) = shared.sessions.lock().await.get(&session_id).cloned() {
+    let mut sessions = shared.sessions.lock().await;
+    if let Some(existing) = sessions.get(&session_id).cloned() {
         return Ok(existing);
     }
 
+    // The first burst of requests for a new session can arrive in parallel through
+    // different resolvers. Create and register the target stream while holding the
+    // session map lock so only one TCP target connection exists per session.
     let stream = TcpStream::connect(target)
         .await
         .with_context(|| format!("connect to target {target}"))?;
     stream.set_nodelay(true)?;
     let (read_half, write_half) = stream.into_split();
     let session = Arc::new(Mutex::new(Session {
-        writer: write_half,
+        writer: Arc::new(Mutex::new(write_half)),
         client_key,
         next_uplink_seq: 0,
         pending_uplink: BTreeMap::new(),
@@ -204,14 +208,13 @@ async fn get_or_create_session(
         down_queue: VecDeque::new(),
         down_chunks: BTreeMap::new(),
         last_seen: Instant::now(),
+        flush_in_progress: false,
         client_closed: false,
+        writer_shutdown: false,
         remote_closed: false,
     }));
-    shared
-        .sessions
-        .lock()
-        .await
-        .insert(session_id, session.clone());
+    sessions.insert(session_id, session.clone());
+    drop(sessions);
     spawn_down_reader(session.clone(), read_half);
     Ok(session)
 }
@@ -252,12 +255,60 @@ fn apply_down_ack(session: &mut Session, ack: u32) {
     session.down_chunks.retain(|seq, _| *seq >= ack);
 }
 
-async fn flush_uplink(session: &mut Session) -> Result<()> {
-    while let Some(payload) = session.pending_uplink.remove(&session.next_uplink_seq) {
-        session.writer.write_all(&payload).await?;
-        session.next_uplink_seq = session.next_uplink_seq.wrapping_add(1);
+async fn flush_uplink(session: Arc<Mutex<Session>>) -> Result<()> {
+    loop {
+        let (writer, payload, chunk_count, should_shutdown) = {
+            let mut session = session.lock().await;
+            if session.flush_in_progress {
+                return Ok(());
+            }
+            if let Some((chunk_count, payload)) = take_uplink_batch(&mut session) {
+                session.flush_in_progress = true;
+                (session.writer.clone(), Some(payload), chunk_count, false)
+            } else if session.client_closed && !session.writer_shutdown {
+                session.flush_in_progress = true;
+                session.writer_shutdown = true;
+                (session.writer.clone(), None, 0, true)
+            } else {
+                return Ok(());
+            }
+        };
+
+        if should_shutdown {
+            let shutdown_result = {
+                let mut writer = writer.lock().await;
+                writer.shutdown().await
+            };
+            let mut session = session.lock().await;
+            session.flush_in_progress = false;
+            shutdown_result?;
+            return Ok(());
+        }
+
+        let payload = payload.expect("flush payload");
+        {
+            let mut writer = writer.lock().await;
+            writer.write_all(&payload).await?;
+        }
+
+        let mut session = session.lock().await;
+        session.next_uplink_seq = session.next_uplink_seq.wrapping_add(chunk_count);
+        let next_uplink_seq = session.next_uplink_seq;
+        session.pending_uplink.retain(|seq, _| *seq >= next_uplink_seq);
+        session.flush_in_progress = false;
     }
-    Ok(())
+}
+
+fn take_uplink_batch(session: &mut Session) -> Option<(u32, Vec<u8>)> {
+    let mut seq = session.next_uplink_seq;
+    let mut count = 0u32;
+    let mut payload = Vec::new();
+    while let Some(chunk) = session.pending_uplink.remove(&seq) {
+        payload.extend_from_slice(&chunk);
+        count = count.wrapping_add(1);
+        seq = seq.wrapping_add(1);
+    }
+    (count > 0).then_some((count, payload))
 }
 
 fn next_down_chunk(session: &mut Session, max_payload: usize, requested_seq: Option<u32>) -> Option<(u32, Vec<u8>)> {
@@ -292,9 +343,8 @@ fn materialize_down_chunks(session: &mut Session, requested_seq: u32, max_payloa
     }
 }
 
-fn max_down_payload(query: &crate::protocol::ParsedQuery, request_id: u32, ack: u32, down_seq: u32) -> usize {
+fn max_down_payload(query: &crate::protocol::ParsedQuery, ack: u32, down_seq: u32) -> usize {
     let response = crate::protocol::ResponsePacket {
-        request_id,
         ack,
         flags: FLAG_DOWNLINK,
         down_seq,
