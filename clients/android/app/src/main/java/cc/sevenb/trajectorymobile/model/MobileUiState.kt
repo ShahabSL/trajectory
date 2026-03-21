@@ -1,5 +1,6 @@
 package cc.sevenb.trajectorymobile.model
 
+import cc.sevenb.trajectorymobile.data.DEFAULT_RESOLVERS_TEXT
 import uniffi.trajectorymobile.MobileLogEntry
 import uniffi.trajectorymobile.MobileTunnelState
 
@@ -11,7 +12,7 @@ enum class AndroidConnectionMode {
 data class MobileUiState(
     val accessKey: String = "",
     val domain: String = "t.7-b.cc",
-    val resolversText: String = "1.1.1.1:53\n1.0.0.1:53\n8.8.8.8:53\n8.8.4.4:53\n9.9.9.9:53",
+    val resolversText: String = DEFAULT_RESOLVERS_TEXT,
     val listenPortText: String = "7000",
     val keepAliveText: String = "50",
     val connectionMode: AndroidConnectionMode = AndroidConnectionMode.VPN,

@@ -3,6 +3,7 @@ main:
   port: 1080
   listen-address: '127.0.0.1'
   listen-ipv6-only: false
+  domain-address-type: ipv4
 
 misc:
   log-file: stderr

@@ -81,13 +81,13 @@ fn debug_client_log(message: impl AsRef<str>) {
 }
 
 fn tcp_resolver_timeout(timeout: Duration) -> Duration {
-    timeout.max(Duration::from_secs(1))
+    timeout.max(Duration::from_secs(3))
 }
 
 fn max_inflight_for(resolver: &Resolver) -> usize {
     match resolver.transport {
         ResolverTransport::Udp { .. } => MAX_INFLIGHT_PER_RESOLVER,
-        ResolverTransport::Tcp { .. } => 4,
+        ResolverTransport::Tcp { .. } => 2,
     }
 }
 
@@ -166,14 +166,28 @@ async fn handle_stream(stream: TcpStream, config: ClientConfig) -> Result<()> {
         }
     }
     probed.sort_by_key(|(_, srtt, _)| *srtt);
-    let keep = probed
-        .iter()
-        .filter(|(_, srtt, _)| *srtt < Duration::from_millis(2_000))
-        .count()
-        .clamp(1, 4);
+    let has_udp = probed.iter().any(|(transport, srtt, _)| {
+        matches!(transport, ResolverTransport::Udp { .. }) && *srtt < Duration::from_millis(2_000)
+    });
 
-    let mut resolvers = Vec::with_capacity(keep);
-    for (index, (transport, srtt, label)) in probed.into_iter().take(keep).enumerate() {
+    let selected: Vec<_> = if has_udp {
+        probed
+            .into_iter()
+            .filter(|(transport, srtt, _)| {
+                matches!(transport, ResolverTransport::Udp { .. }) && *srtt < Duration::from_millis(2_000)
+            })
+            .take(4)
+            .collect()
+    } else {
+        probed
+            .into_iter()
+            .filter(|(_, srtt, _)| *srtt < Duration::from_millis(5_000))
+            .take(1)
+            .collect()
+    };
+
+    let mut resolvers = Vec::with_capacity(selected.len());
+    for (index, (transport, srtt, label)) in selected.into_iter().enumerate() {
         if let ResolverTransport::Udp { socket } = &transport {
             let rx_socket = socket.clone();
             let tx = resp_tx.clone();

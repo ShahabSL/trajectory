@@ -29,15 +29,10 @@ class SettingsStore(private val context: Context) {
     }
 
     val settings: Flow<StoredTunnelSettings> = context.mobileSettingsDataStore.data.map { prefs ->
-        val resolverDefaults = resolverDefaultsText(context)
         StoredTunnelSettings(
             accessKey = prefs[Keys.accessKey].orEmpty(),
             domain = prefs[Keys.domain] ?: "t.7-b.cc",
-            resolversText = when (val savedResolvers = prefs[Keys.resolvers]) {
-                null -> resolverDefaults
-                LEGACY_PUBLIC_DEFAULTS -> resolverDefaults
-                else -> savedResolvers
-            },
+            resolversText = prefs[Keys.resolvers] ?: DEFAULT_RESOLVERS_TEXT,
             listenPortText = prefs[Keys.listenPort] ?: "7000",
             keepAliveText = prefs[Keys.keepAlive] ?: "50",
             connectionMode = prefs[Keys.connectionMode] ?: "vpn",
@@ -55,8 +50,4 @@ class SettingsStore(private val context: Context) {
         }
     }
 
-    companion object {
-        private const val LEGACY_PUBLIC_DEFAULTS =
-            "1.1.1.1:53\n1.0.0.1:53\n8.8.8.8:53\n8.8.4.4:53\n9.9.9.9:53"
-    }
 }

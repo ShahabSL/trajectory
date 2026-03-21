@@ -27,11 +27,19 @@ class TrajectoryViewModel(
     private val appContext: Context,
     private val settingsStore: SettingsStore,
 ) : ViewModel() {
+    private data class ConnectivityCheck(
+        val inProgress: Boolean = false,
+        val confirmedMode: AndroidConnectionMode? = null,
+        val error: String? = null,
+    )
+
     private val tag = "TrajectoryViewModel"
     private val _uiState = MutableStateFlow(MobileUiState())
     val uiState: StateFlow<MobileUiState> = _uiState.asStateFlow()
+    private val connectivityCheck = MutableStateFlow(ConnectivityCheck())
 
     private var pollJob: Job? = null
+    private var verificationJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -118,6 +126,8 @@ class TrajectoryViewModel(
                 "Starting ${connectionMode.name.lowercase()} mode with ${config.resolvers.size} resolvers on port ${config.listenPort.toInt()}",
             )
             val controller = withContext(Dispatchers.IO) { controller() }
+            verificationJob?.cancel()
+            connectivityCheck.value = ConnectivityCheck(inProgress = true)
             _uiState.update {
                 it.copy(
                     state = MobileTunnelState.STARTING,
@@ -141,6 +151,7 @@ class TrajectoryViewModel(
                     }
                 }
                 Log.i(tag, "Tunnel controller started successfully in ${connectionMode.name.lowercase()} mode")
+                beginConnectivityVerification(connectionMode, config.listenPort.toInt())
                 refreshFromController(controller)
             } catch (error: MobileException.AlreadyRunning) {
                 Log.i(tag, "Tunnel already running; refreshing controller state")
@@ -154,9 +165,11 @@ class TrajectoryViewModel(
                         TrajectoryProxyService.start(appContext, config.listenPort.toInt())
                     }
                 }
+                beginConnectivityVerification(connectionMode, config.listenPort.toInt())
                 refreshFromController(controller)
             } catch (error: MobileException) {
                 Log.e(tag, "Tunnel start failed", error)
+                connectivityCheck.value = ConnectivityCheck(error = error.message)
                 _uiState.update {
                     it.copy(
                         state = MobileTunnelState.FAILED,
@@ -166,6 +179,7 @@ class TrajectoryViewModel(
                 }
             } catch (error: Throwable) {
                 Log.e(tag, "Tunnel start failed", error)
+                connectivityCheck.value = ConnectivityCheck(error = error.message)
                 _uiState.update {
                     it.copy(
                         state = MobileTunnelState.FAILED,
@@ -181,6 +195,8 @@ class TrajectoryViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 Log.i(tag, "Stopping tunnel controller")
+                verificationJob?.cancel()
+                connectivityCheck.value = ConnectivityCheck()
                 TrajectoryVpnService.stop(appContext)
                 TrajectoryProxyService.stop(appContext)
                 controllerOrNull()?.stop()
@@ -237,27 +253,121 @@ class TrajectoryViewModel(
         val snapshot = activeController.snapshot()
         val vpn = TrajectoryVpnService.peekSnapshot()
         val mode = _uiState.value.connectionMode
+        val verification = connectivityCheck.value
+        maybeResumeConnectivityVerification(mode, snapshot, vpn, verification)
         val logs = activeController.logs().takeLast(160).reversed()
         _uiState.update { state ->
             state.copy(
                 state = when {
+                    verification.error != null -> MobileTunnelState.FAILED
+                    mode == AndroidConnectionMode.VPN && vpn.active && verification.confirmedMode == AndroidConnectionMode.VPN ->
+                        MobileTunnelState.RUNNING
+                    verification.inProgress &&
+                        (snapshot.state == MobileTunnelState.STARTING ||
+                            snapshot.state == MobileTunnelState.RUNNING ||
+                            vpn.active) -> MobileTunnelState.STARTING
                     vpn.active -> MobileTunnelState.RUNNING
                     vpn.lastError != null -> MobileTunnelState.FAILED
+                    mode == AndroidConnectionMode.PROXY &&
+                        snapshot.state == MobileTunnelState.RUNNING &&
+                        verification.confirmedMode == AndroidConnectionMode.PROXY -> MobileTunnelState.RUNNING
                     else -> snapshot.state
                 },
                 status = when {
-                    vpn.active -> vpn.status
-                    mode == AndroidConnectionMode.PROXY && snapshot.state == MobileTunnelState.RUNNING -> "Proxy ready"
+                    verification.error != null -> "Connection failed"
+                    mode == AndroidConnectionMode.VPN && vpn.active && verification.confirmedMode == AndroidConnectionMode.VPN ->
+                        vpn.status
+                    mode == AndroidConnectionMode.PROXY && verification.inProgress -> "Checking proxy"
+                    mode == AndroidConnectionMode.PROXY &&
+                        snapshot.state == MobileTunnelState.RUNNING &&
+                        verification.confirmedMode == AndroidConnectionMode.PROXY -> "Proxy ready"
                     mode == AndroidConnectionMode.PROXY && snapshot.state == MobileTunnelState.STARTING -> "Starting proxy"
+                    mode == AndroidConnectionMode.VPN && verification.inProgress ->
+                        if (vpn.active) "Checking connection" else "Connecting"
+                    vpn.active -> "Checking connection"
                     vpn.lastError != null -> "Connection failed"
                     else -> snapshot.statusText
                 },
                 activeResolvers = snapshot.activeResolvers,
                 listenAddress = snapshot.listenAddress,
-                lastError = vpn.lastError ?: snapshot.lastError,
+                lastError = verification.error ?: vpn.lastError ?: snapshot.lastError,
                 logs = logs,
             )
         }
+    }
+
+    private fun maybeResumeConnectivityVerification(
+        mode: AndroidConnectionMode,
+        snapshot: uniffi.trajectorymobile.MobileTunnelSnapshot,
+        vpn: VpnRuntimeSnapshot,
+        verification: ConnectivityCheck,
+    ) {
+        if (verification.inProgress || verification.confirmedMode != null || verification.error != null) {
+            return
+        }
+        if (verificationJob?.isActive == true) {
+            return
+        }
+        val listenPort = snapshot.listenAddress.substringAfterLast(':', "").toIntOrNull() ?: return
+        val shouldVerify = when (mode) {
+            AndroidConnectionMode.VPN -> vpn.active
+            AndroidConnectionMode.PROXY -> snapshot.state == MobileTunnelState.RUNNING
+        }
+        if (shouldVerify) {
+            beginConnectivityVerification(mode, listenPort)
+        }
+    }
+
+    private fun beginConnectivityVerification(connectionMode: AndroidConnectionMode, listenPort: Int) {
+        verificationJob?.cancel()
+        connectivityCheck.value = ConnectivityCheck(inProgress = true)
+        verificationJob = viewModelScope.launch(Dispatchers.IO) {
+            val failure = runCatching {
+                waitForConnectivity(connectionMode, listenPort)
+            }.exceptionOrNull()
+
+            if (failure == null) {
+                Log.i(tag, "Verified ${connectionMode.name.lowercase()} path through local SOCKS endpoint")
+                connectivityCheck.value = ConnectivityCheck(confirmedMode = connectionMode)
+                refreshFromController()
+                return@launch
+            }
+
+            val message = failure.message ?: "Connection test failed"
+            Log.e(tag, "Connectivity verification failed for ${connectionMode.name.lowercase()} mode", failure)
+            connectivityCheck.value = ConnectivityCheck(error = message)
+            runCatching { controllerOrNull()?.stop() }
+            TrajectoryVpnService.stop(appContext)
+            TrajectoryProxyService.stop(appContext)
+            refreshFromController()
+        }
+    }
+
+    private suspend fun waitForConnectivity(connectionMode: AndroidConnectionMode, listenPort: Int) {
+        var lastError: Throwable? = null
+        repeat(2) {
+            if (connectionMode == AndroidConnectionMode.VPN) {
+                val vpn = TrajectoryVpnService.peekSnapshot()
+                if (vpn.lastError != null) {
+                    throw IllegalStateException(vpn.lastError)
+                }
+                if (!vpn.active) {
+                    delay(500)
+                    return@repeat
+                }
+            }
+
+            val probeResult = runCatching {
+                SocksConnectivityProbe.verify(port = listenPort)
+            }
+            if (probeResult.isSuccess) {
+                return
+            }
+
+            lastError = probeResult.exceptionOrNull()
+            delay(1_000)
+        }
+        throw IllegalStateException(lastError?.message ?: "Timed out while testing the local connection")
     }
 
     fun reportPermissionDenied() {

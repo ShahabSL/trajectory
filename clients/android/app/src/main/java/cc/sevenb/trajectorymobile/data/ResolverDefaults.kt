@@ -1,10 +1,5 @@
 package cc.sevenb.trajectorymobile.data
 
-import android.content.Context
-import android.net.ConnectivityManager
-import java.net.InetAddress
-import java.util.LinkedHashSet
-
 private val PUBLIC_RESOLVER_DEFAULTS = listOf(
     "1.1.1.1:53",
     "1.0.0.1:53",
@@ -13,22 +8,7 @@ private val PUBLIC_RESOLVER_DEFAULTS = listOf(
     "9.9.9.9:53",
 )
 
-fun resolverDefaultsText(context: Context): String {
-    val merged = LinkedHashSet<String>()
-    currentNetworkResolvers(context).forEach(merged::add)
-    PUBLIC_RESOLVER_DEFAULTS.forEach(merged::add)
-    return merged.joinToString(separator = "\n")
-}
+const val DEFAULT_RESOLVERS_TEXT =
+    "1.1.1.1:53\n1.0.0.1:53\n8.8.8.8:53\n8.8.4.4:53\n9.9.9.9:53"
 
-private fun currentNetworkResolvers(context: Context): List<String> {
-    val connectivityManager = context.getSystemService(ConnectivityManager::class.java) ?: return emptyList()
-    val network = connectivityManager.activeNetwork ?: return emptyList()
-    val linkProperties = connectivityManager.getLinkProperties(network) ?: return emptyList()
-    return linkProperties.dnsServers
-        .mapNotNull(::resolverLabel)
-}
-
-private fun resolverLabel(address: InetAddress): String? {
-    val hostAddress = address.hostAddress?.substringBefore('%') ?: return null
-    return "$hostAddress:53"
-}
+fun resolverDefaultsText(): String = PUBLIC_RESOLVER_DEFAULTS.joinToString(separator = "\n")
