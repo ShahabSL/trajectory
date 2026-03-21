@@ -1,8 +1,8 @@
 use crate::auth::{ClientAccessKey, AUTH_TAG_LEN};
 use crate::protocol::{
-    build_probe_query, build_query, parse_dns_id, parse_response_meta, DOWNLINK_WINDOW, FLAG_DATA,
-    FLAG_DOWNLINK, FLAG_FIN, KEEPALIVE_MS, MAX_INFLIGHT_PER_RESOLVER, MAX_QUERY_PAYLOAD,
-    POLL_WINDOW, QUERY_TIMEOUT_MS, WINDOW_SIZE,
+    build_probe_query, build_query, max_query_payload_for_domain, parse_dns_id,
+    parse_response_meta, DOWNLINK_WINDOW, FLAG_DATA, FLAG_DOWNLINK, FLAG_FIN, KEEPALIVE_MS,
+    MAX_INFLIGHT_PER_RESOLVER, POLL_WINDOW, QUERY_TIMEOUT_MS, WINDOW_SIZE,
 };
 use anyhow::{bail, Context, Result};
 use rand::{thread_rng, Rng};
@@ -124,6 +124,7 @@ async fn handle_stream(stream: TcpStream, config: ClientConfig) -> Result<()> {
         config.domain,
         config.resolvers.len()
     ));
+    let max_query_payload = max_query_payload_for_domain(&config.domain)?;
 
     let mut probed = Vec::with_capacity(config.resolvers.len());
     let (resp_tx, mut resp_rx) = mpsc::unbounded_channel::<ResolverEvent>();
@@ -257,7 +258,7 @@ async fn handle_stream(stream: TcpStream, config: ClientConfig) -> Result<()> {
                 local_closed = true;
                 break;
             }
-            for part in chunk.chunks(MAX_QUERY_PAYLOAD) {
+            for part in chunk.chunks(max_query_payload) {
                 pending.insert(
                     next_seq,
                     UplinkChunk {
@@ -441,9 +442,7 @@ async fn handle_stream(stream: TcpStream, config: ClientConfig) -> Result<()> {
             } else {
                 (0, down_next, Vec::new(), QueryKind::KeepAlive)
             };
-            let request_id = thread_rng().gen::<u32>();
             let mut request = crate::protocol::RequestPacket {
-                request_id,
                 session_id,
                 flags,
                 down_ack: down_next,
