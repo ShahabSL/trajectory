@@ -16,8 +16,7 @@ CONNECTION_MODE_EXTRA="cc.sevenb.trajectorymobile.extra.CONNECTION_MODE"
 TEST_MODE="${TRAJECTORY_TEST_MODE:-both}"
 TEST_ACCESS_KEY="${TRAJECTORY_TEST_ACCESS_KEY:-traj1_00000001_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA}"
 TEST_DOMAIN="${TRAJECTORY_TEST_DOMAIN:-t.7-b.cc}"
-DEFAULT_TEST_RESOLVERS="1.1.1.1:53,1.0.0.1:53,8.8.8.8:53,8.8.4.4:53,9.9.9.9:53"
-TEST_RESOLVERS="${TRAJECTORY_TEST_RESOLVERS:-$DEFAULT_TEST_RESOLVERS}"
+TEST_RESOLVERS="${TRAJECTORY_TEST_RESOLVERS:-}"
 TEST_LISTEN_PORT="${TRAJECTORY_TEST_LISTEN_PORT:-7000}"
 TEST_KEEP_ALIVE_MS="${TRAJECTORY_TEST_KEEP_ALIVE_MS:-50}"
 ANDROID_SERIAL="${ANDROID_SERIAL:-}"
@@ -51,7 +50,12 @@ require_device() {
 
   adb_cmd=(adb -s "$ANDROID_SERIAL")
   "${adb_cmd[@]}" wait-for-device >/dev/null
-  until [[ "$("${adb_cmd[@]}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; do
+  until {
+    boot_completed="$("${adb_cmd[@]}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+    dev_bootcomplete="$("${adb_cmd[@]}" shell getprop dev.bootcomplete 2>/dev/null | tr -d '\r')"
+    boot_animation="$("${adb_cmd[@]}" shell getprop init.svc.bootanim 2>/dev/null | tr -d '\r')"
+    [[ "$boot_completed" == "1" || "$dev_bootcomplete" == "1" || "$boot_animation" == "stopped" ]]
+  }; do
     sleep 2
   done
 }
@@ -63,14 +67,17 @@ start_app() {
   "${adb_cmd[@]}" forward --remove "tcp:$HOST_FORWARD_PORT" >/dev/null 2>&1 || true
   "${adb_cmd[@]}" logcat -c
 
-  "${adb_cmd[@]}" shell am start -n "$ACTIVITY_NAME" \
+  start_cmd=("${adb_cmd[@]}" shell am start -n "$ACTIVITY_NAME" \
     --ez "$AUTOSTART_EXTRA" true \
     --es "$ACCESS_KEY_EXTRA" "$TEST_ACCESS_KEY" \
     --es "$DOMAIN_EXTRA" "$TEST_DOMAIN" \
-    --es "$RESOLVERS_EXTRA" "$TEST_RESOLVERS" \
     --es "$LISTEN_PORT_EXTRA" "$TEST_LISTEN_PORT" \
     --es "$KEEP_ALIVE_EXTRA" "$TEST_KEEP_ALIVE_MS" \
-    --es "$CONNECTION_MODE_EXTRA" "$mode" >/dev/null
+    --es "$CONNECTION_MODE_EXTRA" "$mode")
+  if [[ -n "$TEST_RESOLVERS" ]]; then
+    start_cmd+=(--es "$RESOLVERS_EXTRA" "$TEST_RESOLVERS")
+  fi
+  "${start_cmd[@]}" >/dev/null
   sleep 3
 }
 
@@ -181,7 +188,7 @@ run_vpn_mode() {
     exit 1
   fi
 
-  "${adb_cmd[@]}" shell input keyevent 3 >/dev/null
+  "${adb_cmd[@]}" shell am start -a android.intent.action.MAIN -c android.intent.category.HOME >/dev/null
   sleep 5
 
   local service_after_home
@@ -222,7 +229,7 @@ run_proxy_mode() {
   "${adb_cmd[@]}" forward "tcp:$HOST_FORWARD_PORT" "tcp:$TEST_LISTEN_PORT" >/dev/null
   curl -I --max-time 20 --socks5-hostname "127.0.0.1:$HOST_FORWARD_PORT" https://example.com >/dev/null
 
-  "${adb_cmd[@]}" shell input keyevent 3 >/dev/null
+  "${adb_cmd[@]}" shell am start -a android.intent.action.MAIN -c android.intent.category.HOME >/dev/null
   sleep 5
 
   local service_after_home

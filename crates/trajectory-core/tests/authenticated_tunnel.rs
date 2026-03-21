@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -47,6 +47,69 @@ async fn spawn_echo_target(bind: SocketAddr) -> JoinHandle<()> {
             });
         }
     })
+}
+
+async fn spawn_tcp_fallback_resolver(
+    bind: SocketAddr,
+    upstream: SocketAddr,
+) -> (JoinHandle<()>, JoinHandle<()>) {
+    let udp_task = tokio::spawn(async move {
+        let socket = UdpSocket::bind(bind).await.expect("bind udp blackhole resolver");
+        let mut buf = [0u8; 2048];
+        loop {
+            if socket.recv_from(&mut buf).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let tcp_task = tokio::spawn(async move {
+        let listener = TcpListener::bind(bind).await.expect("bind tcp fallback resolver");
+        loop {
+            let Ok((mut downstream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut length_bytes = [0u8; 2];
+                if downstream.read_exact(&mut length_bytes).await.is_err() {
+                    return;
+                }
+                let query_len = u16::from_be_bytes(length_bytes) as usize;
+                let mut query = vec![0u8; query_len];
+                if downstream.read_exact(&mut query).await.is_err() {
+                    return;
+                }
+
+                let upstream_socket = match UdpSocket::bind("127.0.0.1:0").await {
+                    Ok(socket) => socket,
+                    Err(_) => return,
+                };
+                if upstream_socket.connect(upstream).await.is_err() {
+                    return;
+                }
+                if upstream_socket.send(&query).await.is_err() {
+                    return;
+                }
+
+                let mut response = vec![0u8; 4096];
+                let response_len = match timeout(Duration::from_secs(2), upstream_socket.recv(&mut response)).await {
+                    Ok(Ok(len)) => len,
+                    _ => return,
+                };
+                let response = &response[..response_len];
+                if downstream
+                    .write_all(&(response.len() as u16).to_be_bytes())
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let _ = downstream.write_all(response).await;
+            });
+        }
+    });
+
+    (udp_task, tcp_task)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -175,5 +238,76 @@ async fn unauthorized_client_is_rejected_by_the_server() {
         .await
         .expect("server shutdown timeout")
         .expect("server shutdown failed");
+    echo_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn client_falls_back_to_tcp_for_ip_resolvers_when_udp_is_blocked() {
+    let access_key = ClientAccessKey::generate();
+    let echo_addr = free_tcp_addr();
+    let server_addr = free_udp_addr();
+    let client_addr = free_tcp_addr();
+    let resolver_port = free_tcp_addr().port();
+    let resolver_addr: SocketAddr = format!("127.0.0.1:{resolver_port}")
+        .parse()
+        .expect("resolver addr");
+
+    let echo_task = spawn_echo_target(echo_addr).await;
+    let (resolver_udp_task, resolver_tcp_task) =
+        spawn_tcp_fallback_resolver(resolver_addr, server_addr).await;
+
+    let authorized_clients = Arc::new(HashMap::from([(access_key.client_id, access_key.clone())]));
+    let server_config = ServerConfig {
+        bind: server_addr,
+        domain: "t.test".to_owned(),
+        target: echo_addr,
+        authorized_clients,
+    };
+    let (server_shutdown_tx, server_shutdown_rx) = watch::channel(false);
+    let server_task = tokio::spawn(async move {
+        run_server_until(server_config, server_shutdown_rx)
+            .await
+            .expect("server should run");
+    });
+
+    let mut client_config =
+        default_client_config(client_addr, vec![resolver_addr], "t.test".to_owned(), access_key);
+    client_config.request_timeout = Duration::from_millis(250);
+    let (client_shutdown_tx, client_shutdown_rx) = watch::channel(false);
+    let client_task = tokio::spawn(async move {
+        run_client_until(client_config, client_shutdown_rx)
+            .await
+            .expect("client should run");
+    });
+
+    sleep(Duration::from_millis(500)).await;
+
+    let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(client_addr))
+        .await
+        .expect("tcp connect timeout")
+        .expect("tcp connect failed");
+    timeout(Duration::from_secs(5), stream.write_all(b"ping"))
+        .await
+        .expect("tcp write timeout")
+        .expect("tcp write failed");
+    let mut response = vec![0u8; 16];
+    let len = timeout(Duration::from_secs(5), stream.read(&mut response))
+        .await
+        .expect("tcp read timeout")
+        .expect("tcp read failed");
+    assert_eq!(&response[..len], b"pong:ping");
+
+    let _ = client_shutdown_tx.send(true);
+    let _ = server_shutdown_tx.send(true);
+    timeout(Duration::from_secs(5), client_task)
+        .await
+        .expect("client shutdown timeout")
+        .expect("client shutdown failed");
+    timeout(Duration::from_secs(5), server_task)
+        .await
+        .expect("server shutdown timeout")
+        .expect("server shutdown failed");
+    resolver_udp_task.abort();
+    resolver_tcp_task.abort();
     echo_task.abort();
 }
