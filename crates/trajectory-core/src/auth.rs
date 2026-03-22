@@ -142,7 +142,10 @@ impl StoredClientRegistry {
     }
 }
 
-pub fn compute_auth_tag(secret: &[u8; ACCESS_KEY_SECRET_LEN], message: &[u8]) -> [u8; AUTH_TAG_LEN] {
+pub fn compute_auth_tag(
+    secret: &[u8; ACCESS_KEY_SECRET_LEN],
+    message: &[u8],
+) -> [u8; AUTH_TAG_LEN] {
     let hash = blake3::keyed_hash(secret, message);
     let mut tag = [0u8; AUTH_TAG_LEN];
     tag.copy_from_slice(&hash.as_bytes()[..AUTH_TAG_LEN]);

@@ -12,14 +12,7 @@ pub const FLAG_FIN: u8 = 1 << 1;
 pub const FLAG_DOWNLINK: u8 = 1 << 2;
 pub const FLAG_GAP: u8 = 1 << 3;
 pub const MAX_RESPONSE_PAYLOAD: usize = 4096;
-pub const RESPONSE_CHUNK_SIZE: usize = 1024;
 pub const DNS_MAX_PAYLOAD: u16 = 1400;
-pub const WINDOW_SIZE: usize = 200;
-pub const DOWNLINK_WINDOW: usize = 40;
-pub const POLL_WINDOW: usize = 200;
-pub const QUERY_TIMEOUT_MS: u64 = 250;
-pub const KEEPALIVE_MS: u64 = 100;
-pub const MAX_INFLIGHT_PER_RESOLVER: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestPacket {
@@ -71,14 +64,18 @@ impl RequestPacket {
 
     pub fn sign(&mut self, access_key: &ClientAccessKey) -> Result<()> {
         self.client_id = access_key.client_id;
-        self.auth_tag =
-            compute_auth_tag(&access_key.secret, &self.encode_with_tag([0; AUTH_TAG_LEN])?);
+        self.auth_tag = compute_auth_tag(
+            &access_key.secret,
+            &self.encode_with_tag([0; AUTH_TAG_LEN])?,
+        );
         Ok(())
     }
 
     pub fn verify(&self, access_key: &ClientAccessKey) -> Result<bool> {
-        let expected =
-            compute_auth_tag(&access_key.secret, &self.encode_with_tag([0; AUTH_TAG_LEN])?);
+        let expected = compute_auth_tag(
+            &access_key.secret,
+            &self.encode_with_tag([0; AUTH_TAG_LEN])?,
+        );
         Ok(self.client_id == access_key.client_id && self.auth_tag == expected)
     }
 
@@ -118,14 +115,18 @@ impl ResponsePacket {
     }
 
     pub fn sign(&mut self, access_key: &ClientAccessKey) -> Result<()> {
-        self.auth_tag =
-            compute_auth_tag(&access_key.secret, &self.encode_with_tag([0; AUTH_TAG_LEN])?);
+        self.auth_tag = compute_auth_tag(
+            &access_key.secret,
+            &self.encode_with_tag([0; AUTH_TAG_LEN])?,
+        );
         Ok(())
     }
 
     pub fn verify(&self, access_key: &ClientAccessKey) -> Result<bool> {
-        let expected =
-            compute_auth_tag(&access_key.secret, &self.encode_with_tag([0; AUTH_TAG_LEN])?);
+        let expected = compute_auth_tag(
+            &access_key.secret,
+            &self.encode_with_tag([0; AUTH_TAG_LEN])?,
+        );
         Ok(self.auth_tag == expected)
     }
 
@@ -171,7 +172,10 @@ pub fn decode_name(name: &Name, domain: &str) -> Result<RequestPacket> {
         bail!("wrong suffix");
     }
     let prefix = &query_name[..query_name.len() - suffix_with_dot.len()];
-    let labels: Vec<&str> = prefix.split('.').filter(|label| !label.is_empty()).collect();
+    let labels: Vec<&str> = prefix
+        .split('.')
+        .filter(|label| !label.is_empty())
+        .collect();
     if labels.len() < 2 {
         bail!("missing payload labels");
     }
@@ -184,11 +188,18 @@ pub fn decode_name(name: &Name, domain: &str) -> Result<RequestPacket> {
 }
 
 pub fn build_query(request: &RequestPacket, domain: &str) -> Result<(u16, Vec<u8>)> {
+    let id = thread_rng().gen::<u16>();
+    let wire = build_query_with_id(id, request, domain)?;
+    Ok((id, wire))
+}
+
+pub fn build_query_with_id(id: u16, request: &RequestPacket, domain: &str) -> Result<Vec<u8>> {
     let qname = encode_query_name(request, domain)?;
-    build_query_wire(qname, u16::from(RecordType::TXT))
+    build_query_wire(id, qname, u16::from(RecordType::TXT))
 }
 
 pub fn build_probe_query(domain: &str) -> Result<(u16, Vec<u8>)> {
+    let id = thread_rng().gen::<u16>();
     let domain_name = normalize_domain(domain)?;
     let labels = domain_name
         .trim_end_matches('.')
@@ -197,7 +208,8 @@ pub fn build_probe_query(domain: &str) -> Result<(u16, Vec<u8>)> {
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     let qname = encode_labels(&labels)?;
-    build_query_wire(qname, u16::from(RecordType::A))
+    let wire = build_query_wire(id, qname, u16::from(RecordType::A))?;
+    Ok((id, wire))
 }
 
 pub fn max_query_payload_for_domain(domain: &str) -> Result<usize> {
@@ -231,8 +243,7 @@ pub fn parse_dns_id(bytes: &[u8]) -> Result<u16> {
     Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
-fn build_query_wire(qname: Vec<u8>, qtype: u16) -> Result<(u16, Vec<u8>)> {
-    let id = thread_rng().gen::<u16>();
+fn build_query_wire(id: u16, qname: Vec<u8>, qtype: u16) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(64 + qname.len());
     out.extend_from_slice(&id.to_be_bytes());
     out.extend_from_slice(&0x0100u16.to_be_bytes());
@@ -244,7 +255,7 @@ fn build_query_wire(qname: Vec<u8>, qtype: u16) -> Result<(u16, Vec<u8>)> {
     out.extend_from_slice(&qtype.to_be_bytes());
     out.extend_from_slice(&1u16.to_be_bytes());
     append_opt(&mut out, DNS_MAX_PAYLOAD);
-    Ok((id, out))
+    Ok(out)
 }
 
 pub fn parse_query(bytes: &[u8]) -> Result<ParsedQuery> {
@@ -323,7 +334,8 @@ pub fn decode_query_request(query: &ParsedQuery, domain: &str) -> Result<Request
 pub fn build_empty_response(query: &ParsedQuery, response_code: ResponseCode) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(64 + query.question_wire.len());
     out.extend_from_slice(&query.id.to_be_bytes());
-    let flags = 0x8400u16 | (response_code.low() as u16) | if query.recursion_desired { 0x0100 } else { 0 };
+    let flags =
+        0x8400u16 | (response_code.low() as u16) | if query.recursion_desired { 0x0100 } else { 0 };
     out.extend_from_slice(&flags.to_be_bytes());
     out.extend_from_slice(&1u16.to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
@@ -580,9 +592,9 @@ mod tests {
             auth_tag: [3; AUTH_TAG_LEN],
             payload: vec![5; 32],
         };
-        let (_, wire) = build_query(&request, "t.7-b.cc").unwrap();
+        let (_, wire) = build_query(&request, "t.example").unwrap();
         let message = parse_query(&wire).unwrap();
-        let decoded = decode_query_request(&message, "t.7-b.cc").unwrap();
+        let decoded = decode_query_request(&message, "t.example").unwrap();
         assert_eq!(decoded, request);
 
         let response = ResponsePacket {
@@ -625,6 +637,6 @@ mod tests {
 
     #[test]
     fn short_domains_allow_larger_request_payloads() {
-        assert!(max_query_payload_for_domain("t.7-b.cc").unwrap() >= 110);
+        assert!(max_query_payload_for_domain("t.example").unwrap() >= 110);
     }
 }

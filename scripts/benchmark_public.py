@@ -5,18 +5,20 @@ This script:
 1. Builds the local Trajectory binary.
 2. Clones/builds upstream Slipstream locally if needed.
 3. SSHes into the benchmark VPS from `.secrets/server.env`.
-4. Installs a one-shot remote TCP sink plus a server unit for either implementation.
+4. Installs a one-shot remote HTTP payload service plus a server unit for either implementation.
 5. Runs the matching client locally through a public resolver.
-6. Compares delivered bytes and measured throughput on the server side.
+6. Fetches the payload through the tunnel and compares delivered bytes and throughput.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import pathlib
 import shlex
+import secrets
 import socket
 import subprocess
 import sys
@@ -36,12 +38,14 @@ REMOTE_SINK_PORT = 19000
 BENCH_SERVICE = "trajectory-bench-impl.service"
 SINK_SERVICE = "trajectory-bench-sink.service"
 TRAJECTORY_SERVICE = "trajectory.service"
+TRAJECTORY_SOCKS_SERVICE = "trajectory-socks.service"
 BENCH_VARIANT_SERVICES = [
     BENCH_SERVICE,
     SINK_SERVICE,
     "trajectory-bench-trajectory.service",
     "trajectory-bench-slipstream.service",
 ]
+BENCH_CLEANUP_SERVICES = [*BENCH_VARIANT_SERVICES, TRAJECTORY_SERVICE]
 
 REMOTE_SINK_SCRIPT = textwrap.dedent(
     """\
@@ -56,6 +60,7 @@ REMOTE_SINK_SCRIPT = textwrap.dedent(
     parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--status", required=True)
+    parser.add_argument("--size-bytes", type=int, required=True)
     args = parser.parse_args()
 
     def flush_status(payload):
@@ -72,16 +77,38 @@ REMOTE_SINK_SCRIPT = textwrap.dedent(
 
     conn, _ = server.accept()
     conn.settimeout(2.0)
-    start = time.perf_counter()
     total = 0
-    last_flush = start
+    header = b""
+    body_chunk = b"x" * 65536
 
     with conn:
-        while True:
+        while b"\\r\\n\\r\\n" not in header:
             try:
-                chunk = conn.recv(65536)
+                chunk = conn.recv(4096)
             except socket.timeout:
-                now = time.perf_counter()
+                continue
+            if not chunk:
+                flush_status({"ready": True, "complete": False, "bytes": 0, "elapsed": 0.0})
+                raise SystemExit(1)
+            header += chunk
+
+        response_header = (
+            f"HTTP/1.1 200 OK\\r\\n"
+            f"Content-Length: {args.size_bytes}\\r\\n"
+            f"Content-Type: application/octet-stream\\r\\n"
+            f"Connection: close\\r\\n"
+            f"\\r\\n"
+        ).encode("ascii")
+        conn.sendall(response_header)
+
+        start = time.perf_counter()
+        last_flush = start
+        while total < args.size_bytes:
+            part = body_chunk[: min(len(body_chunk), args.size_bytes - total)]
+            now = time.perf_counter()
+            try:
+                conn.sendall(part)
+            except (BrokenPipeError, ConnectionResetError):
                 flush_status(
                     {
                         "ready": True,
@@ -90,11 +117,8 @@ REMOTE_SINK_SCRIPT = textwrap.dedent(
                         "elapsed": now - start,
                     }
                 )
-                continue
-            if not chunk:
-                break
-            total += len(chunk)
-            now = time.perf_counter()
+                raise SystemExit(1)
+            total += len(part)
             if now - last_flush >= 0.2:
                 flush_status(
                     {
@@ -133,6 +157,12 @@ class BenchResult:
         if self.elapsed_seconds <= 0:
             return 0.0
         return self.bytes_delivered / self.elapsed_seconds
+
+
+@dataclass
+class BenchAccessKey:
+    access_key: str
+    registry_path: pathlib.Path
 
 
 class SshSession:
@@ -179,6 +209,12 @@ class SshSession:
             "-o",
             "NumberOfPasswordPrompts=1",
             "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "ServerAliveInterval=5",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-o",
             f"UserKnownHostsFile={self.known_hosts}",
             "-o",
             "StrictHostKeyChecking=yes",
@@ -195,25 +231,38 @@ class SshSession:
             "-o",
             "NumberOfPasswordPrompts=1",
             "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "ServerAliveInterval=5",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-o",
             f"UserKnownHostsFile={self.known_hosts}",
             "-o",
             "StrictHostKeyChecking=yes",
         ]
 
-    def remote(self, command: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def remote(
+        self,
+        command: str,
+        check: bool = True,
+        timeout_seconds: int = 45,
+    ) -> subprocess.CompletedProcess[str]:
         return run(
             ["setsid", "-w", *self.ssh_args(), command],
             env=self.base_env(),
             capture_output=True,
             check=check,
+            timeout_seconds=timeout_seconds,
         )
 
-    def copy(self, paths: list[pathlib.Path], remote_dir: str) -> None:
+    def copy(self, paths: list[pathlib.Path], remote_dir: str, timeout_seconds: int = 120) -> None:
         run(
             ["setsid", "-w", *self.scp_args(), *map(str, paths), f"{self.auth.user}@{self.auth.host}:{remote_dir}"],
             env=self.base_env(),
             capture_output=True,
             check=True,
+            timeout_seconds=timeout_seconds,
         )
 
 
@@ -226,7 +275,7 @@ def parse_args() -> argparse.Namespace:
         dest="resolvers",
         help="Public resolver to use. Repeat to benchmark multipath over several resolvers.",
     )
-    parser.add_argument("--domain", default="t.7-b.cc")
+    parser.add_argument("--domain", default="test.example.com")
     parser.add_argument("--size-bytes", type=int, default=65536)
     parser.add_argument("--slipstream-dir", type=pathlib.Path, default=DEFAULT_SLIPSTREAM_DIR)
     parser.add_argument("--native-cert-dir", type=pathlib.Path, default=DEFAULT_NATIVE_CERT_DIR)
@@ -254,11 +303,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     if not args.resolvers:
-        args.resolvers = ["1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"]
+        args.resolvers = [
+            "1.1.1.1:53",
+            "1.0.0.1:53",
+            "8.8.8.8:53",
+            "8.8.4.4:53",
+            "9.9.9.9:53",
+        ]
     auth = load_server_auth(args.server_env)
     ssh = SshSession(auth)
-    restore_trajectory = False
-
     try:
         trajectory_paths = ensure_trajectory_build(
             client_override=args.trajectory_client_bin,
@@ -266,16 +319,19 @@ def main() -> int:
         )
         slipstream_paths = ensure_slipstream_build(args.slipstream_dir)
         native_cert_paths = ensure_native_certs(args.native_cert_dir)
+        bench_access = generate_bench_access_key(ssh.temp_path)
 
-        restore_trajectory = remote_is_active(ssh, TRAJECTORY_SERVICE)
         stop_services(ssh, [*BENCH_VARIANT_SERVICES, TRAJECTORY_SERVICE])
+        wait_for_remote_dns_port_idle(ssh, timeout_seconds=30)
         install_remote_files(
             ssh,
             trajectory_paths,
             slipstream_paths,
             native_cert_paths,
             args.domain,
-            trajectory_client_db=args.trajectory_client_db,
+            bench_access.registry_path,
+            args.timeout_seconds + 120,
+            args.size_bytes,
         )
 
         results = []
@@ -293,7 +349,7 @@ def main() -> int:
                 slipstream_client=slipstream_paths["client"],
                 trajectory_listen_port=args.trajectory_listen_port,
                 slipstream_listen_port=args.slipstream_listen_port,
-                trajectory_access_key=args.trajectory_access_key,
+                trajectory_access_key=bench_access.access_key,
                 resolved_active=remote_is_active(ssh, "systemd-resolved"),
             )
             results.append(result)
@@ -302,9 +358,7 @@ def main() -> int:
         print_comparison(results)
         return 0
     finally:
-        stop_services(ssh, [*BENCH_VARIANT_SERVICES])
-        if restore_trajectory:
-            ssh.remote(f"systemctl start {TRAJECTORY_SERVICE}", check=False)
+        cleanup_remote_benchmark(ssh)
         if not args.keep_artifacts:
             ssh.remote(
                 f"rm -f {shlex.quote(REMOTE_STATUS_PATH)}; systemctl daemon-reload >/dev/null 2>&1 || true",
@@ -331,6 +385,7 @@ def run(
     env: dict[str, str] | None = None,
     capture_output: bool = True,
     check: bool = True,
+    timeout_seconds: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
@@ -339,6 +394,7 @@ def run(
         text=True,
         capture_output=capture_output,
         check=check,
+        timeout=timeout_seconds,
     )
 
 
@@ -423,7 +479,7 @@ def ensure_native_certs(target_dir: pathlib.Path) -> dict[str, pathlib.Path]:
             "-out",
             str(cert),
             "-subj",
-            "/CN=t.7-b.cc",
+            "/CN=test.example.com",
             "-addext",
             "basicConstraints=critical,CA:FALSE",
             "-addext",
@@ -431,7 +487,7 @@ def ensure_native_certs(target_dir: pathlib.Path) -> dict[str, pathlib.Path]:
             "-addext",
             "extendedKeyUsage=serverAuth",
             "-addext",
-            "subjectAltName=DNS:t.7-b.cc,DNS:test.example.com,DNS:localhost",
+            "subjectAltName=DNS:test.example.com,DNS:localhost",
         ],
         capture_output=False,
     )
@@ -445,7 +501,56 @@ def remote_is_active(ssh: SshSession, service: str) -> bool:
 
 def stop_services(ssh: SshSession, services: list[str]) -> None:
     names = " ".join(shlex.quote(service) for service in services)
-    ssh.remote(f"systemctl stop {names} >/dev/null 2>&1 || true", check=False)
+    try:
+        ssh.remote(
+            f"systemctl stop {names} >/dev/null 2>&1 || true",
+            check=False,
+            timeout_seconds=15,
+        )
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def wait_for_remote_dns_port_idle(ssh: SshSession, timeout_seconds: int) -> None:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        try:
+            result = ssh.remote(
+                "ss -ltnup | grep -E ':53[[:space:]]|:53$' >/dev/null 2>&1; echo $?",
+                check=False,
+                timeout_seconds=15,
+            )
+        except subprocess.TimeoutExpired:
+            time.sleep(0.5)
+            continue
+        if result.stdout.strip() == "1":
+            return
+        time.sleep(0.5)
+    raise TimeoutError("remote dns port 53 did not become idle")
+
+
+def cleanup_remote_benchmark(ssh: SshSession) -> None:
+    stop_services(ssh, BENCH_VARIANT_SERVICES)
+    try:
+        wait_for_remote_dns_port_idle(ssh, timeout_seconds=30)
+    except TimeoutError:
+        pass
+    ssh.remote(
+        " ".join(
+            [
+                "systemctl reset-failed",
+                *[shlex.quote(service) for service in BENCH_VARIANT_SERVICES],
+                ">/dev/null 2>&1 || true",
+            ]
+        ),
+        check=False,
+    )
+    ssh.remote(f"rm -f {shlex.quote(REMOTE_STATUS_PATH)} >/dev/null 2>&1 || true", check=False)
+    ssh.remote(
+        f"systemctl restart {TRAJECTORY_SOCKS_SERVICE} {TRAJECTORY_SERVICE}",
+        check=False,
+    )
+    ensure_remote_service_active(ssh, TRAJECTORY_SERVICE, timeout_seconds=15)
 
 
 def install_remote_files(
@@ -454,7 +559,9 @@ def install_remote_files(
     slipstream_paths: dict[str, pathlib.Path],
     native_cert_paths: dict[str, pathlib.Path],
     domain: str,
-    trajectory_client_db: str = "/opt/trajectory/trajectory-clients.json",
+    bench_registry_path: pathlib.Path,
+    runtime_max_seconds: int,
+    size_bytes: int,
 ) -> None:
     temp = ssh.temp_path
     sink_script = temp / "bench_sink.py"
@@ -465,14 +572,15 @@ def install_remote_files(
         textwrap.dedent(
             f"""\
             [Unit]
-            Description=Trajectory benchmark TCP sink
+            Description=Trajectory benchmark HTTP payload service
             After=network-online.target
             Wants=network-online.target
 
             [Service]
             Type=simple
-            ExecStart=/usr/bin/python3 {REMOTE_STAGE_DIR}/bench_sink.py --bind 127.0.0.1 --port {REMOTE_SINK_PORT} --status {REMOTE_STATUS_PATH}
+            ExecStart=/usr/bin/python3 {REMOTE_STAGE_DIR}/bench_sink.py --bind 127.0.0.1 --port {REMOTE_SINK_PORT} --status {REMOTE_STATUS_PATH} --size-bytes {size_bytes}
             Restart=no
+            RuntimeMaxSec={runtime_max_seconds}
 
             [Install]
             WantedBy=multi-user.target
@@ -493,8 +601,9 @@ def install_remote_files(
             [Service]
             Type=simple
             WorkingDirectory={REMOTE_STAGE_DIR}
-            ExecStart={REMOTE_STAGE_DIR}/trajectory-server --dns-listen-port 53 --target-address 127.0.0.1:{REMOTE_SINK_PORT} --domain {domain} --client-db {trajectory_client_db} --cert {REMOTE_STAGE_DIR}/cert.pem --key {REMOTE_STAGE_DIR}/key.pem
+            ExecStart={REMOTE_STAGE_DIR}/trajectory-server --dns-listen-port 53 --target-address 127.0.0.1:{REMOTE_SINK_PORT} --domain {domain} --client-db {REMOTE_STAGE_DIR}/trajectory-bench-clients.json --cert {REMOTE_STAGE_DIR}/cert.pem --key {REMOTE_STAGE_DIR}/key.pem
             Restart=no
+            RuntimeMaxSec={runtime_max_seconds}
 
             [Install]
             WantedBy=multi-user.target
@@ -517,6 +626,7 @@ def install_remote_files(
             WorkingDirectory={REMOTE_STAGE_DIR}
             ExecStart={REMOTE_STAGE_DIR}/slipstream-server --dns-listen-port=53 --target-address=127.0.0.1:{REMOTE_SINK_PORT} --domain {domain} --cert {REMOTE_STAGE_DIR}/cert.pem --key {REMOTE_STAGE_DIR}/key.pem
             Restart=no
+            RuntimeMaxSec={runtime_max_seconds}
 
             [Install]
             WantedBy=multi-user.target
@@ -541,6 +651,7 @@ def install_remote_files(
             slipstream_paths["key"],
             native_cert_paths["cert"],
             native_cert_paths["key"],
+            bench_registry_path,
             sink_script,
             sink_unit,
             trajectory_unit,
@@ -563,6 +674,7 @@ def install_remote_files(
             install -m 600 /tmp/trajectory-bench-upload/{slipstream_paths["key"].name} {REMOTE_STAGE_DIR}/key.pem
             install -m 644 /tmp/trajectory-bench-upload/{native_cert_paths["cert"].name} {REMOTE_STAGE_DIR}/native-cert.pem
             install -m 600 /tmp/trajectory-bench-upload/{native_cert_paths["key"].name} {REMOTE_STAGE_DIR}/native-key.pem
+            install -m 600 /tmp/trajectory-bench-upload/{bench_registry_path.name} {REMOTE_STAGE_DIR}/trajectory-bench-clients.json
             install -m 755 /tmp/trajectory-bench-upload/{sink_script.name} {REMOTE_STAGE_DIR}/bench_sink.py
             install -m 644 /tmp/trajectory-bench-upload/{sink_unit.name} /etc/systemd/system/{SINK_SERVICE}
             install -m 644 /tmp/trajectory-bench-upload/{trajectory_unit.name} /etc/systemd/system/{trajectory_unit.name}
@@ -595,7 +707,7 @@ def benchmark_once(
 
     if implementation == "trajectory":
         service_source = "trajectory-bench-trajectory.service"
-        listen_port = trajectory_listen_port
+        listen_port = choose_local_listen_port(trajectory_listen_port)
         client_cmd = [
             str(trajectory_paths["client"]),
             "--tcp-listen-port",
@@ -614,7 +726,7 @@ def benchmark_once(
             client_cmd.extend(["--resolver", resolver])
     else:
         service_source = "trajectory-bench-slipstream.service"
-        listen_port = slipstream_listen_port
+        listen_port = choose_local_listen_port(slipstream_listen_port)
         client_cmd = [
             str(slipstream_client),
             "--tcp-listen-port",
@@ -632,7 +744,8 @@ def benchmark_once(
     if needs_resolver_port and resolved_active:
         ssh.remote("systemctl stop systemd-resolved >/dev/null 2>&1 || true", check=False)
 
-    stop_services(ssh, BENCH_VARIANT_SERVICES)
+    stop_services(ssh, [*BENCH_VARIANT_SERVICES, TRAJECTORY_SERVICE])
+    wait_for_remote_dns_port_idle(ssh, timeout_seconds=30)
     ssh.remote(
         textwrap.dedent(
             f"""\
@@ -660,19 +773,31 @@ def benchmark_once(
         if client.poll() is not None:
             raise RuntimeError(client.stdout.read() if client.stdout else "client exited early")
 
-        send_payload(listen_port, size_bytes)
+        fetch = start_http_fetch(listen_port, timeout_seconds)
         status = wait_for_remote_completion(
             ssh,
+            service=BENCH_SERVICE,
+            client_fetch=fetch,
             timeout_seconds=timeout_seconds,
             stall_seconds=stall_seconds,
+        )
+        client_fetch = finish_http_fetch(fetch, abort=bool(status.get("timed_out", False)))
+        delivered_bytes = min(int(status.get("bytes", 0)), client_fetch["bytes"])
+        elapsed_seconds = max(float(status.get("elapsed", 0.0)), client_fetch["elapsed"])
+        complete = (
+            bool(status.get("complete", False))
+            and not bool(status.get("timed_out", False))
+            and client_fetch["http_code"] == 200
+            and client_fetch["bytes"] == size_bytes
+            and delivered_bytes == size_bytes
         )
         return BenchResult(
             implementation=implementation,
             bytes_sent=size_bytes,
-            bytes_delivered=int(status.get("bytes", 0)),
-            elapsed_seconds=float(status.get("elapsed", 0.0)),
-            complete=bool(status.get("complete", False)),
-            timed_out=bool(status.get("timed_out", False)),
+            bytes_delivered=delivered_bytes,
+            elapsed_seconds=elapsed_seconds,
+            complete=complete,
+            timed_out=bool(status.get("timed_out", False)) or client_fetch["http_code"] != 200,
         )
     finally:
         client.terminate()
@@ -681,6 +806,7 @@ def benchmark_once(
         except subprocess.TimeoutExpired:
             client.kill()
         stop_services(ssh, BENCH_VARIANT_SERVICES)
+        wait_for_remote_dns_port_idle(ssh, timeout_seconds=30)
         if needs_resolver_port and resolved_active:
             ssh.remote("systemctl start systemd-resolved >/dev/null 2>&1 || true", check=False)
 
@@ -693,6 +819,21 @@ def wait_for_remote_status_ready(ssh: SshSession, timeout_seconds: int) -> None:
             return
         time.sleep(0.5)
     raise TimeoutError("remote sink did not become ready")
+
+
+def choose_local_listen_port(preferred_port: int) -> int:
+    candidates = [preferred_port, 0, 0, 0]
+    for candidate in candidates:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", candidate))
+            return int(sock.getsockname()[1])
+        except OSError:
+            continue
+        finally:
+            sock.close()
+    raise RuntimeError("failed to find a free local benchmark listen port")
 
 
 def ensure_remote_service_active(ssh: SshSession, service: str, timeout_seconds: int) -> None:
@@ -719,6 +860,8 @@ def fetch_remote_status(ssh: SshSession) -> dict[str, object]:
 def wait_for_remote_completion(
     ssh: SshSession,
     *,
+    service: str,
+    client_fetch: subprocess.Popen[str],
     timeout_seconds: int,
     stall_seconds: int,
 ) -> dict[str, object]:
@@ -734,6 +877,14 @@ def wait_for_remote_completion(
             last_progress = time.time()
         if status.get("complete"):
             return status
+        if client_fetch.poll() is not None and current_bytes == 0 and not status.get("complete"):
+            status["timed_out"] = True
+            status["service_failed"] = not remote_is_active(ssh, service)
+            return status
+        if current_bytes == 0 and not remote_is_active(ssh, service):
+            status["timed_out"] = True
+            status["service_failed"] = True
+            return status
         if time.time() - last_progress >= stall_seconds:
             status["timed_out"] = True
             return status
@@ -744,25 +895,73 @@ def wait_for_remote_completion(
     return status
 
 
-def send_payload(port: int, size_bytes: int) -> None:
-    sock = socket.create_connection(("127.0.0.1", port), timeout=30)
+def generate_bench_access_key(temp_dir: pathlib.Path) -> BenchAccessKey:
+    client_id = secrets.randbits(32)
+    secret = secrets.token_bytes(32)
+    secret_base32 = base64.b32encode(secret).decode("ascii").rstrip("=")
+    access_key = f"traj1_{client_id:08x}_{secret_base32}"
+    registry_path = temp_dir / "trajectory-bench-clients.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "keys": [
+                    {
+                        "id": client_id,
+                        "label": "Benchmark",
+                        "secret_base32": secret_base32,
+                        "created_unix": int(time.time()),
+                        "enabled": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return BenchAccessKey(access_key=access_key, registry_path=registry_path)
+
+
+def start_http_fetch(port: int, timeout_seconds: int) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [
+            "curl",
+            "--http1.1",
+            "--silent",
+            "--show-error",
+            "--output",
+            "/dev/null",
+            "--write-out",
+            "%{http_code} %{size_download} %{time_total}",
+            "--max-time",
+            str(timeout_seconds),
+            f"http://127.0.0.1:{port}/payload",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def finish_http_fetch(process: subprocess.Popen[str], *, abort: bool) -> dict[str, object]:
+    started = time.perf_counter()
+    if abort and process.poll() is None:
+        process.terminate()
     try:
-        remaining = size_bytes
-        chunk = b"x" * 65536
-        while remaining > 0:
-            part = chunk[: min(len(chunk), remaining)]
-            sock.sendall(part)
-            remaining -= len(part)
-        time.sleep(2.0)
-        sock.shutdown(socket.SHUT_WR)
-        sock.settimeout(2.0)
-        try:
-            while sock.recv(65536):
-                pass
-        except socket.timeout:
-            pass
-    finally:
-        sock.close()
+        stdout, _stderr = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, _stderr = process.communicate()
+    elapsed = time.perf_counter() - started
+    if process.returncode != 0:
+        return {"http_code": 0, "bytes": 0, "elapsed": elapsed}
+    parts = stdout.strip().split()
+    if len(parts) != 3:
+        raise RuntimeError(f"unexpected curl output: {stdout!r}")
+    http_code, size_download, time_total = parts
+    return {
+        "http_code": int(http_code),
+        "bytes": int(float(size_download)),
+        "elapsed": float(time_total),
+    }
 
 
 def print_result(result: BenchResult) -> None:

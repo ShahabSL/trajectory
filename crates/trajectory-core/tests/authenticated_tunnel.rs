@@ -49,13 +49,13 @@ async fn spawn_echo_target(bind: SocketAddr) -> JoinHandle<()> {
     })
 }
 
-async fn spawn_recording_target(
-    bind: SocketAddr,
-) -> (JoinHandle<()>, oneshot::Receiver<Vec<u8>>) {
+async fn spawn_recording_target(bind: SocketAddr) -> (JoinHandle<()>, oneshot::Receiver<Vec<u8>>) {
     let (tx, rx) = oneshot::channel();
     let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
     let task = tokio::spawn(async move {
-        let listener = TcpListener::bind(bind).await.expect("bind recording target");
+        let listener = TcpListener::bind(bind)
+            .await
+            .expect("bind recording target");
         let Ok((mut stream, _)) = listener.accept().await else {
             return;
         };
@@ -81,7 +81,9 @@ async fn spawn_tcp_fallback_resolver(
     upstream: SocketAddr,
 ) -> (JoinHandle<()>, JoinHandle<()>) {
     let udp_task = tokio::spawn(async move {
-        let socket = UdpSocket::bind(bind).await.expect("bind udp blackhole resolver");
+        let socket = UdpSocket::bind(bind)
+            .await
+            .expect("bind udp blackhole resolver");
         let mut buf = [0u8; 2048];
         loop {
             if socket.recv_from(&mut buf).await.is_err() {
@@ -90,51 +92,57 @@ async fn spawn_tcp_fallback_resolver(
         }
     });
 
-    let tcp_task = tokio::spawn(async move {
-        let listener = TcpListener::bind(bind).await.expect("bind tcp fallback resolver");
-        loop {
-            let Ok((mut downstream, _)) = listener.accept().await else {
-                break;
-            };
-            tokio::spawn(async move {
-                let mut length_bytes = [0u8; 2];
-                if downstream.read_exact(&mut length_bytes).await.is_err() {
-                    return;
-                }
-                let query_len = u16::from_be_bytes(length_bytes) as usize;
-                let mut query = vec![0u8; query_len];
-                if downstream.read_exact(&mut query).await.is_err() {
-                    return;
-                }
-
-                let upstream_socket = match UdpSocket::bind("127.0.0.1:0").await {
-                    Ok(socket) => socket,
-                    Err(_) => return,
+    let tcp_task =
+        tokio::spawn(async move {
+            let listener = TcpListener::bind(bind)
+                .await
+                .expect("bind tcp fallback resolver");
+            loop {
+                let Ok((mut downstream, _)) = listener.accept().await else {
+                    break;
                 };
-                if upstream_socket.connect(upstream).await.is_err() {
-                    return;
-                }
-                if upstream_socket.send(&query).await.is_err() {
-                    return;
-                }
+                tokio::spawn(async move {
+                    let mut length_bytes = [0u8; 2];
+                    if downstream.read_exact(&mut length_bytes).await.is_err() {
+                        return;
+                    }
+                    let query_len = u16::from_be_bytes(length_bytes) as usize;
+                    let mut query = vec![0u8; query_len];
+                    if downstream.read_exact(&mut query).await.is_err() {
+                        return;
+                    }
 
-                let mut response = vec![0u8; 4096];
-                let response_len = match timeout(Duration::from_secs(2), upstream_socket.recv(&mut response)).await {
-                    Ok(Ok(len)) => len,
-                    _ => return,
-                };
-                let response = &response[..response_len];
-                if downstream
-                    .write_all(&(response.len() as u16).to_be_bytes())
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                let _ = downstream.write_all(response).await;
-            });
-        }
-    });
+                    let upstream_socket = match UdpSocket::bind("127.0.0.1:0").await {
+                        Ok(socket) => socket,
+                        Err(_) => return,
+                    };
+                    if upstream_socket.connect(upstream).await.is_err() {
+                        return;
+                    }
+                    if upstream_socket.send(&query).await.is_err() {
+                        return;
+                    }
+
+                    let mut response = vec![0u8; 4096];
+                    let response_len =
+                        match timeout(Duration::from_secs(2), upstream_socket.recv(&mut response))
+                            .await
+                        {
+                            Ok(Ok(len)) => len,
+                            _ => return,
+                        };
+                    let response = &response[..response_len];
+                    if downstream
+                        .write_all(&(response.len() as u16).to_be_bytes())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let _ = downstream.write_all(response).await;
+                });
+            }
+        });
 
     (udp_task, tcp_task)
 }
@@ -162,8 +170,12 @@ async fn authenticated_client_and_server_forward_tcp() {
             .expect("server should run");
     });
 
-    let mut client_config =
-        default_client_config(client_addr, vec![server_addr], "t.test".to_owned(), access_key);
+    let mut client_config = default_client_config(
+        client_addr,
+        vec![server_addr],
+        "t.test".to_owned(),
+        access_key,
+    );
     client_config.request_timeout = Duration::from_millis(250);
     let (client_shutdown_tx, client_shutdown_rx) = watch::channel(false);
     let client_task = tokio::spawn(async move {
@@ -225,8 +237,12 @@ async fn authenticated_client_and_server_forward_multichunk_tcp() {
             .expect("server should run");
     });
 
-    let mut client_config =
-        default_client_config(client_addr, vec![server_addr], "t.test".to_owned(), access_key);
+    let mut client_config = default_client_config(
+        client_addr,
+        vec![server_addr],
+        "t.test".to_owned(),
+        access_key,
+    );
     client_config.request_timeout = Duration::from_millis(350);
     let (client_shutdown_tx, client_shutdown_rx) = watch::channel(false);
     let client_task = tokio::spawn(async move {
@@ -321,7 +337,10 @@ async fn unauthorized_client_is_rejected_by_the_server() {
 
     let mut response = vec![0u8; 16];
     let outcome = timeout(Duration::from_secs(2), stream.read(&mut response)).await;
-    assert!(outcome.is_err(), "unauthorized client unexpectedly forwarded traffic");
+    assert!(
+        outcome.is_err(),
+        "unauthorized client unexpectedly forwarded traffic"
+    );
 
     let _ = client_shutdown_tx.send(true);
     let _ = server_shutdown_tx.send(true);
@@ -365,8 +384,12 @@ async fn client_falls_back_to_tcp_for_ip_resolvers_when_udp_is_blocked() {
             .expect("server should run");
     });
 
-    let mut client_config =
-        default_client_config(client_addr, vec![resolver_addr], "t.test".to_owned(), access_key);
+    let mut client_config = default_client_config(
+        client_addr,
+        vec![resolver_addr],
+        "t.test".to_owned(),
+        access_key,
+    );
     client_config.request_timeout = Duration::from_millis(250);
     let (client_shutdown_tx, client_shutdown_rx) = watch::channel(false);
     let client_task = tokio::spawn(async move {
