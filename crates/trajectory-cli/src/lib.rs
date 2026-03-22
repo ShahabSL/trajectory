@@ -8,8 +8,7 @@ pub fn load_client_registry(path: &Path) -> Result<StoredClientRegistry> {
         return Ok(StoredClientRegistry::default());
     }
     let bytes = fs::read(path).with_context(|| format!("read registry {}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("parse registry {}", path.display()))
+    serde_json::from_slice(&bytes).with_context(|| format!("parse registry {}", path.display()))
 }
 
 pub fn save_client_registry(path: &Path, registry: &StoredClientRegistry) -> Result<()> {

@@ -77,6 +77,7 @@ def artifact_manifest(target: str) -> dict[str, dict]:
             "display": "CLI",
             "binaries": [
                 release_dir / f"trajectory-client{binary_ext}",
+                release_dir / f"trajectory-admin{binary_ext}",
                 release_dir / f"trajectory-server{binary_ext}",
             ],
             "readme": cli_readme(target),
@@ -97,13 +98,13 @@ Target: {target}
 
 Included binaries:
 - trajectory-client
+- trajectory-admin
 - trajectory-server
 
 Quick start:
-1. Run trajectory-client locally and point it at your recursive resolvers.
-2. Connect to 127.0.0.1:7000 with SSH, or layer a SOCKS proxy with:
-   ssh -N -D 127.0.0.1:1080 -p 7000 root@127.0.0.1
-3. Point Firefox at SOCKS5 127.0.0.1:1080 with proxy DNS enabled.
+1. Install the server with deploy/install_server.sh.
+2. Create client access keys with trajectory-admin.
+3. Run trajectory-client locally and point applications at its SOCKS listener.
 
 See the repository README for the full tunnel and deployment flow.
 """

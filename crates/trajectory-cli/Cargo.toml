@@ -24,3 +24,7 @@ path = "src/bin/trajectory-server.rs"
 [[bin]]
 name = "trajectory-server-tui"
 path = "src/bin/trajectory-server-tui.rs"
+
+[[bin]]
+name = "trajectory-admin"
+path = "src/bin/trajectory-admin.rs"

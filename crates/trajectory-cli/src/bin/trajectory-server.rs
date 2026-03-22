@@ -22,6 +22,10 @@ async fn run() -> Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--help" | "-h" => {
+                print_usage();
+                return Ok(());
+            }
             "--dns-listen-port" | "-l" => {
                 listen_port = args
                     .next()
@@ -40,7 +44,9 @@ async fn run() -> Result<()> {
             }
             "--domain" | "-d" => domain = Some(args.next().context("missing domain")?),
             "--client-db" => {
-                client_db = Some(PathBuf::from(args.next().context("missing client db path")?));
+                client_db = Some(PathBuf::from(
+                    args.next().context("missing client db path")?,
+                ));
             }
             "--cert" | "-c" => {
                 let _ = args.next().context("missing cert path")?;
@@ -72,4 +78,22 @@ async fn run() -> Result<()> {
         authorized_clients: Arc::new(active_keys),
     })
     .await
+}
+
+fn print_usage() {
+    println!(
+        "\
+Usage: trajectory-server [options]
+
+Required:
+  -d, --domain <DOMAIN>              Authoritative domain
+      --client-db <PATH>             Client registry JSON path
+
+Optional:
+      --bind <HOST>                  Bind host (default: 0.0.0.0)
+  -l, --dns-listen-port <PORT>       DNS listen port (default: 53)
+  -6, --dns-listen-ipv6              Bind to :: instead of IPv4
+  -a, --target-address <HOST:PORT>   Upstream SOCKS5 target (default: 127.0.0.1:1080)
+  -h, --help                         Show this help"
+    );
 }

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use trajectory_core::auth::ClientAccessKey;
-use trajectory_core::client::{default_client_config, parse_socket_addr, require_resolvers};
+use trajectory_core::client::{default_client_config, default_public_resolvers, parse_socket_addr};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
@@ -21,6 +21,10 @@ async fn run() -> Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--help" | "-h" => {
+                print_usage();
+                return Ok(());
+            }
             "--tcp-listen-port" | "-l" => {
                 let port = args.next().context("missing tcp listen port")?;
                 listen = format!("127.0.0.1:{port}").parse()?;
@@ -52,14 +56,37 @@ async fn run() -> Result<()> {
 
     let domain = domain.context("missing required --domain")?;
     let access_key = access_key.context("missing required --access-key")?;
-    require_resolvers(&resolvers)?;
+    if resolvers.is_empty() {
+        resolvers = default_public_resolvers();
+    }
     let mut config = default_client_config(listen, resolvers, domain, access_key);
     if let Some(ms) = keep_alive_ms {
         config.keep_alive_interval = if ms == 0 {
-            std::time::Duration::from_millis(trajectory_core::protocol::KEEPALIVE_MS)
+            std::time::Duration::from_millis(trajectory_core::client::DEFAULT_KEEPALIVE_MS)
         } else {
             std::time::Duration::from_millis(ms)
         };
     }
     trajectory_core::client::run(config).await
+}
+
+fn print_usage() {
+    println!(
+        "\
+Usage: trajectory-client [options]
+
+Required:
+  -d, --domain <DOMAIN>              Authoritative domain
+  -k, --access-key <ACCESS_KEY>      Client access key
+
+Optional:
+  -l, --tcp-listen-port <PORT>       Local TCP listen port (default: 5201)
+  -r, --resolver <HOST:PORT>         Recursive resolver; repeat for multiple
+  -t, --keep-alive-interval <MS>     Keep-alive interval in milliseconds
+  -c, --congestion-control <NAME>    Accepted for compatibility
+  -g, --gso                          Accepted for compatibility
+  -h, --help                         Show this help
+
+If no resolvers are provided, Trajectory uses the built-in public resolver set."
+    );
 }

@@ -6,8 +6,9 @@ Conflicts=systemd-resolved.service
 
 [Service]
 Type=simple
+EnvironmentFile=/etc/trajectory/server.env
 WorkingDirectory=/opt/trajectory
-ExecStart=/opt/trajectory/trajectory-server --dns-listen-port 53 --target-address 127.0.0.1:1080 --domain t.7-b.cc --client-db /opt/trajectory/trajectory-clients.json
+ExecStart=/opt/trajectory/trajectory-server --bind ${TRAJECTORY_BIND_HOST} --dns-listen-port ${TRAJECTORY_DNS_LISTEN_PORT} --target-address ${TRAJECTORY_TARGET_ADDRESS} --domain ${TRAJECTORY_DOMAIN} --client-db ${TRAJECTORY_CLIENT_DB}
 Restart=always
 RestartSec=2
 

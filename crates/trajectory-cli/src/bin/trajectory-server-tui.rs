@@ -59,6 +59,10 @@ impl ServerTuiArgs {
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "--help" | "-h" => {
+                    print_usage();
+                    std::process::exit(0);
+                }
                 "--dns-listen-port" | "-l" => {
                     listen_port = args
                         .next()
@@ -94,6 +98,24 @@ impl ServerTuiArgs {
             client_db,
         })
     }
+}
+
+fn print_usage() {
+    println!(
+        "\
+Usage: trajectory-server-tui [options]
+
+Required:
+  -d, --domain <DOMAIN>              Authoritative domain
+
+Optional:
+      --bind <HOST>                  Bind host (default: 0.0.0.0)
+  -l, --dns-listen-port <PORT>       DNS listen port (default: 53)
+  -6, --dns-listen-ipv6              Bind to :: instead of IPv4
+  -a, --target-address <HOST:PORT>   Upstream SOCKS5 target (default: 127.0.0.1:1080)
+      --client-db <PATH>             Client registry path (default: trajectory-clients.json)
+  -h, --help                         Show this help"
+    );
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,7 +164,9 @@ impl ServerTuiApp {
             list_state,
             generated_key: None,
             pending_delete: None,
-            notice: "g: new client key | e: enable/disable | d: delete | s: start/stop server | q: quit".to_owned(),
+            notice:
+                "g: new client key | e: enable/disable | d: delete | s: start/stop server | q: quit"
+                    .to_owned(),
             server_state: ServerRunState::Stopped,
             server_handle: None,
             server_tx,
@@ -230,7 +254,8 @@ impl ServerTuiApp {
         if self.registry.keys.is_empty() {
             self.list_state.select(None);
         } else {
-            self.list_state.select(Some(index.min(self.registry.keys.len() - 1)));
+            self.list_state
+                .select(Some(index.min(self.registry.keys.len() - 1)));
         }
         self.sync_server_after_registry_change()?;
         Ok(())
@@ -278,7 +303,8 @@ impl ServerTuiApp {
         let active_keys = self.registry.active_keys()?;
         if active_keys.is_empty() {
             self.server_state = ServerRunState::Failed;
-            self.notice = "Generate and enable at least one client key before starting the server".to_owned();
+            self.notice =
+                "Generate and enable at least one client key before starting the server".to_owned();
             return Ok(());
         }
 
@@ -300,7 +326,9 @@ impl ServerTuiApp {
             {
                 Ok(runtime) => runtime,
                 Err(error) => {
-                    let _ = tx.send(ServerEvent::Failed(format!("runtime init failed: {error:#}")));
+                    let _ = tx.send(ServerEvent::Failed(format!(
+                        "runtime init failed: {error:#}"
+                    )));
                     return;
                 }
             };
@@ -338,7 +366,10 @@ impl ServerTuiApp {
             match event {
                 ServerEvent::Started => {
                     self.server_state = ServerRunState::Running;
-                    self.notice = format!("Server running on {} for {}", self.args.bind, self.args.domain);
+                    self.notice = format!(
+                        "Server running on {} for {}",
+                        self.args.bind, self.args.domain
+                    );
                 }
                 ServerEvent::Stopped => {
                     self.server_state = ServerRunState::Stopped;
@@ -369,7 +400,12 @@ impl ServerTuiApp {
 
         let header_text = Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("Trajectory Server", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Trajectory Server",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("  "),
                 Span::styled(
                     match self.server_state {
@@ -381,15 +417,22 @@ impl ServerTuiApp {
                     status_style.add_modifier(Modifier::BOLD),
                 ),
             ]),
-            Line::from(format!("Bind: {}    Domain: {}    Target: {}", self.args.bind, self.args.domain, self.args.target)),
-            Line::from(format!("Client registry: {}", self.args.client_db.display())),
+            Line::from(format!(
+                "Bind: {}    Domain: {}    Target: {}",
+                self.args.bind, self.args.domain, self.args.target
+            )),
+            Line::from(format!(
+                "Client registry: {}",
+                self.args.client_db.display()
+            )),
         ])
         .block(Block::default().borders(Borders::ALL).title("Server"))
         .wrap(Wrap { trim: false });
         frame.render_widget(header_text, header);
 
         let [list_area, detail_area] =
-            Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).areas(body);
+            Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
+                .areas(body);
 
         let items = if self.registry.keys.is_empty() {
             vec![ListItem::new("No client keys yet")]
@@ -409,22 +452,39 @@ impl ServerTuiApp {
         };
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title("Clients"))
-            .highlight_style(Style::default().bg(Color::Rgb(36, 63, 92)).add_modifier(Modifier::BOLD))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(36, 63, 92))
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("› ");
         frame.render_stateful_widget(list, list_area, &mut self.list_state);
 
-        let detail = if let Some(index) = self.list_state.selected().filter(|_| !self.registry.keys.is_empty()) {
+        let detail = if let Some(index) = self
+            .list_state
+            .selected()
+            .filter(|_| !self.registry.keys.is_empty())
+        {
             let entry = &self.registry.keys[index];
             let access_key = entry
                 .access_key_string()
                 .unwrap_or_else(|_| "Invalid stored key".to_owned());
             let mut detail_lines = vec![
                 Line::from(vec![
-                    Span::styled(&entry.label, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        &entry.label,
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(" "),
                     Span::styled(
                         if entry.enabled { "enabled" } else { "disabled" },
-                        Style::default().fg(if entry.enabled { Color::Green } else { Color::Yellow }),
+                        Style::default().fg(if entry.enabled {
+                            Color::Green
+                        } else {
+                            Color::Yellow
+                        }),
                     ),
                 ]),
                 Line::from(format!("Created: {}", entry.created_unix)),
@@ -433,7 +493,9 @@ impl ServerTuiApp {
                 Line::from("Access key"),
                 Line::from(access_key),
                 Line::from(""),
-                Line::from("Share this key with the client app along with the domain and resolver inputs."),
+                Line::from(
+                    "Share this key with the client app along with the domain and resolver inputs.",
+                ),
             ];
             if self.pending_delete == Some(entry.id) {
                 detail_lines.push(Line::from(""));
@@ -443,11 +505,18 @@ impl ServerTuiApp {
                 )));
             }
             Paragraph::new(detail_lines)
-            .block(Block::default().borders(Borders::ALL).title("Selected client"))
-            .wrap(Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Selected client"),
+                )
+                .wrap(Wrap { trim: false })
         } else {
-            Paragraph::new("Press g to generate the first client key.")
-                .block(Block::default().borders(Borders::ALL).title("Selected client"))
+            Paragraph::new("Press g to generate the first client key.").block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Selected client"),
+            )
         };
         frame.render_widget(detail, detail_area);
 
