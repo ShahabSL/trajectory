@@ -79,8 +79,82 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  android-build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ""
+
+      - name: Resolve release ref
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "RELEASE_TAG=${{ inputs.release_tag }}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Check out release tag
+        shell: bash
+        run: |
+          git fetch --tags --force
+          git checkout "$RELEASE_TAG"
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;35.0.0" \
+            "ndk;29.0.14206865"
+
+      - name: Install Rust Android targets
+        shell: bash
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+
+      - name: Install cargo-ndk
+        shell: bash
+        run: cargo install cargo-ndk --locked --version 4.1.2
+
+      - name: Build Android release APK
+        env:
+          GRADLE_USER_HOME: ${{ github.workspace }}/.gradle-ci
+        shell: bash
+        run: scripts/build_android_release.sh
+
+      - name: Stage Android release assets
+        shell: bash
+        run: |
+          mkdir -p dist/release
+          apk_name="trajectory-${RELEASE_TAG}-android-arm64.apk"
+          cp clients/android/app/build/outputs/apk/release/app-release.apk "dist/release/${apk_name}"
+          sha256sum "dist/release/${apk_name}" > "dist/release/trajectory-${RELEASE_TAG}-android-SHA256SUMS.txt"
+
+      - name: Upload Android release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-android
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
-    needs: build
+    needs:
+      - build
+      - android-build
     runs-on: ubuntu-22.04
 
     steps:

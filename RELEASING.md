@@ -1,10 +1,10 @@
 # Releasing Trajectory
 
-Trajectory ships end-user downloads through GitHub Releases. Maintainers do not need to build every platform locally.
+Trajectory ships end-user downloads through GitHub Releases. Maintainers do not need to build every desktop or CLI platform locally.
 
 ## What gets published
 
-Each release publishes portable bundles for:
+Each GitHub Release currently publishes portable bundles for:
 
 - Linux CLI
 - Linux desktop
@@ -12,8 +12,17 @@ Each release publishes portable bundles for:
 - Windows desktop
 - macOS CLI
 - macOS desktop
+- Android APK
 
-Every platform build also emits checksum manifests, and the release workflow merges them into one top-level checksum file.
+Each platform build also emits checksum manifests, and the workflow merges them into one top-level checksum file.
+
+The CLI bundles include:
+
+- `trajectory-client`
+- `trajectory-server`
+- `trajectory-admin`
+
+iOS artifacts are not part of the GitHub Release workflow.
 
 ## Local packaging smoke test
 
@@ -73,6 +82,28 @@ Checksum manifests:
 
 - `trajectory-vVERSION-TARGET-SHA256SUMS.txt`
 - `vVERSION-SHA256SUMS.txt` on the published GitHub Release
+
+## Android releases
+
+The release workflow also builds and uploads the Android APK. Local maintainers can still build it directly:
+
+```bash
+scripts/build_android_release.sh
+```
+
+The helper isolates Gradle state automatically by default so it is less sensitive to machine-local daemon registry issues. Set `GRADLE_USER_HOME` if you want persistent local Gradle caches.
+
+The output APK is:
+
+```text
+clients/android/app/build/outputs/apk/release/app-release.apk
+```
+
+You can install it onto a connected device with:
+
+```bash
+scripts/install_android_release.sh
+```
 
 ## Signing and notarization
 
