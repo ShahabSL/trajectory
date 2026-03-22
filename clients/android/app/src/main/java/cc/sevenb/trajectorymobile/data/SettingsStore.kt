@@ -31,7 +31,7 @@ class SettingsStore(private val context: Context) {
     val settings: Flow<StoredTunnelSettings> = context.mobileSettingsDataStore.data.map { prefs ->
         StoredTunnelSettings(
             accessKey = prefs[Keys.accessKey].orEmpty(),
-            domain = prefs[Keys.domain] ?: "t.7-b.cc",
+            domain = prefs[Keys.domain] ?: "your.domain.example",
             resolversText = prefs[Keys.resolvers] ?: DEFAULT_RESOLVERS_TEXT,
             listenPortText = prefs[Keys.listenPort] ?: "7000",
             keepAliveText = prefs[Keys.keepAlive] ?: "50",

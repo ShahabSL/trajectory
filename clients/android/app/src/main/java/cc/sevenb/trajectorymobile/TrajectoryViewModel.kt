@@ -327,7 +327,12 @@ class TrajectoryViewModel(
             }.exceptionOrNull()
 
             if (failure == null) {
-                Log.i(tag, "Verified ${connectionMode.name.lowercase()} path through local SOCKS endpoint")
+                when (connectionMode) {
+                    AndroidConnectionMode.VPN ->
+                        Log.i(tag, "Detected live VPN traffic on the device")
+                    AndroidConnectionMode.PROXY ->
+                        Log.i(tag, "Verified proxy path through local SOCKS endpoint")
+                }
                 connectivityCheck.value = ConnectivityCheck(confirmedMode = connectionMode)
                 refreshFromController()
                 return@launch
@@ -344,30 +349,37 @@ class TrajectoryViewModel(
     }
 
     private suspend fun waitForConnectivity(connectionMode: AndroidConnectionMode, listenPort: Int) {
-        var lastError: Throwable? = null
-        repeat(2) {
-            if (connectionMode == AndroidConnectionMode.VPN) {
-                val vpn = TrajectoryVpnService.peekSnapshot()
-                if (vpn.lastError != null) {
-                    throw IllegalStateException(vpn.lastError)
+        when (connectionMode) {
+            AndroidConnectionMode.PROXY -> {
+                var lastError: Throwable? = null
+                repeat(2) {
+                    val probeResult = runCatching {
+                        SocksConnectivityProbe.verify(port = listenPort)
+                    }
+                    if (probeResult.isSuccess) {
+                        return
+                    }
+
+                    lastError = probeResult.exceptionOrNull()
+                    delay(1_000)
                 }
-                if (!vpn.active) {
+                throw IllegalStateException(lastError?.message ?: "Timed out while testing the local proxy")
+            }
+
+            AndroidConnectionMode.VPN -> {
+                repeat(20) {
+                    val vpn = TrajectoryVpnService.peekSnapshot()
+                    if (vpn.lastError != null) {
+                        throw IllegalStateException(vpn.lastError)
+                    }
+                    if (vpn.active && (vpn.txBytes > 0L || vpn.rxBytes > 0L)) {
+                        return
+                    }
                     delay(500)
-                    return@repeat
                 }
+                throw IllegalStateException("Timed out while waiting for real VPN traffic")
             }
-
-            val probeResult = runCatching {
-                SocksConnectivityProbe.verify(port = listenPort)
-            }
-            if (probeResult.isSuccess) {
-                return
-            }
-
-            lastError = probeResult.exceptionOrNull()
-            delay(1_000)
         }
-        throw IllegalStateException(lastError?.message ?: "Timed out while testing the local connection")
     }
 
     fun reportPermissionDenied() {
@@ -446,9 +458,6 @@ class TrajectoryViewModel(
             .flatMap { line -> line.split(',') }
             .map(String::trim)
             .filter(String::isNotEmpty)
-        if (resolvers.isEmpty()) {
-            throw IllegalArgumentException("At least one resolver is required")
-        }
         return MobileTunnelConfig(
             accessKey = state.accessKey.trim(),
             domain = state.domain.trim(),

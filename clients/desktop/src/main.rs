@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::watch;
 use trajectory_core::auth::ClientAccessKey;
 use trajectory_core::client::{
-    default_client_config, parse_socket_addr, require_resolvers, ClientConfig,
+    default_client_config, default_public_resolvers, parse_socket_addr, ClientConfig,
 };
 
 fn main() -> eframe::Result {
@@ -72,8 +72,9 @@ impl Default for TrajectoryDesktopApp {
         let (event_tx, event_rx) = mpsc::channel();
         Self {
             access_key: String::new(),
-            domain: "t.7-b.cc".to_owned(),
-            resolvers_input: "1.1.1.1:53\n1.0.0.1:53\n8.8.8.8:53\n8.8.4.4:53\n9.9.9.9:53".to_owned(),
+            domain: "your.domain.example".to_owned(),
+            resolvers_input: "1.1.1.1:53\n1.0.0.1:53\n8.8.8.8:53\n8.8.4.4:53\n9.9.9.9:53"
+                .to_owned(),
             listen_port: "7000".to_owned(),
             keep_alive_ms: "50".to_owned(),
             run_state: RunState::Stopped,
@@ -102,8 +103,8 @@ impl eframe::App for TrajectoryDesktopApp {
                     );
                     ui.label(
                         egui::RichText::new("Connect with your access key and start browsing.")
-                        .color(rgb(181, 187, 180))
-                        .size(15.0),
+                            .color(rgb(181, 187, 180))
+                            .size(15.0),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -182,7 +183,7 @@ impl eframe::App for TrajectoryDesktopApp {
                 ui.add_space(14.0);
                 panel_card(ui, "Connection", |ui| {
                     ui.label(instruction("Access key: required"));
-                    ui.label(instruction("Server: t.7-b.cc"));
+                    ui.label(instruction("Server: your.domain.example"));
                     ui.label(instruction("Status and activity appear on the right."));
                 });
             });
@@ -205,7 +206,11 @@ impl eframe::App for TrajectoryDesktopApp {
                 });
 
                 panel_card(&mut columns[1], "Diagnostics", |ui| {
-                    stat_row(ui, "Resolver count", &self.active_resolver_count().to_string());
+                    stat_row(
+                        ui,
+                        "Resolver count",
+                        &self.active_resolver_count().to_string(),
+                    );
                     stat_row(ui, "Keep-alive", &format!("{} ms", self.keep_alive_ms));
                     stat_row(ui, "State", run_state_label(self.run_state));
                 });
@@ -291,16 +296,18 @@ impl TrajectoryDesktopApp {
             .trim()
             .parse()
             .context("invalid keep-alive interval")?;
-        let resolvers = self
+        let mut resolvers = self
             .resolvers_input
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
             .map(|value| parse_socket_addr(value, 53))
             .collect::<Result<Vec<_>>>()?;
-        require_resolvers(&resolvers)?;
-        let access_key = ClientAccessKey::parse(self.access_key.trim())
-            .context("invalid access key")?;
+        if resolvers.is_empty() {
+            resolvers = default_public_resolvers();
+        }
+        let access_key =
+            ClientAccessKey::parse(self.access_key.trim()).context("invalid access key")?;
         let listen = format!("127.0.0.1:{port}")
             .parse()
             .context("invalid local listen address")?;
@@ -419,7 +426,11 @@ fn stat_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(label).color(rgb(154, 162, 154)));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(egui::RichText::new(value).strong().color(rgb(240, 239, 227)));
+            ui.label(
+                egui::RichText::new(value)
+                    .strong()
+                    .color(rgb(240, 239, 227)),
+            );
         });
     });
     ui.add_space(6.0);
@@ -477,8 +488,17 @@ mod tests {
         let mut app = TrajectoryDesktopApp::default();
         app.access_key = ClientAccessKey::generate().to_display_string();
         let config = app.parse_config().unwrap();
-        assert_eq!(config.domain, "t.7-b.cc");
+        assert_eq!(config.domain, "your.domain.example");
         assert_eq!(config.listen.port(), 7000);
         assert_eq!(config.resolvers.len(), 5);
+    }
+
+    #[test]
+    fn blank_resolvers_fall_back_to_public_defaults() {
+        let mut app = TrajectoryDesktopApp::default();
+        app.access_key = ClientAccessKey::generate().to_display_string();
+        app.resolvers_input.clear();
+        let config = app.parse_config().unwrap();
+        assert_eq!(config.resolvers, default_public_resolvers());
     }
 }

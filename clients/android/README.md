@@ -2,48 +2,53 @@
 
 `clients/android` contains the native Android client for the shared Rust tunnel core.
 
-Architecture:
+## Architecture
 
-- Jetpack Compose UI for the client
+- Jetpack Compose UI
 - DataStore-backed settings persistence
 - UniFFI-generated Kotlin bindings in `app/src/main/java/uniffi/trajectorymobile`
 - the Rust mobile bridge crate in `crates/trajectory-mobile`
-- Gradle-driven Rust JNI packaging via `cargo ndk`
-- Android `VpnService` for the device traffic path
+- Gradle-driven Rust JNI packaging via `cargo-ndk`
+- Android `VpnService` for device traffic
 - `hev-socks5-tunnel` as the tun-to-SOCKS bridge
 
-What works repo-side:
+## What works
 
 - real Android project structure
 - real Compose UI
 - real Kotlin code wired to the generated Rust bindings
 - persistent configuration model
 - required access key stored locally with the rest of the tunnel profile
-- real VPN service path for device traffic
+- proxy mode
+- VPN mode
 - tunnel start/stop/status/log control path
 - Gradle builds the Rust bridge for `arm64-v8a` and `x86_64`
 - Gradle builds and packages `libhev-socks5-tunnel.so` for Android
-- debug APK assembly packages both native libraries into the app
+- debug and release APK assembly package both native libraries into the app
 - emulator smoke tests can inject an access key, approve VPN consent, and verify traffic
 
-What still depends on external mobile tooling:
+During release hardening, both proxy and VPN modes were validated on a physical Android device.
 
-- a full release pipeline for signed APK/AAB publishing
-- installed Android SDK, NDK, and `cargo-ndk`
+GitHub Releases now attach the built Android APK as a release asset. Local maintainers can still build and sideload it directly with the scripts below.
 
-Build locally once the Android SDK, NDK, and `cargo-ndk` are available:
+## Build the release APK
 
 ```bash
-export ANDROID_SDK_ROOT=/path/to/android-sdk
-export ANDROID_HOME=$ANDROID_SDK_ROOT
-export JAVA_HOME=/path/to/jdk17-or-newer
-gradle -p clients/android assembleDebug
+scripts/build_android_release.sh
 ```
 
-The resulting debug APK is written to:
+The helper isolates Gradle state automatically so it does not depend on a healthy `~/.gradle` daemon registry. Set `GRADLE_USER_HOME` yourself if you want persistent local Gradle caches across repeated builds.
+
+The output APK is:
 
 ```text
-clients/android/app/build/outputs/apk/debug/app-debug.apk
+clients/android/app/build/outputs/apk/release/app-release.apk
+```
+
+Install onto a connected device:
+
+```bash
+scripts/install_android_release.sh
 ```
 
 Run the emulator smoke test once an Android emulator is booted and visible to `adb`:
@@ -52,13 +57,11 @@ Run the emulator smoke test once an Android emulator is booted and visible to `a
 scripts/test_android_emulator.sh
 ```
 
-The smoke test verifies:
+## External tooling still required
 
-- the APK installs cleanly
-- the app launches with deterministic access-key/config injection plus autostart
-- the VPN permission flow is accepted automatically in the emulator
-- the local SOCKS listener opens on `127.0.0.1:7000`
-- the VPN service starts and stays in foreground mode
-- browser traffic increases the VPN counters
+- Android SDK
+- Android NDK
+- `cargo-ndk`
+- Java 17 or newer
 
-Why this matters: the Android app is no longer just a controller around the Rust client. It now owns a real `VpnService` plus a tun-to-SOCKS bridge, which is the standard way to carry normal app traffic on Android.
+Why this matters: the Android app is not just a controller around the Rust client. It owns a real `VpnService` plus a tun-to-SOCKS bridge, which is the standard way to carry normal app traffic on Android.

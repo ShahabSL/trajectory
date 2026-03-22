@@ -7,7 +7,7 @@ Architecture:
 - SwiftUI app UI
 - UniFFI-generated Swift bindings in `TrajectoryMobileApp/Sources/Generated`
 - XcodeGen-compatible project description in `project.yml`
-- Packet Tunnel extension target layout for the future Network Extension path
+- future Packet Tunnel extension sources kept out of the shipping project until packet forwarding is implemented
 
 What works repo-side:
 
@@ -15,8 +15,13 @@ What works repo-side:
 - real view model wired to the generated Rust bindings
 - persistent configuration path via `@AppStorage`
 - required access key stored locally with the tunnel profile
-- packet-tunnel extension source and project structure
 - generated Swift bindings expose the same authenticated mobile controller used on Android
+
+What the shipping iOS project includes:
+
+- the loopback/mobile-controller app target only
+- no broken packet-tunnel extension target
+- the packet-tunnel scaffold sources remain in-repo for future work, but they are not part of the generated release project
 
 What still depends on external Apple tooling:
 

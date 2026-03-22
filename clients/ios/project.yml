@@ -27,15 +27,3 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: cc.sevenb.trajectorymobile
         INFOPLIST_FILE: TrajectoryMobileApp/Resources/Info.plist
-  TrajectoryPacketTunnel:
-    type: app-extension
-    platform: iOS
-    sources:
-      - path: TrajectoryMobileApp/Sources/PacketTunnel
-      - path: TrajectoryMobileApp/Sources/Generated
-    info:
-      path: TrajectoryMobileApp/Resources/PacketTunnelInfo.plist
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: cc.sevenb.trajectorymobile.packet-tunnel
-        INFOPLIST_FILE: TrajectoryMobileApp/Resources/PacketTunnelInfo.plist

@@ -11,7 +11,7 @@ enum class AndroidConnectionMode {
 
 data class MobileUiState(
     val accessKey: String = "",
-    val domain: String = "t.7-b.cc",
+    val domain: String = "your.domain.example",
     val resolversText: String = DEFAULT_RESOLVERS_TEXT,
     val listenPortText: String = "7000",
     val keepAliveText: String = "50",

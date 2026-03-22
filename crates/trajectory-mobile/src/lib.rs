@@ -6,12 +6,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use trajectory_core::auth::ClientAccessKey;
 use trajectory_core::client::{
-    default_client_config, parse_socket_addr, require_resolvers, run_until, ClientConfig,
+    default_client_config, default_public_resolvers, parse_socket_addr, run_until, ClientConfig,
 };
 
 uniffi::setup_scaffolding!("trajectorymobile");
 
-const DEFAULT_DOMAIN: &str = "t.7-b.cc";
+const DEFAULT_DOMAIN: &str = "your.domain.example";
 const DEFAULT_KEEP_ALIVE_MS: u64 = 50;
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -92,13 +92,10 @@ pub fn default_mobile_config() -> MobileTunnelConfig {
 
 #[uniffi::export]
 pub fn recommended_resolvers() -> Vec<String> {
-    vec![
-        "1.1.1.1:53".to_owned(),
-        "1.0.0.1:53".to_owned(),
-        "8.8.8.8:53".to_owned(),
-        "8.8.4.4:53".to_owned(),
-        "9.9.9.9:53".to_owned(),
-    ]
+    default_public_resolvers()
+        .into_iter()
+        .map(|addr| addr.to_string())
+        .collect()
 }
 
 #[uniffi::export]
@@ -176,7 +173,8 @@ impl TrajectoryMobileController {
                 if state.active_run_id == Some(run_id) {
                     state.snapshot.state = MobileTunnelState::Running;
                     state.snapshot.status_text = "Connected".to_owned();
-                    state.logs
+                    state
+                        .logs
                         .push(log_entry(&format!("Tunnel active on {listen_address}")));
                 }
             }
@@ -247,7 +245,11 @@ impl TrajectoryMobileController {
     }
 }
 
-fn transition_to_failure(state: &mut MutexGuard<'_, ControllerInner>, run_id: u64, message: String) {
+fn transition_to_failure(
+    state: &mut MutexGuard<'_, ControllerInner>,
+    run_id: u64,
+    message: String,
+) {
     if state.active_run_id == Some(run_id) {
         state.stop_tx = None;
         state.active_run_id = None;
@@ -265,24 +267,27 @@ fn build_core_config(config: &MobileTunnelConfig) -> Result<ClientConfig, Mobile
             "domain must not be empty".to_owned(),
         ));
     }
-    let access_key = ClientAccessKey::parse(config.access_key.trim())
-        .map_err(|error| MobileError::InvalidConfiguration(format!("invalid access key: {error:#}")))?;
+    let access_key = ClientAccessKey::parse(config.access_key.trim()).map_err(|error| {
+        MobileError::InvalidConfiguration(format!("invalid access key: {error:#}"))
+    })?;
 
     let listen: SocketAddr = format!("127.0.0.1:{}", config.listen_port)
         .parse()
-        .map_err(|error| MobileError::InvalidConfiguration(format!("invalid listen port: {error}")))?;
+        .map_err(|error| {
+            MobileError::InvalidConfiguration(format!("invalid listen port: {error}"))
+        })?;
 
-    let resolvers = config
+    let mut resolvers = config
         .resolvers
         .iter()
         .map(|value| parse_socket_addr(value.trim(), 53))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| MobileError::InvalidConfiguration(format!("{error:#}")))?;
-    require_resolvers(&resolvers)
-        .map_err(|error| MobileError::InvalidConfiguration(format!("{error:#}")))?;
+    if resolvers.is_empty() {
+        resolvers = default_public_resolvers();
+    }
 
-    let mut core_config =
-        default_client_config(listen, resolvers, domain.to_owned(), access_key);
+    let mut core_config = default_client_config(listen, resolvers, domain.to_owned(), access_key);
     core_config.keep_alive_interval = Duration::from_millis(config.keep_alive_ms.max(20));
     Ok(core_config)
 }
@@ -298,5 +303,32 @@ fn unix_timestamp() -> String {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => format!("{}", duration.as_secs()),
         Err(_) => "0".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recommended_resolvers_match_core_defaults() {
+        let expected: Vec<_> = default_public_resolvers()
+            .into_iter()
+            .map(|addr| addr.to_string())
+            .collect();
+        assert_eq!(recommended_resolvers(), expected);
+    }
+
+    #[test]
+    fn build_core_config_falls_back_to_public_defaults_when_resolvers_are_blank() {
+        let config = MobileTunnelConfig {
+            access_key: ClientAccessKey::generate().to_display_string(),
+            domain: DEFAULT_DOMAIN.to_owned(),
+            listen_port: 7000,
+            keep_alive_ms: DEFAULT_KEEP_ALIVE_MS,
+            resolvers: Vec::new(),
+        };
+        let core = build_core_config(&config).expect("mobile config should use default resolvers");
+        assert_eq!(core.resolvers, default_public_resolvers());
     }
 }

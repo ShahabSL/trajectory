@@ -9,7 +9,7 @@ import java.nio.charset.StandardCharsets
 
 object SocksConnectivityProbe {
     private const val PROBE_HOST = "example.com"
-    private const val PROBE_PORT = 443
+    private const val PROBE_PORT = 80
 
     fun verify(
         host: String = "127.0.0.1",
@@ -62,6 +62,23 @@ object SocksConnectivityProbe {
                 else -> throw IOException("Unknown SOCKS address type in response")
             }
             readExact(input, addressLength + 2)
+
+            val requestText = buildString {
+                append("GET / HTTP/1.1\r\n")
+                append("Host: ")
+                append(PROBE_HOST)
+                append("\r\n")
+                append("Connection: close\r\n")
+                append("User-Agent: TrajectoryProbe/1\r\n")
+                append("\r\n")
+            }
+            output.write(requestText.toByteArray(StandardCharsets.US_ASCII))
+            output.flush()
+
+            val responsePrefix = readUntilDelimiter(input, "\r\n\r\n".toByteArray(StandardCharsets.US_ASCII), 8_192)
+            if (!responsePrefix.startsWith("HTTP/1.1 200") && !responsePrefix.startsWith("HTTP/1.0 200")) {
+                throw IOException("HTTP probe failed after SOCKS connect")
+            }
         }
     }
 
@@ -76,5 +93,34 @@ object SocksConnectivityProbe {
             offset += read
         }
         return buffer
+    }
+
+    private fun readUntilDelimiter(input: InputStream, delimiter: ByteArray, maxBytes: Int): String {
+        val buffer = ByteArray(maxBytes)
+        var offset = 0
+        while (offset < maxBytes) {
+            val read = input.read(buffer, offset, 1)
+            if (read < 0) {
+                throw EOFException("Stream closed before HTTP probe completed")
+            }
+            offset += read
+            if (endsWith(buffer, offset, delimiter)) {
+                return String(buffer, 0, offset, StandardCharsets.US_ASCII)
+            }
+        }
+        throw IOException("HTTP probe exceeded ${maxBytes} bytes")
+    }
+
+    private fun endsWith(buffer: ByteArray, length: Int, suffix: ByteArray): Boolean {
+        if (length < suffix.size) {
+            return false
+        }
+        val start = length - suffix.size
+        for (index in suffix.indices) {
+            if (buffer[start + index] != suffix[index]) {
+                return false
+            }
+        }
+        return true
     }
 }
