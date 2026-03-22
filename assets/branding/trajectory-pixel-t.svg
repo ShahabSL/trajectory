@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">Trajectory Pixel T</title>
+  <desc id="desc">A pixel-art letter T in warm gold on a dark background.</desc>
+  <rect width="160" height="160" fill="#11151c"/>
+  <rect x="32" y="40" width="104" height="16" fill="#d28945"/>
+  <rect x="80" y="56" width="16" height="72" fill="#d28945"/>
+  <rect x="24" y="32" width="104" height="16" fill="#f2d67b"/>
+  <rect x="72" y="48" width="16" height="72" fill="#f2d67b"/>
+</svg>

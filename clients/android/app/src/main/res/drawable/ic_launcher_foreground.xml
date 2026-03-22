@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:bottom="52dp"
+        android:left="22dp"
+        android:right="10dp"
+        android:top="26dp">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/trajectory_icon_shadow" />
+        </shape>
+    </item>
+    <item
+        android:bottom="18dp"
+        android:left="46dp"
+        android:right="34dp"
+        android:top="46dp">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/trajectory_icon_shadow" />
+        </shape>
+    </item>
+    <item
+        android:bottom="56dp"
+        android:left="18dp"
+        android:right="14dp"
+        android:top="22dp">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/trajectory_icon_foreground" />
+        </shape>
+    </item>
+    <item
+        android:bottom="22dp"
+        android:left="42dp"
+        android:right="38dp"
+        android:top="42dp">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/trajectory_icon_foreground" />
+        </shape>
+    </item>
+</layer-list>

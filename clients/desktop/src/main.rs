@@ -19,7 +19,8 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1220.0, 820.0])
-            .with_min_inner_size([980.0, 700.0]),
+            .with_min_inner_size([980.0, 700.0])
+            .with_icon(trajectory_icon()),
         ..Default::default()
     };
 
@@ -31,6 +32,42 @@ fn main() -> eframe::Result {
             Ok(Box::new(TrajectoryDesktopApp::default()))
         }),
     )
+}
+
+fn trajectory_icon() -> egui::IconData {
+    const SCALE: usize = 8;
+    const PATTERN: &[&str] = &[
+        "..........",
+        ".TTTTTTTT.",
+        ".TTTTTTTT.",
+        "...TTTT...",
+        "...TTTT...",
+        "...TTTT...",
+        "...TTTT...",
+        "...TTTT...",
+        "...TTTT...",
+        "..........",
+    ];
+
+    let width = (PATTERN[0].len() * SCALE) as u32;
+    let height = (PATTERN.len() * SCALE) as u32;
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+
+    for row in PATTERN {
+        for _ in 0..SCALE {
+            for ch in row.chars() {
+                let pixel = match ch {
+                    'T' => [242, 214, 123, 255],
+                    _ => [17, 21, 28, 255],
+                };
+                for _ in 0..SCALE {
+                    rgba.extend_from_slice(&pixel);
+                }
+            }
+        }
+    }
+
+    egui::IconData { rgba, width, height }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,5 +1,9 @@
 # Trajectory
 
+<p align="center">
+  <img src="assets/branding/trajectory-pixel-t.svg" width="128" height="128" alt="Trajectory pixel-art T logo" />
+</p>
+
 Trajectory is a recursive-DNS tunnel with:
 
 - a shared Rust transport core
