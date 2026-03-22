@@ -8,6 +8,7 @@ struct TrajectoryMobileApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(model)
+                .preferredColorScheme(.dark)
         }
     }
 }

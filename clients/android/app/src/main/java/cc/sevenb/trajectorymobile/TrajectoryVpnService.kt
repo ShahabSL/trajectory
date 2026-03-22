@@ -257,7 +257,12 @@ class TrajectoryVpnService : VpnService() {
         }
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, TrajectoryVpnService::class.java))
+            val disconnectIntent = Intent(context, TrajectoryVpnService::class.java).apply {
+                action = ACTION_DISCONNECT
+            }
+            if (runCatching { context.startService(disconnectIntent) }.isFailure) {
+                context.stopService(Intent(context, TrajectoryVpnService::class.java))
+            }
         }
 
         fun peekSnapshot(): VpnRuntimeSnapshot = runtimeSnapshot

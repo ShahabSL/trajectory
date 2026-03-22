@@ -1,7 +1,7 @@
 # Trajectory
 
 <p align="center">
-  <img src="assets/branding/trajectory-pixel-t.svg" width="128" height="128" alt="Trajectory pixel-art T logo" />
+  <img src="assets/branding/trajectory-logo.png" width="128" height="128" alt="Trajectory T logo" />
 </p>
 
 Trajectory is a recursive-DNS tunnel with:

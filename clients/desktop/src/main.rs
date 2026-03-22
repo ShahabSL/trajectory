@@ -37,16 +37,18 @@ fn main() -> eframe::Result {
 fn trajectory_icon() -> egui::IconData {
     const SCALE: usize = 8;
     const PATTERN: &[&str] = &[
-        "..........",
-        ".TTTTTTTT.",
-        ".TTTTTTTT.",
-        "...TTTT...",
-        "...TTTT...",
-        "...TTTT...",
-        "...TTTT...",
-        "...TTTT...",
-        "...TTTT...",
-        "..........",
+        "................",
+        "................",
+        "...TTTTTTTTTT...",
+        "...T........T...",
+        "...T........T...",
+        "......TTTT......",
+        "......T..T......",
+        "......T..T......",
+        "......T..T......",
+        "......TTTT......",
+        "................",
+        "................",
     ];
 
     let width = (PATTERN[0].len() * SCALE) as u32;
@@ -57,8 +59,8 @@ fn trajectory_icon() -> egui::IconData {
         for _ in 0..SCALE {
             for ch in row.chars() {
                 let pixel = match ch {
-                    'T' => [242, 214, 123, 255],
-                    _ => [17, 21, 28, 255],
+                    'T' => [255, 255, 255, 255],
+                    _ => [0, 0, 0, 255],
                 };
                 for _ in 0..SCALE {
                     rgba.extend_from_slice(&pixel);
@@ -136,11 +138,11 @@ impl eframe::App for TrajectoryDesktopApp {
                     ui.heading(
                         egui::RichText::new("Trajectory Desktop")
                             .size(30.0)
-                            .color(rgb(242, 242, 235)),
+                            .color(rgb(255, 255, 255)),
                     );
                     ui.label(
                         egui::RichText::new("Connect with your access key and start browsing.")
-                            .color(rgb(181, 187, 180))
+                            .color(rgb(176, 176, 176))
                             .size(15.0),
                     );
                 });
@@ -187,10 +189,10 @@ impl eframe::App for TrajectoryDesktopApp {
                     ui.horizontal(|ui| {
                         let start = egui::Button::new(
                             egui::RichText::new("Start tunnel")
-                                .color(rgb(18, 18, 15))
+                                .color(rgb(0, 0, 0))
                                 .strong(),
                         )
-                        .fill(rgb(230, 214, 126))
+                        .fill(rgb(255, 255, 255))
                         .min_size([140.0, 42.0].into());
                         if ui
                             .add_enabled(self.run_state == RunState::Stopped, start)
@@ -203,10 +205,10 @@ impl eframe::App for TrajectoryDesktopApp {
 
                         let stop = egui::Button::new(
                             egui::RichText::new("Stop")
-                                .color(rgb(242, 242, 235))
+                                .color(rgb(255, 255, 255))
                                 .strong(),
                         )
-                        .fill(rgb(88, 34, 28))
+                        .fill(rgb(38, 38, 38))
                         .min_size([100.0, 42.0].into());
                         if ui
                             .add_enabled(self.run_state == RunState::Running, stop)
@@ -263,7 +265,7 @@ impl eframe::App for TrajectoryDesktopApp {
                             ui.label(
                                 egui::RichText::new(entry)
                                     .family(egui::FontFamily::Monospace)
-                                    .color(rgb(201, 207, 198)),
+                                    .color(rgb(210, 210, 210)),
                             );
                             ui.add_space(4.0);
                         }
@@ -398,14 +400,15 @@ fn configure_theme(ctx: &egui::Context) {
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(14.0, 10.0);
     style.visuals = egui::Visuals::dark();
-    style.visuals.panel_fill = rgb(18, 22, 21);
-    style.visuals.extreme_bg_color = rgb(8, 10, 10);
-    style.visuals.window_fill = rgb(22, 27, 25);
-    style.visuals.widgets.inactive.bg_fill = rgb(28, 34, 31);
-    style.visuals.widgets.hovered.bg_fill = rgb(44, 53, 49);
-    style.visuals.widgets.active.bg_fill = rgb(58, 70, 64);
-    style.visuals.override_text_color = Some(rgb(235, 238, 230));
-    style.visuals.widgets.noninteractive.fg_stroke.color = rgb(235, 238, 230);
+    style.visuals.panel_fill = rgb(0, 0, 0);
+    style.visuals.extreme_bg_color = rgb(6, 6, 6);
+    style.visuals.window_fill = rgb(14, 14, 14);
+    style.visuals.widgets.inactive.bg_fill = rgb(24, 24, 24);
+    style.visuals.widgets.hovered.bg_fill = rgb(38, 38, 38);
+    style.visuals.widgets.active.bg_fill = rgb(54, 54, 54);
+    style.visuals.override_text_color = Some(rgb(255, 255, 255));
+    style.visuals.widgets.noninteractive.fg_stroke.color = rgb(255, 255, 255);
+    style.visuals.window_stroke = egui::Stroke::new(1.0, rgb(54, 54, 54));
     style.text_styles.insert(
         egui::TextStyle::Heading,
         egui::FontId::new(30.0, egui::FontFamily::Proportional),
@@ -423,8 +426,8 @@ fn configure_theme(ctx: &egui::Context) {
 
 fn panel_card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
-        .fill(rgb(26, 32, 29))
-        .stroke(egui::Stroke::new(1.0, rgb(57, 66, 61)))
+        .fill(rgb(16, 16, 16))
+        .stroke(egui::Stroke::new(1.0, rgb(54, 54, 54)))
         .corner_radius(14.0)
         .inner_margin(egui::Margin::same(18))
         .show(ui, |ui| {
@@ -432,7 +435,7 @@ fn panel_card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egu
                 egui::RichText::new(title)
                     .strong()
                     .size(18.0)
-                    .color(rgb(240, 239, 227)),
+                    .color(rgb(255, 255, 255)),
             );
             ui.add_space(12.0);
             add_contents(ui);
@@ -441,32 +444,37 @@ fn panel_card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egu
 
 fn status_pill(ui: &mut egui::Ui, state: RunState, label: &str) {
     let fill = match state {
-        RunState::Stopped => rgb(72, 75, 78),
-        RunState::Starting => rgb(180, 130, 34),
-        RunState::Running => rgb(52, 121, 79),
-        RunState::Error => rgb(145, 45, 45),
+        RunState::Stopped => rgb(36, 36, 36),
+        RunState::Starting => rgb(92, 92, 92),
+        RunState::Running => rgb(220, 220, 220),
+        RunState::Error => rgb(78, 78, 78),
     };
     egui::Frame::new()
         .fill(fill)
+        .stroke(egui::Stroke::new(1.0, rgb(84, 84, 84)))
         .corner_radius(24.0)
         .inner_margin(egui::Margin::symmetric(14, 8))
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(label)
                     .strong()
-                    .color(rgb(247, 246, 238)),
+                    .color(if state == RunState::Running {
+                        rgb(0, 0, 0)
+                    } else {
+                        rgb(255, 255, 255)
+                    }),
             );
         });
 }
 
 fn stat_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(label).color(rgb(154, 162, 154)));
+        ui.label(egui::RichText::new(label).color(rgb(150, 150, 150)));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(value)
                     .strong()
-                    .color(rgb(240, 239, 227)),
+                    .color(rgb(255, 255, 255)),
             );
         });
     });
@@ -478,13 +486,13 @@ fn field_label(ui: &mut egui::Ui, text: &str) {
         egui::RichText::new(text)
             .strong()
             .size(13.0)
-            .color(rgb(185, 191, 182)),
+            .color(rgb(192, 192, 192)),
     );
 }
 
 fn instruction(text: &str) -> egui::RichText {
     egui::RichText::new(text)
-        .color(rgb(203, 208, 199))
+        .color(rgb(196, 196, 196))
         .size(14.0)
 }
 

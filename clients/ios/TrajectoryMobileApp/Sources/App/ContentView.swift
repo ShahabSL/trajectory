@@ -1,5 +1,16 @@
 import SwiftUI
 
+private enum Palette {
+    static let backgroundTop = Color.black
+    static let backgroundBottom = Color(red: 0.03, green: 0.03, blue: 0.03)
+    static let panel = Color(red: 0.08, green: 0.08, blue: 0.08)
+    static let panelAlt = Color(red: 0.12, green: 0.12, blue: 0.12)
+    static let field = Color(red: 0.07, green: 0.07, blue: 0.07)
+    static let text = Color.white
+    static let muted = Color(red: 0.74, green: 0.74, blue: 0.74)
+    static let subtle = Color(red: 0.55, green: 0.55, blue: 0.55)
+}
+
 struct ContentView: View {
     @EnvironmentObject private var model: TunnelViewModel
     @AppStorage("trajectory.accessKey") private var accessKey = ""
@@ -21,7 +32,7 @@ struct ContentView: View {
             }
             .background(
                 LinearGradient(
-                    colors: [Color(red: 0.04, green: 0.08, blue: 0.13), Color(red: 0.06, green: 0.12, blue: 0.10)],
+                    colors: [Palette.backgroundTop, Palette.backgroundBottom],
                     startPoint: .top,
                     endPoint: .bottom
                 )
@@ -52,26 +63,30 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             Label("Connect with your access key", systemImage: "network")
                 .font(.headline)
-                .foregroundStyle(Color.white)
+                .foregroundStyle(Palette.text)
             Text(model.snapshot.statusText)
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(Color.white)
+                .foregroundStyle(Palette.text)
             if let error = model.snapshot.lastError {
                 Text(error)
                     .font(.footnote)
-                    .foregroundStyle(Color(red: 1.0, green: 0.78, blue: 0.75))
+                    .foregroundStyle(Palette.muted)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(20)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(Palette.subtle.opacity(0.45), lineWidth: 1)
+        )
     }
 
     private var configurationCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Connection")
                 .font(.title2.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(Palette.text)
 
             Group {
                 TextField("Access key", text: $accessKey)
@@ -89,8 +104,8 @@ struct ContentView: View {
                     .scrollContentBackground(.hidden)
             }
             .padding(12)
-            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .foregroundStyle(.white)
+            .background(Palette.field, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .foregroundStyle(Palette.text)
             .disabled(!canEditProfile)
 
             HStack(spacing: 12) {
@@ -108,6 +123,8 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.white)
+                .foregroundStyle(.black)
                 .disabled(!canStartTunnel)
 
                 Button {
@@ -117,12 +134,16 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
-                .tint(.white)
+                .tint(Palette.text)
                 .disabled(!model.canStop)
             }
         }
         .padding(20)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(Palette.subtle.opacity(0.45), lineWidth: 1)
+        )
     }
 
     private var telemetryGrid: some View {
@@ -142,14 +163,18 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Palette.subtle)
             Text(value)
                 .font(.headline)
-                .foregroundStyle(.white)
+                .foregroundStyle(Palette.text)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(18)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .background(Palette.panelAlt, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Palette.subtle.opacity(0.4), lineWidth: 1)
+        )
     }
 
     private var diagnosticsCard: some View {
@@ -157,7 +182,7 @@ struct ContentView: View {
             HStack {
                 Text("Diagnostics")
                     .font(.title3.weight(.semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Palette.text)
                 Spacer()
                 Button("Clear") {
                     model.clearLogs()
@@ -166,25 +191,29 @@ struct ContentView: View {
 
             if model.logs.isEmpty {
                 Text("No activity yet.")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Palette.subtle)
             } else {
                 ForEach(model.logs.prefix(20), id: \.self) { entry in
                     VStack(alignment: .leading, spacing: 4) {
                         Text(entry.timestamp)
                             .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Palette.subtle)
                         Text(entry.message)
-                            .foregroundStyle(.white)
+                            .foregroundStyle(Palette.text)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
-                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .background(Palette.panelAlt, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
             }
 
         }
         .padding(20)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(Palette.subtle.opacity(0.45), lineWidth: 1)
+        )
     }
 }
 

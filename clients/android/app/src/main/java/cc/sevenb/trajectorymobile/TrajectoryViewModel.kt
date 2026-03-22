@@ -1,6 +1,7 @@
 package cc.sevenb.trajectorymobile
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -22,6 +23,8 @@ import uniffi.trajectorymobile.MobileException
 import uniffi.trajectorymobile.MobileTunnelConfig
 import uniffi.trajectorymobile.MobileTunnelState
 import uniffi.trajectorymobile.TrajectoryMobileController
+import uniffi.trajectorymobile.mobileCoreVersion
+import java.time.Instant
 
 class TrajectoryViewModel(
     private val appContext: Context,
@@ -193,13 +196,33 @@ class TrajectoryViewModel(
 
     fun stopTunnel() {
         viewModelScope.launch(Dispatchers.IO) {
+            var stopError: MobileException? = null
             try {
                 Log.i(tag, "Stopping tunnel controller")
                 verificationJob?.cancel()
                 connectivityCheck.value = ConnectivityCheck()
+                _uiState.update {
+                    it.copy(
+                        state = MobileTunnelState.STOPPING,
+                        status = "Disconnecting",
+                        lastError = null,
+                    )
+                }
                 TrajectoryVpnService.stop(appContext)
                 TrajectoryProxyService.stop(appContext)
-                controllerOrNull()?.stop()
+                try {
+                    controllerOrNull()?.stop()
+                } catch (error: MobileException.NotRunning) {
+                    Log.i(tag, "Tunnel controller was already stopped during disconnect")
+                } catch (error: MobileException) {
+                    stopError = error
+                }
+                delay(250)
+                refreshFromController()
+                val vpnActive = TrajectoryVpnService.peekSnapshot().active
+                if (stopError != null && vpnActive) {
+                    throw stopError
+                }
             } catch (error: MobileException) {
                 Log.e(tag, "Tunnel stop failed", error)
                 _uiState.update {
@@ -217,6 +240,93 @@ class TrajectoryViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             controllerOrNull()?.clearLogs()
             refreshFromController()
+        }
+    }
+
+    fun buildDebugReport(): String {
+        val state = _uiState.value
+        val verification = connectivityCheck.value
+        val vpn = TrajectoryVpnService.peekSnapshot()
+        val controller = controllerOrNull()
+        val snapshot = runCatching { controller?.snapshot() }.getOrNull()
+        val logs = runCatching { controller?.logs().orEmpty() }.getOrElse { state.logs }.takeLast(200)
+        val resolvers = state.resolversText
+            .lines()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+
+        return buildString {
+            appendLine("Trajectory Debug Report")
+            appendLine("generated_at: ${Instant.now()}")
+            appendLine()
+            appendLine("[app]")
+            appendLine("app_version: ${state.version.ifBlank { "unknown" }}")
+            appendLine("core_version: ${runCatching { mobileCoreVersion() }.getOrDefault("unknown")}")
+            appendLine("package: ${appContext.packageName}")
+            appendLine()
+            appendLine("[device]")
+            appendLine("manufacturer: ${Build.MANUFACTURER}")
+            appendLine("brand: ${Build.BRAND}")
+            appendLine("model: ${Build.MODEL}")
+            appendLine("device: ${Build.DEVICE}")
+            appendLine("product: ${Build.PRODUCT}")
+            appendLine("sdk_int: ${Build.VERSION.SDK_INT}")
+            appendLine("release: ${Build.VERSION.RELEASE}")
+            appendLine("fingerprint: ${Build.FINGERPRINT}")
+            appendLine("abis: ${Build.SUPPORTED_ABIS.joinToString(", ")}")
+            appendLine()
+            appendLine("[ui_state]")
+            appendLine("status: ${state.status}")
+            appendLine("state: ${state.state}")
+            appendLine("connection_mode: ${state.connectionMode}")
+            appendLine("listen_address: ${state.listenAddress}")
+            appendLine("active_resolvers: ${state.activeResolvers}")
+            appendLine("last_error: ${state.lastError ?: "<none>"}")
+            appendLine()
+            appendLine("[configuration]")
+            appendLine("domain: ${state.domain.trim()}")
+            appendLine("access_key: ${redactAccessKey(state.accessKey)}")
+            appendLine("listen_port: ${state.listenPortText.trim()}")
+            appendLine("keep_alive_ms: ${state.keepAliveText.trim()}")
+            appendLine("resolvers_count: ${resolvers.size}")
+            resolvers.forEachIndexed { index, resolver ->
+                appendLine("resolver_${index + 1}: $resolver")
+            }
+            appendLine()
+            appendLine("[connectivity_verification]")
+            appendLine("in_progress: ${verification.inProgress}")
+            appendLine("confirmed_mode: ${verification.confirmedMode ?: "<none>"}")
+            appendLine("error: ${verification.error ?: "<none>"}")
+            appendLine()
+            appendLine("[controller_snapshot]")
+            if (snapshot == null) {
+                appendLine("available: false")
+            } else {
+                appendLine("available: true")
+                appendLine("state: ${snapshot.state}")
+                appendLine("status_text: ${snapshot.statusText}")
+                appendLine("listen_address: ${snapshot.listenAddress}")
+                appendLine("active_resolvers: ${snapshot.activeResolvers}")
+                appendLine("last_error: ${snapshot.lastError ?: "<none>"}")
+            }
+            appendLine()
+            appendLine("[vpn_runtime]")
+            appendLine("active: ${vpn.active}")
+            appendLine("status: ${vpn.status}")
+            appendLine("last_error: ${vpn.lastError ?: "<none>"}")
+            appendLine("tx_packets: ${vpn.txPackets}")
+            appendLine("tx_bytes: ${vpn.txBytes}")
+            appendLine("rx_packets: ${vpn.rxPackets}")
+            appendLine("rx_bytes: ${vpn.rxBytes}")
+            appendLine()
+            appendLine("[recent_logs]")
+            if (logs.isEmpty()) {
+                appendLine("<none>")
+            } else {
+                logs.forEach { entry ->
+                    appendLine("${entry.timestamp} ${sanitizeLogLine(entry.message)}")
+                }
+            }
         }
     }
 
@@ -484,3 +594,16 @@ class TrajectoryViewModel(
             }
     }
 }
+
+private fun redactAccessKey(accessKey: String): String {
+    val value = accessKey.trim()
+    if (value.isEmpty()) {
+        return "<empty>"
+    }
+    if (value.length <= 12) {
+        return "***redacted***"
+    }
+    return "${value.take(10)}...${value.takeLast(6)}"
+}
+
+private fun sanitizeLogLine(message: String): String = message.replace('\n', ' ').trim()

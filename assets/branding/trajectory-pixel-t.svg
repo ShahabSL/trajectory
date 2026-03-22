@@ -1,9 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
-  <title id="title">Trajectory Pixel T</title>
-  <desc id="desc">A pixel-art letter T in warm gold on a dark background.</desc>
-  <rect width="160" height="160" fill="#11151c"/>
-  <rect x="32" y="40" width="104" height="16" fill="#d28945"/>
-  <rect x="80" y="56" width="16" height="72" fill="#d28945"/>
-  <rect x="24" y="32" width="104" height="16" fill="#f2d67b"/>
-  <rect x="72" y="48" width="16" height="72" fill="#f2d67b"/>
+  <title id="title">Trajectory T Logo</title>
+  <desc id="desc">A minimal black-and-white block letter T.</desc>
+  <rect width="160" height="160" fill="#ffffff"/>
+  <path
+    fill="#000000"
+    fill-rule="evenodd"
+    d="M41 57H119V78H88V115H72V78H41V57ZM49 65V70H80V93H88V70H111V65H49Z"
+  />
 </svg>

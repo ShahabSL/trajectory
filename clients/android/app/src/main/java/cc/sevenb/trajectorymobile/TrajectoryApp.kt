@@ -1,5 +1,10 @@
 package cc.sevenb.trajectorymobile
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,6 +27,7 @@ import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.StopCircle
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -43,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -52,6 +59,17 @@ import cc.sevenb.trajectorymobile.model.canStart
 import cc.sevenb.trajectorymobile.model.canStop
 import uniffi.trajectorymobile.MobileTunnelState
 
+private val AppBackgroundTop = Color.Black
+private val AppBackgroundBottom = Color(0xFF080808)
+private val HeroCardColor = Color(0xFF101010)
+private val PanelCardColor = Color(0xFF151515)
+private val PanelCardAltColor = Color(0xFF1B1B1B)
+private val LogEntryColor = Color(0xFF202020)
+private val IconBadgeColor = Color.White
+private val ErrorTextColor = Color(0xFFD0D0D0)
+private val MutedTextColor = Color(0xFFB8B8B8)
+private val FieldContainerColor = Color(0xFF101010)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TrajectoryApp(
@@ -59,6 +77,7 @@ fun TrajectoryApp(
     onConnectRequested: (AndroidConnectionMode) -> Unit,
 ) {
     val state by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
 
     Scaffold(
         topBar = {
@@ -74,7 +93,7 @@ fun TrajectoryApp(
                 .fillMaxSize()
                 .background(
                     Brush.verticalGradient(
-                        listOf(Color(0xFF06121A), Color(0xFF0C1C17), Color(0xFF11131A)),
+                        listOf(AppBackgroundTop, AppBackgroundBottom),
                     ),
                 )
                 .padding(padding),
@@ -89,7 +108,16 @@ fun TrajectoryApp(
                 HeroCard(state = state)
                 ConfigCard(state = state, viewModel = viewModel, onConnectRequested = onConnectRequested)
                 StatsRow(state = state)
-                LogsCard(state = state, onClear = viewModel::clearLogs)
+                LogsCard(
+                    state = state,
+                    onClear = viewModel::clearLogs,
+                    onCopyDebugReport = {
+                        copyDebugReportToClipboard(
+                            context = context,
+                            report = viewModel.buildDebugReport(),
+                        )
+                    },
+                )
             }
         }
     }
@@ -98,7 +126,7 @@ fun TrajectoryApp(
 @Composable
 private fun HeroCard(state: MobileUiState) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = Color(0xCC11283B)),
+        colors = CardDefaults.cardColors(containerColor = HeroCardColor),
         shape = RoundedCornerShape(28.dp),
     ) {
         Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -108,26 +136,26 @@ private fun HeroCard(state: MobileUiState) {
             ) {
                 Surface(
                     shape = RoundedCornerShape(18.dp),
-                    color = Color(0xFF7FE7C7),
+                    color = IconBadgeColor,
                     modifier = Modifier.size(48.dp),
                 ) {
                     Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Rounded.NetworkCheck, contentDescription = null, tint = Color(0xFF06201B))
+                        Icon(Icons.Rounded.NetworkCheck, contentDescription = null, tint = Color.Black)
                     }
                 }
                 Column {
-                    Text("Trajectory", style = MaterialTheme.typography.headlineSmall, color = Color.White)
+                    Text("Trajectory", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onSurface)
                     Text(
                         state.status,
                         style = MaterialTheme.typography.bodyMedium,
-                        color = Color(0xFFD8E4EC),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
             if (state.lastError != null) {
                 Text(
                     state.lastError,
-                    color = Color(0xFFFFB4AB),
+                    color = ErrorTextColor,
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -144,11 +172,11 @@ private fun ConfigCard(
     val showAdvanced = remember { mutableStateOf(false) }
 
     Card(
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF161E24)),
+        colors = CardDefaults.cardColors(containerColor = PanelCardColor),
         shape = RoundedCornerShape(24.dp),
     ) {
         Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Connection", style = MaterialTheme.typography.titleLarge, color = Color.White)
+            Text("Connection", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurface)
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 ModeButton(
                     label = "VPN",
@@ -171,6 +199,7 @@ private fun ConfigCard(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = state.state == MobileTunnelState.IDLE || state.state == MobileTunnelState.FAILED,
                 singleLine = true,
+                colors = monochromeTextFieldColors(),
             )
             OutlinedTextField(
                 value = state.domain,
@@ -178,6 +207,7 @@ private fun ConfigCard(
                 label = { Text("Server") },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = state.state == MobileTunnelState.IDLE || state.state == MobileTunnelState.FAILED,
+                colors = monochromeTextFieldColors(),
             )
             if (state.connectionMode == AndroidConnectionMode.PROXY) {
                 ProxyHelpCard(state = state)
@@ -194,6 +224,7 @@ private fun ConfigCard(
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         modifier = Modifier.weight(1f),
                         enabled = state.state == MobileTunnelState.IDLE || state.state == MobileTunnelState.FAILED,
+                        colors = monochromeTextFieldColors(),
                     )
                     OutlinedTextField(
                         value = state.keepAliveText,
@@ -202,6 +233,7 @@ private fun ConfigCard(
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         modifier = Modifier.weight(1f),
                         enabled = state.state == MobileTunnelState.IDLE || state.state == MobileTunnelState.FAILED,
+                        colors = monochromeTextFieldColors(),
                     )
                 }
                 OutlinedTextField(
@@ -212,6 +244,7 @@ private fun ConfigCard(
                         .fillMaxWidth()
                         .height(180.dp),
                     enabled = state.state == MobileTunnelState.IDLE || state.state == MobileTunnelState.FAILED,
+                    colors = monochromeTextFieldColors(),
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -219,15 +252,26 @@ private fun ConfigCard(
                     onClick = { onConnectRequested(state.connectionMode) },
                     enabled = state.canStart,
                     modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        disabledContainerColor = Color(0xFF2A2A2A),
+                        disabledContentColor = Color(0xFF6E6E6E),
+                    ),
                 ) {
                     Icon(Icons.Rounded.Bolt, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
                     Text(if (state.connectionMode == AndroidConnectionMode.VPN) "Connect" else "Start proxy")
                 }
-                Button(
+                OutlinedButton(
                     onClick = viewModel::stopTunnel,
                     enabled = state.canStop,
                     modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.onSurface,
+                        disabledContentColor = Color(0xFF6E6E6E),
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
                 ) {
                     Icon(Icons.Rounded.StopCircle, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
@@ -259,16 +303,16 @@ private fun ModeButton(
 @Composable
 private fun ProxyHelpCard(state: MobileUiState) {
     Surface(
-        color = Color(0xFF111A22),
+        color = PanelCardAltColor,
         shape = RoundedCornerShape(18.dp),
     ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("App proxy", color = Color.White, style = MaterialTheme.typography.titleMedium)
-            Text("SOCKS5 host: 127.0.0.1", color = Color(0xFFD8E4EC))
-            Text("Port: ${state.listenPortText}", color = Color(0xFFD8E4EC))
+            Text("App proxy", color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.titleMedium)
+            Text("SOCKS5 host: 127.0.0.1", color = MutedTextColor)
+            Text("Port: ${state.listenPortText}", color = MutedTextColor)
             Text(
                 "Use this in apps that support custom proxy settings.",
-                color = Color(0xFF9DB0BD),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -289,20 +333,20 @@ private fun StatsRow(state: MobileUiState) {
 private fun StatCard(label: String, value: String, modifier: Modifier = Modifier) {
     Card(
         modifier = modifier,
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1B252E)),
+        colors = CardDefaults.cardColors(containerColor = PanelCardAltColor),
         shape = RoundedCornerShape(22.dp),
     ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(label, style = MaterialTheme.typography.labelMedium, color = Color(0xFF9DB0BD))
-            Text(value, style = MaterialTheme.typography.titleMedium, color = Color.White)
+            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(value, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
         }
     }
 }
 
 @Composable
-private fun LogsCard(state: MobileUiState, onClear: () -> Unit) {
+private fun LogsCard(state: MobileUiState, onClear: () -> Unit, onCopyDebugReport: () -> Unit) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF15181F)),
+        colors = CardDefaults.cardColors(containerColor = PanelCardColor),
         shape = RoundedCornerShape(24.dp),
     ) {
         Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -311,13 +355,21 @@ private fun LogsCard(state: MobileUiState, onClear: () -> Unit) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Activity", style = MaterialTheme.typography.titleLarge, color = Color.White)
-                TextButton(onClick = onClear) { Text("Clear log") }
+                Text("Activity", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurface)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = onCopyDebugReport) { Text("Copy debug report") }
+                    TextButton(onClick = onClear) { Text("Clear log") }
+                }
             }
+            Text(
+                "Copy the full debug report before sharing results from restricted networks. It includes device info, runtime state, VPN counters, config, and recent logs.",
+                color = MutedTextColor,
+                style = MaterialTheme.typography.bodySmall,
+            )
             if (state.logs.isEmpty()) {
                 Text(
                     "No activity yet.",
-                    color = Color(0xFFB1BBC4),
+                    color = MutedTextColor,
                 )
             } else {
                 LazyColumn(
@@ -328,12 +380,12 @@ private fun LogsCard(state: MobileUiState, onClear: () -> Unit) {
                 ) {
                     items(state.logs) { entry ->
                         Surface(
-                            color = Color(0xFF1F2A33),
+                            color = LogEntryColor,
                             shape = RoundedCornerShape(16.dp),
                         ) {
                             Column(modifier = Modifier.padding(12.dp)) {
-                                Text(entry.timestamp, color = Color(0xFF8BA2AF), style = MaterialTheme.typography.labelSmall)
-                                Text(entry.message, color = Color(0xFFE8EEF2))
+                                Text(entry.timestamp, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
+                                Text(entry.message, color = MaterialTheme.colorScheme.onSurface)
                             }
                         }
                     }
@@ -341,4 +393,31 @@ private fun LogsCard(state: MobileUiState, onClear: () -> Unit) {
             }
         }
     }
+}
+
+@Composable
+private fun monochromeTextFieldColors() =
+    androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+        focusedContainerColor = FieldContainerColor,
+        unfocusedContainerColor = FieldContainerColor,
+        disabledContainerColor = FieldContainerColor,
+        focusedTextColor = MaterialTheme.colorScheme.onSurface,
+        unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+        disabledTextColor = MutedTextColor,
+        focusedLabelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        unfocusedLabelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        disabledLabelColor = Color(0xFF7A7A7A),
+        focusedBorderColor = MaterialTheme.colorScheme.primary,
+        unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+        disabledBorderColor = Color(0xFF404040),
+        cursorColor = MaterialTheme.colorScheme.primary,
+        focusedSupportingTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        unfocusedSupportingTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        disabledSupportingTextColor = Color(0xFF7A7A7A),
+    )
+
+private fun copyDebugReportToClipboard(context: Context, report: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("Trajectory debug report", report))
+    Toast.makeText(context, "Debug report copied", Toast.LENGTH_SHORT).show()
 }

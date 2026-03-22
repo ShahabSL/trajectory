@@ -83,7 +83,12 @@ class TrajectoryProxyService : Service() {
         }
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, TrajectoryProxyService::class.java))
+            val stopIntent = Intent(context, TrajectoryProxyService::class.java).apply {
+                action = ACTION_STOP
+            }
+            if (runCatching { context.startService(stopIntent) }.isFailure) {
+                context.stopService(Intent(context, TrajectoryProxyService::class.java))
+            }
         }
     }
 }
