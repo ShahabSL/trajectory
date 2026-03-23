@@ -43,6 +43,8 @@ The generated iOS shipping project excludes the broken packet-tunnel target on p
 
 Full self-hosting and credential handoff are documented in [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md).
 
+The latest measured public-resolver comparison against upstream Slipstream is documented in [docs/TRAJECTORY_VS_SLIPSTREAM_2026-03-22.md](docs/TRAJECTORY_VS_SLIPSTREAM_2026-03-22.md).
+
 Minimal flow:
 
 1. Run the one-command server bootstrap on the host:
