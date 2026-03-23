@@ -10,5 +10,7 @@ description = "Desktop control client for the Trajectory recursive-DNS tunnel"
 anyhow.workspace = true
 eframe.workspace = true
 egui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 trajectory-core = { path = "../../crates/trajectory-core" }

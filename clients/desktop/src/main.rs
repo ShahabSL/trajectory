@@ -1,6 +1,9 @@
 use anyhow::{Context as _, Result};
 use eframe::egui;
+use serde::{Deserialize, Serialize};
+use std::fs;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -39,14 +42,20 @@ fn trajectory_icon() -> egui::IconData {
     const PATTERN: &[&str] = &[
         "................",
         "................",
-        "...TTTTTTTTTT...",
-        "...T........T...",
-        "...T........T...",
+        "..TTTTTTTTTTTT..",
+        "..TT........TT..",
+        "..TT........TT..",
         "......TTTT......",
-        "......T..T......",
-        "......T..T......",
-        "......T..T......",
         "......TTTT......",
+        "......TTTT......",
+        "......TTTT......",
+        "......TTTT......",
+        "......TTTT......",
+        "......TTTT......",
+        "......TTTT......",
+        "................",
+        "................",
+        "................",
         "................",
         "................",
     ];
@@ -69,7 +78,11 @@ fn trajectory_icon() -> egui::IconData {
         }
     }
 
-    egui::IconData { rgba, width, height }
+    egui::IconData {
+        rgba,
+        width,
+        height,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,6 +105,27 @@ struct TunnelHandle {
     join: thread::JoinHandle<()>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct DesktopSettings {
+    access_key: String,
+    domain: String,
+    resolvers_input: String,
+    listen_port: String,
+    keep_alive_ms: String,
+}
+
+impl Default for DesktopSettings {
+    fn default() -> Self {
+        Self {
+            access_key: String::new(),
+            domain: "your.domain.example".to_owned(),
+            resolvers_input: default_resolvers_text(),
+            listen_port: "7000".to_owned(),
+            keep_alive_ms: "50".to_owned(),
+        }
+    }
+}
+
 struct TrajectoryDesktopApp {
     access_key: String,
     domain: String,
@@ -104,24 +138,33 @@ struct TrajectoryDesktopApp {
     event_tx: Sender<UiEvent>,
     event_rx: Receiver<UiEvent>,
     tunnel: Option<TunnelHandle>,
+    last_persisted_settings: DesktopSettings,
+    last_save_attempt: Option<DesktopSettings>,
 }
 
 impl Default for TrajectoryDesktopApp {
     fn default() -> Self {
+        Self::from_settings(load_desktop_settings().unwrap_or_else(|_| DesktopSettings::default()))
+    }
+}
+
+impl TrajectoryDesktopApp {
+    fn from_settings(settings: DesktopSettings) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
         Self {
-            access_key: String::new(),
-            domain: "your.domain.example".to_owned(),
-            resolvers_input: "1.1.1.1:53\n1.0.0.1:53\n8.8.8.8:53\n8.8.4.4:53\n9.9.9.9:53"
-                .to_owned(),
-            listen_port: "7000".to_owned(),
-            keep_alive_ms: "50".to_owned(),
+            access_key: settings.access_key.clone(),
+            domain: settings.domain.clone(),
+            resolvers_input: settings.resolvers_input.clone(),
+            listen_port: settings.listen_port.clone(),
+            keep_alive_ms: settings.keep_alive_ms.clone(),
             run_state: RunState::Stopped,
             status_line: "Ready".to_owned(),
             logs: vec![timestamped("Desktop client initialized")],
             event_tx,
             event_rx,
             tunnel: None,
+            last_persisted_settings: settings,
+            last_save_attempt: None,
         }
     }
 }
@@ -129,6 +172,7 @@ impl Default for TrajectoryDesktopApp {
 impl eframe::App for TrajectoryDesktopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
+        self.persist_settings_if_changed();
         ctx.request_repaint_after(Duration::from_millis(100));
 
         egui::TopBottomPanel::top("hero").show(ctx, |ui| {
@@ -276,6 +320,36 @@ impl eframe::App for TrajectoryDesktopApp {
 }
 
 impl TrajectoryDesktopApp {
+    fn current_settings(&self) -> DesktopSettings {
+        DesktopSettings {
+            access_key: self.access_key.clone(),
+            domain: self.domain.clone(),
+            resolvers_input: self.resolvers_input.clone(),
+            listen_port: self.listen_port.clone(),
+            keep_alive_ms: self.keep_alive_ms.clone(),
+        }
+    }
+
+    fn persist_settings_if_changed(&mut self) {
+        let settings = self.current_settings();
+        if settings == self.last_persisted_settings
+            || self.last_save_attempt.as_ref() == Some(&settings)
+        {
+            return;
+        }
+
+        self.last_save_attempt = Some(settings.clone());
+        match save_desktop_settings(&settings) {
+            Ok(()) => {
+                self.last_persisted_settings = settings;
+            }
+            Err(error) => {
+                self.logs
+                    .push(timestamped(&format!("Settings save failed: {error:#}")));
+            }
+        }
+    }
+
     fn start_tunnel(&mut self) -> Result<()> {
         let config = self.parse_config()?;
         let (stop_tx, stop_rx) = watch::channel(false);
@@ -517,20 +591,80 @@ fn rgb(r: u8, g: u8, b: u8) -> egui::Color32 {
     egui::Color32::from_rgb(r, g, b)
 }
 
+fn default_resolvers_text() -> String {
+    default_public_resolvers()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn load_desktop_settings() -> Result<DesktopSettings> {
+    let path = desktop_settings_path().context("desktop settings path unavailable")?;
+    let raw = fs::read_to_string(path)?;
+    let settings = serde_json::from_str(&raw)?;
+    Ok(settings)
+}
+
+fn save_desktop_settings(settings: &DesktopSettings) -> Result<()> {
+    let path = desktop_settings_path().context("desktop settings path unavailable")?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let raw = serde_json::to_string_pretty(settings)?;
+    fs::write(path, raw)?;
+    Ok(())
+}
+
+fn desktop_settings_path() -> Option<PathBuf> {
+    if let Some(value) = std::env::var_os("TRAJECTORY_DESKTOP_CONFIG") {
+        return Some(PathBuf::from(value));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|path| path.join("Trajectory").join("desktop-settings.json"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return std::env::var_os("HOME").map(PathBuf::from).map(|path| {
+            path.join("Library")
+                .join("Application Support")
+                .join("Trajectory")
+                .join("desktop-settings.json")
+        });
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+            return Some(path.join("trajectory").join("desktop-settings.json"));
+        }
+        return std::env::var_os("HOME").map(PathBuf::from).map(|path| {
+            path.join(".config")
+                .join("trajectory")
+                .join("desktop-settings.json")
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn smoke_mode_builds_app_state() {
-        let app = TrajectoryDesktopApp::default();
+        let app = TrajectoryDesktopApp::from_settings(DesktopSettings::default());
         assert_eq!(app.run_state, RunState::Stopped);
         assert!(app.active_resolver_count() >= 4);
     }
 
     #[test]
     fn parses_client_config() {
-        let mut app = TrajectoryDesktopApp::default();
+        let mut app = TrajectoryDesktopApp::from_settings(DesktopSettings::default());
         app.access_key = ClientAccessKey::generate().to_display_string();
         let config = app.parse_config().unwrap();
         assert_eq!(config.domain, "your.domain.example");
@@ -540,10 +674,24 @@ mod tests {
 
     #[test]
     fn blank_resolvers_fall_back_to_public_defaults() {
-        let mut app = TrajectoryDesktopApp::default();
+        let mut app = TrajectoryDesktopApp::from_settings(DesktopSettings::default());
         app.access_key = ClientAccessKey::generate().to_display_string();
         app.resolvers_input.clear();
         let config = app.parse_config().unwrap();
         assert_eq!(config.resolvers, default_public_resolvers());
+    }
+
+    #[test]
+    fn desktop_settings_round_trip_json() {
+        let settings = DesktopSettings {
+            access_key: "traj1_test".to_owned(),
+            domain: "example.com".to_owned(),
+            resolvers_input: "1.1.1.1:53\n8.8.8.8:53".to_owned(),
+            listen_port: "7000".to_owned(),
+            keep_alive_ms: "50".to_owned(),
+        };
+        let raw = serde_json::to_string(&settings).unwrap();
+        let decoded: DesktopSettings = serde_json::from_str(&raw).unwrap();
+        assert_eq!(decoded, settings);
     }
 }

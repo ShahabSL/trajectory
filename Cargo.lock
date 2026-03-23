@@ -3698,6 +3698,8 @@ dependencies = [
  "anyhow",
  "eframe",
  "egui",
+ "serde",
+ "serde_json",
  "tokio",
  "trajectory-core",
 ]

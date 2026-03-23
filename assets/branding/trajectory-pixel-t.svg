@@ -1,10 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
   <title id="title">Trajectory T Logo</title>
-  <desc id="desc">A minimal black-and-white block letter T.</desc>
+  <desc id="desc">A minimal black-and-white outlined letter T with a solid lower stem.</desc>
   <rect width="160" height="160" fill="#ffffff"/>
   <path
     fill="#000000"
     fill-rule="evenodd"
-    d="M41 57H119V78H88V115H72V78H41V57ZM49 65V70H80V93H88V70H111V65H49Z"
+    d="M32 46H128V82H96V126H64V82H32V46ZM42 56V72H74V104H86V72H118V56H42Z"
   />
 </svg>

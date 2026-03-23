@@ -45,24 +45,19 @@ Full self-hosting and credential handoff are documented in [docs/SELF_HOSTING.md
 
 Minimal flow:
 
-1. Build the server/admin/client binaries:
+1. Run the one-command server bootstrap on the host:
 
 ```bash
-cargo build --release -p trajectory-cli --bins
-```
-
-2. Install the server:
-
-```bash
-sudo deploy/install_server.sh \
+curl -fsSL https://raw.githubusercontent.com/ShahabSL/trajectory/main/deploy/bootstrap_server.sh | \
+  sudo bash -s -- \
   --domain your.domain.example \
-  --server-bin target/release/trajectory-server \
-  --admin-bin target/release/trajectory-admin \
   --target-address 127.0.0.1:1080 \
   --client-label phone
 ```
 
-3. Copy the printed `traj1_...` access key into a client and use the same domain.
+2. Copy the printed `traj1_...` access key into a client and use the same domain.
+
+Source-build operator flow remains available if you prefer to build locally before installation.
 
 Resolvers may be left blank. Current clients fall back to the built-in public resolver set (`1.1.1.1`, `1.0.0.1`, `8.8.8.8`, `8.8.4.4`, `9.9.9.9`) and the client automatically probes the full cohort, selects the strongest active subset, and refreshes paths during runtime.
 
@@ -208,7 +203,17 @@ curl -I --socks5-hostname 127.0.0.1:7000 https://example.com
 
 ## Deploy
 
-Use the installer script:
+Use the one-command bootstrap:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ShahabSL/trajectory/main/deploy/bootstrap_server.sh | \
+  sudo bash -s -- \
+  --domain your.domain.example \
+  --target-address 127.0.0.1:1080 \
+  --client-label phone
+```
+
+Or use the local installer script:
 
 ```bash
 sudo deploy/install_server.sh \

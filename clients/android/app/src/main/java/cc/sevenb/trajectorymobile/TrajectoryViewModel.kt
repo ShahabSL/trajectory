@@ -43,6 +43,7 @@ class TrajectoryViewModel(
 
     private var pollJob: Job? = null
     private var verificationJob: Job? = null
+    private var persistEditsJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -70,12 +71,35 @@ class TrajectoryViewModel(
         startPolling()
     }
 
-    fun updateAccessKey(value: String) = _uiState.update { it.copy(accessKey = value) }
-    fun updateDomain(value: String) = _uiState.update { it.copy(domain = value) }
-    fun updateResolvers(value: String) = _uiState.update { it.copy(resolversText = value) }
-    fun updateListenPort(value: String) = _uiState.update { it.copy(listenPortText = value) }
-    fun updateKeepAlive(value: String) = _uiState.update { it.copy(keepAliveText = value) }
-    fun updateConnectionMode(value: AndroidConnectionMode) = _uiState.update { it.copy(connectionMode = value) }
+    fun updateAccessKey(value: String) {
+        _uiState.update { it.copy(accessKey = value) }
+        scheduleSettingsPersist()
+    }
+
+    fun updateDomain(value: String) {
+        _uiState.update { it.copy(domain = value) }
+        scheduleSettingsPersist()
+    }
+
+    fun updateResolvers(value: String) {
+        _uiState.update { it.copy(resolversText = value) }
+        scheduleSettingsPersist()
+    }
+
+    fun updateListenPort(value: String) {
+        _uiState.update { it.copy(listenPortText = value) }
+        scheduleSettingsPersist()
+    }
+
+    fun updateKeepAlive(value: String) {
+        _uiState.update { it.copy(keepAliveText = value) }
+        scheduleSettingsPersist()
+    }
+
+    fun updateConnectionMode(value: AndroidConnectionMode) {
+        _uiState.update { it.copy(connectionMode = value) }
+        scheduleSettingsPersist()
+    }
 
     fun applyLaunchOverrides(
         accessKey: String?,
@@ -520,6 +544,14 @@ class TrajectoryViewModel(
         )
     }
 
+    private fun scheduleSettingsPersist() {
+        persistEditsJob?.cancel()
+        persistEditsJob = viewModelScope.launch {
+            delay(250)
+            persistCurrentSettings()
+        }
+    }
+
     private fun applyOverrides(
         accessKey: String?,
         domain: String?,
@@ -579,6 +611,7 @@ class TrajectoryViewModel(
 
     override fun onCleared() {
         pollJob?.cancel()
+        persistEditsJob?.cancel()
     }
 
     companion object {

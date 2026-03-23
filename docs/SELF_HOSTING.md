@@ -9,7 +9,28 @@ This guide is for operators who want to run a Trajectory server and hand credent
 - a local SOCKS5 upstream on the server, or a `hev-socks5-server` binary you want the installer to manage
 - Rust locally if you are building binaries from source
 
-## Build the operator binaries
+## One-command server install
+
+The fastest operator path is a single command on the server:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ShahabSL/trajectory/main/deploy/bootstrap_server.sh | \
+  sudo bash -s -- \
+  --domain your.domain.example \
+  --target-address 127.0.0.1:1080 \
+  --client-label phone
+```
+
+This bootstrap script:
+
+- installs the build dependencies it needs
+- installs Rust if the host does not already have it
+- clones the repo
+- builds `trajectory-server` and `trajectory-admin`
+- runs `deploy/install_server.sh`
+- prints an initial client access key
+
+## Build the operator binaries manually
 
 ```bash
 cargo build --release -p trajectory-cli --bins
@@ -21,7 +42,7 @@ This produces:
 - `target/release/trajectory-admin`
 - `target/release/trajectory-client`
 
-## Install the server
+## Install the server manually
 
 If the host already has a local SOCKS5 upstream on `127.0.0.1:1080`:
 
