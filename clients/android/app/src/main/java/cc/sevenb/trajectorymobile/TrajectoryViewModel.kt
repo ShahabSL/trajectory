@@ -1,7 +1,11 @@
 package cc.sevenb.trajectorymobile
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.NetworkCapabilities
 import android.os.Build
+import android.provider.Settings
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -25,6 +29,7 @@ import uniffi.trajectorymobile.MobileTunnelState
 import uniffi.trajectorymobile.TrajectoryMobileController
 import uniffi.trajectorymobile.mobileCoreVersion
 import java.time.Instant
+import java.net.NetworkInterface
 
 class TrajectoryViewModel(
     private val appContext: Context,
@@ -34,6 +39,25 @@ class TrajectoryViewModel(
         val inProgress: Boolean = false,
         val confirmedMode: AndroidConnectionMode? = null,
         val error: String? = null,
+    )
+
+    private data class NetworkDebugSnapshot(
+        val privateDnsMode: String,
+        val restrictBackgroundStatus: String,
+        val activeNetworkPresent: Boolean,
+        val transports: List<String>,
+        val capabilities: List<String>,
+        val downstreamKbps: Int?,
+        val upstreamKbps: Int?,
+        val interfaceName: String?,
+        val dnsServers: List<String>,
+        val domains: String?,
+        val mtu: Int?,
+        val privateDnsActive: Boolean?,
+        val privateDnsServerName: String?,
+        val linkAddresses: List<String>,
+        val routes: List<String>,
+        val localInterfaces: List<String>,
     )
 
     private val tag = "TrajectoryViewModel"
@@ -139,6 +163,7 @@ class TrajectoryViewModel(
                 currentConfig()
             } catch (error: IllegalArgumentException) {
                 Log.w(tag, "Rejected invalid tunnel configuration", error)
+                DebugEventStore.warn(tag, "Rejected invalid tunnel configuration", error)
                 _uiState.update {
                     it.copy(
                         state = MobileTunnelState.FAILED,
@@ -149,6 +174,10 @@ class TrajectoryViewModel(
                 return@launch
             }
             Log.i(
+                tag,
+                "Starting ${connectionMode.name.lowercase()} mode with ${config.resolvers.size} resolvers on port ${config.listenPort.toInt()}",
+            )
+            DebugEventStore.info(
                 tag,
                 "Starting ${connectionMode.name.lowercase()} mode with ${config.resolvers.size} resolvers on port ${config.listenPort.toInt()}",
             )
@@ -178,10 +207,12 @@ class TrajectoryViewModel(
                     }
                 }
                 Log.i(tag, "Tunnel controller started successfully in ${connectionMode.name.lowercase()} mode")
+                DebugEventStore.info(tag, "Tunnel controller started successfully in ${connectionMode.name.lowercase()} mode")
                 beginConnectivityVerification(connectionMode, config.listenPort.toInt())
                 refreshFromController(controller)
             } catch (error: MobileException.AlreadyRunning) {
                 Log.i(tag, "Tunnel already running; refreshing controller state")
+                DebugEventStore.info(tag, "Tunnel already running; refreshing controller state")
                 when (connectionMode) {
                     AndroidConnectionMode.VPN -> {
                         TrajectoryProxyService.stop(appContext)
@@ -196,6 +227,7 @@ class TrajectoryViewModel(
                 refreshFromController(controller)
             } catch (error: MobileException) {
                 Log.e(tag, "Tunnel start failed", error)
+                DebugEventStore.error(tag, "Tunnel start failed", error)
                 connectivityCheck.value = ConnectivityCheck(error = error.message)
                 _uiState.update {
                     it.copy(
@@ -206,6 +238,7 @@ class TrajectoryViewModel(
                 }
             } catch (error: Throwable) {
                 Log.e(tag, "Tunnel start failed", error)
+                DebugEventStore.error(tag, "Tunnel start failed", error)
                 connectivityCheck.value = ConnectivityCheck(error = error.message)
                 _uiState.update {
                     it.copy(
@@ -223,6 +256,7 @@ class TrajectoryViewModel(
             var stopError: MobileException? = null
             try {
                 Log.i(tag, "Stopping tunnel controller")
+                DebugEventStore.info(tag, "Stopping tunnel controller")
                 verificationJob?.cancel()
                 connectivityCheck.value = ConnectivityCheck()
                 _uiState.update {
@@ -238,6 +272,7 @@ class TrajectoryViewModel(
                     controllerOrNull()?.stop()
                 } catch (error: MobileException.NotRunning) {
                     Log.i(tag, "Tunnel controller was already stopped during disconnect")
+                    DebugEventStore.info(tag, "Tunnel controller was already stopped during disconnect")
                 } catch (error: MobileException) {
                     stopError = error
                 }
@@ -249,6 +284,7 @@ class TrajectoryViewModel(
                 }
             } catch (error: MobileException) {
                 Log.e(tag, "Tunnel stop failed", error)
+                DebugEventStore.error(tag, "Tunnel stop failed", error)
                 _uiState.update {
                     it.copy(
                         state = MobileTunnelState.FAILED,
@@ -274,6 +310,8 @@ class TrajectoryViewModel(
         val controller = controllerOrNull()
         val snapshot = runCatching { controller?.snapshot() }.getOrNull()
         val logs = runCatching { controller?.logs().orEmpty() }.getOrElse { state.logs }.takeLast(200)
+        val network = captureNetworkDebugSnapshot()
+        val appEvents = DebugEventStore.snapshot()
         val resolvers = state.resolversText
             .lines()
             .map(String::trim)
@@ -298,6 +336,36 @@ class TrajectoryViewModel(
             appendLine("release: ${Build.VERSION.RELEASE}")
             appendLine("fingerprint: ${Build.FINGERPRINT}")
             appendLine("abis: ${Build.SUPPORTED_ABIS.joinToString(", ")}")
+            appendLine()
+            appendLine("[network_environment]")
+            appendLine("active_network_present: ${network.activeNetworkPresent}")
+            appendLine("private_dns_mode: ${network.privateDnsMode}")
+            appendLine("restrict_background_status: ${network.restrictBackgroundStatus}")
+            appendLine("transports: ${network.transports.joinToString(", ").ifBlank { "<none>" }}")
+            appendLine("capabilities: ${network.capabilities.joinToString(", ").ifBlank { "<none>" }}")
+            appendLine("downstream_kbps: ${network.downstreamKbps ?: "<unknown>"}")
+            appendLine("upstream_kbps: ${network.upstreamKbps ?: "<unknown>"}")
+            appendLine("interface_name: ${network.interfaceName ?: "<none>"}")
+            appendLine("domains: ${network.domains ?: "<none>"}")
+            appendLine("mtu: ${network.mtu ?: "<unknown>"}")
+            appendLine("private_dns_active: ${network.privateDnsActive?.toString() ?: "<unknown>"}")
+            appendLine("private_dns_server_name: ${network.privateDnsServerName ?: "<none>"}")
+            appendLine("dns_servers_count: ${network.dnsServers.size}")
+            network.dnsServers.forEachIndexed { index, server ->
+                appendLine("dns_server_${index + 1}: $server")
+            }
+            appendLine("link_addresses_count: ${network.linkAddresses.size}")
+            network.linkAddresses.forEachIndexed { index, address ->
+                appendLine("link_address_${index + 1}: $address")
+            }
+            appendLine("routes_count: ${network.routes.size}")
+            network.routes.forEachIndexed { index, route ->
+                appendLine("route_${index + 1}: $route")
+            }
+            appendLine("local_interfaces_count: ${network.localInterfaces.size}")
+            network.localInterfaces.forEachIndexed { index, iface ->
+                appendLine("local_interface_${index + 1}: $iface")
+            }
             appendLine()
             appendLine("[ui_state]")
             appendLine("status: ${state.status}")
@@ -351,6 +419,13 @@ class TrajectoryViewModel(
                     appendLine("${entry.timestamp} ${sanitizeLogLine(entry.message)}")
                 }
             }
+            appendLine()
+            appendLine("[app_events]")
+            if (appEvents.isEmpty()) {
+                appendLine("<none>")
+            } else {
+                appEvents.forEach { appendLine(it) }
+            }
         }
     }
 
@@ -371,6 +446,7 @@ class TrajectoryViewModel(
                 refreshFromController(controller)
             } catch (error: Throwable) {
                 Log.e(tag, "Failed to initialize controller", error)
+                DebugEventStore.error(tag, "Failed to initialize controller", error)
                 _uiState.update {
                     it.copy(
                         state = MobileTunnelState.FAILED,
@@ -467,6 +543,13 @@ class TrajectoryViewModel(
                     AndroidConnectionMode.PROXY ->
                         Log.i(tag, "Verified proxy path through local SOCKS endpoint")
                 }
+                DebugEventStore.info(
+                    tag,
+                    when (connectionMode) {
+                        AndroidConnectionMode.VPN -> "Detected live VPN traffic on the device"
+                        AndroidConnectionMode.PROXY -> "Verified proxy path through local SOCKS endpoint"
+                    },
+                )
                 connectivityCheck.value = ConnectivityCheck(confirmedMode = connectionMode)
                 refreshFromController()
                 return@launch
@@ -474,6 +557,11 @@ class TrajectoryViewModel(
 
             val message = failure.message ?: "Connection test failed"
             Log.e(tag, "Connectivity verification failed for ${connectionMode.name.lowercase()} mode", failure)
+            DebugEventStore.error(
+                tag,
+                "Connectivity verification failed for ${connectionMode.name.lowercase()} mode",
+                failure,
+            )
             connectivityCheck.value = ConnectivityCheck(error = message)
             runCatching { controllerOrNull()?.stop() }
             TrajectoryVpnService.stop(appContext)
@@ -517,6 +605,7 @@ class TrajectoryViewModel(
     }
 
     fun reportPermissionDenied() {
+        DebugEventStore.warn(tag, "VPN permission denied by user")
         _uiState.update {
             it.copy(
                 state = MobileTunnelState.FAILED,
@@ -584,6 +673,58 @@ class TrajectoryViewModel(
 
     private fun controllerOrNull(): TrajectoryMobileController? = TunnelControllerStore.peekController()
 
+    private fun captureNetworkDebugSnapshot(): NetworkDebugSnapshot {
+        val connectivity = appContext.getSystemService(ConnectivityManager::class.java)
+        if (connectivity == null) {
+            return NetworkDebugSnapshot(
+                privateDnsMode = "<unavailable>",
+                restrictBackgroundStatus = "<unavailable>",
+                activeNetworkPresent = false,
+                transports = emptyList(),
+                capabilities = emptyList(),
+                downstreamKbps = null,
+                upstreamKbps = null,
+                interfaceName = null,
+                dnsServers = emptyList(),
+                domains = null,
+                mtu = null,
+                privateDnsActive = null,
+                privateDnsServerName = null,
+                linkAddresses = emptyList(),
+                routes = emptyList(),
+                localInterfaces = localInterfaceSnapshot(),
+            )
+        }
+        val activeNetwork = connectivity.activeNetwork
+        val capabilities = activeNetwork?.let(connectivity::getNetworkCapabilities)
+        val linkProperties = activeNetwork?.let(connectivity::getLinkProperties)
+        return NetworkDebugSnapshot(
+            privateDnsMode = runCatching {
+                Settings.Global.getString(appContext.contentResolver, "private_dns_mode") ?: "<unset>"
+            }.getOrDefault("<unavailable>"),
+            restrictBackgroundStatus = when (connectivity.restrictBackgroundStatus) {
+                ConnectivityManager.RESTRICT_BACKGROUND_STATUS_DISABLED -> "disabled"
+                ConnectivityManager.RESTRICT_BACKGROUND_STATUS_WHITELISTED -> "whitelisted"
+                ConnectivityManager.RESTRICT_BACKGROUND_STATUS_ENABLED -> "enabled"
+                else -> "unknown"
+            },
+            activeNetworkPresent = activeNetwork != null,
+            transports = capabilityLabels(capabilities),
+            capabilities = capabilityFlags(capabilities),
+            downstreamKbps = capabilities?.linkDownstreamBandwidthKbps,
+            upstreamKbps = capabilities?.linkUpstreamBandwidthKbps,
+            interfaceName = linkProperties?.interfaceName,
+            dnsServers = linkProperties?.dnsServers?.map { it.hostAddress ?: it.hostName ?: it.toString() }.orEmpty(),
+            domains = linkProperties?.domains,
+            mtu = linkProperties?.mtu,
+            privateDnsActive = linkProperties?.isPrivateDnsActive,
+            privateDnsServerName = linkProperties?.privateDnsServerName,
+            linkAddresses = linkProperties?.linkAddresses?.map { it.toString() }.orEmpty(),
+            routes = linkProperties?.routes?.map { it.toString() }.orEmpty(),
+            localInterfaces = localInterfaceSnapshot(),
+        )
+    }
+
     private fun currentConfig(): MobileTunnelConfig {
         val state = _uiState.value
         if (state.accessKey.isBlank()) {
@@ -627,6 +768,71 @@ class TrajectoryViewModel(
             }
     }
 }
+
+private fun capabilityLabels(capabilities: NetworkCapabilities?): List<String> {
+    if (capabilities == null) {
+        return emptyList()
+    }
+    val labels = mutableListOf<String>()
+    if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) labels += "wifi"
+    if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) labels += "cellular"
+    if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) labels += "ethernet"
+    if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) labels += "vpn"
+    if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH)) labels += "bluetooth"
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1 &&
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI_AWARE)
+    ) {
+        labels += "wifi_aware"
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_USB)
+    ) {
+        labels += "usb"
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_LOWPAN)
+    ) {
+        labels += "lowpan"
+    }
+    return labels
+}
+
+private fun capabilityFlags(capabilities: NetworkCapabilities?): List<String> {
+    if (capabilities == null) {
+        return emptyList()
+    }
+    val labels = mutableListOf<String>()
+    if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) labels += "internet"
+    if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) labels += "validated"
+    if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL)) labels += "captive_portal"
+    if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) labels += "not_metered"
+    if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING)) labels += "not_roaming"
+    if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) labels += "not_vpn"
+    if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)) labels += "not_restricted"
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)
+    ) {
+        labels += "not_suspended"
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_TEMPORARILY_NOT_METERED)
+    ) {
+        labels += "temporarily_not_metered"
+    }
+    return labels
+}
+
+private fun localInterfaceSnapshot(): List<String> =
+    runCatching {
+        NetworkInterface.getNetworkInterfaces()
+            ?.toList()
+            .orEmpty()
+            .filter { it.isUp && !it.isLoopback }
+            .map { iface ->
+                val addresses = iface.inetAddresses.toList().joinToString(", ") { it.hostAddress ?: it.toString() }
+                "${iface.name}=${addresses.ifBlank { "<none>" }}"
+            }
+    }.getOrDefault(emptyList())
 
 private fun redactAccessKey(accessKey: String): String {
     val value = accessKey.trim()

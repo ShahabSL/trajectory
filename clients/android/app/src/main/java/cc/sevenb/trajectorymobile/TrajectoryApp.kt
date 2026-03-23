@@ -3,6 +3,7 @@ package cc.sevenb.trajectorymobile
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -362,7 +363,7 @@ private fun LogsCard(state: MobileUiState, onClear: () -> Unit, onCopyDebugRepor
                 }
             }
             Text(
-                "Copy the full debug report before sharing results from restricted networks. It includes device info, runtime state, VPN counters, config, and recent logs.",
+                "Copy the full debug report before sharing results from restricted networks. It includes device info, network environment, DNS view, runtime state, VPN counters, config, recent logs, and app events.",
                 color = MutedTextColor,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -419,5 +420,7 @@ private fun monochromeTextFieldColors() =
 private fun copyDebugReportToClipboard(context: Context, report: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("Trajectory debug report", report))
+    DebugEventStore.info("TrajectoryApp", "Copied debug report to clipboard (${report.length} chars)")
+    Log.i("TrajectoryApp", "Copied debug report to clipboard (${report.length} chars)")
     Toast.makeText(context, "Debug report copied", Toast.LENGTH_SHORT).show()
 }

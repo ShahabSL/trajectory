@@ -73,6 +73,7 @@ class TrajectoryVpnService : VpnService() {
     private fun startTunnel(socksPort: Int) {
         if (tunFd != null) {
             Log.i(TAG, "VPN already active; ignoring duplicate start request")
+            DebugEventStore.info(TAG, "VPN already active; ignoring duplicate start request")
             return
         }
 
@@ -88,11 +89,13 @@ class TrajectoryVpnService : VpnService() {
                         addDisallowedApplication(packageName)
                     } catch (error: Exception) {
                         Log.w(TAG, "Failed to exclude Trajectory from the VPN", error)
+                        DebugEventStore.warn(TAG, "Failed to exclude Trajectory from the VPN", error)
                     }
                 }
                 .establish()
 
             if (vpnInterface == null) {
+                DebugEventStore.error(TAG, "Could not create the VPN interface")
                 publishError("Could not create the VPN interface")
                 stopSelf()
                 return
@@ -107,14 +110,17 @@ class TrajectoryVpnService : VpnService() {
             startStatsLoop()
             publishStatus("Connected")
             Log.i(TAG, "VPN active with SOCKS endpoint 127.0.0.1:$socksPort")
+            DebugEventStore.info(TAG, "VPN active with SOCKS endpoint 127.0.0.1:$socksPort")
         } catch (error: Throwable) {
             Log.e(TAG, "Failed to start VPN service", error)
+            DebugEventStore.error(TAG, "Failed to start VPN service", error)
             publishError(error.message ?: "Could not start the VPN")
             stopTunnel("Error")
         }
     }
 
     private fun stopTunnel(status: String) {
+        DebugEventStore.info(TAG, "Stopping VPN tunnel with status=$status")
         statsJob?.cancel()
         statsJob = null
 

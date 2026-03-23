@@ -17,13 +17,16 @@ class TrajectoryProxyService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                DebugEventStore.info("TrajectoryProxyService", "Stopping foreground proxy service")
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
             }
 
             else -> {
-                startInForeground(intent?.getIntExtra(EXTRA_PROXY_PORT, DEFAULT_PROXY_PORT) ?: DEFAULT_PROXY_PORT)
+                val proxyPort = intent?.getIntExtra(EXTRA_PROXY_PORT, DEFAULT_PROXY_PORT) ?: DEFAULT_PROXY_PORT
+                DebugEventStore.info("TrajectoryProxyService", "Starting foreground proxy service on 127.0.0.1:$proxyPort")
+                startInForeground(proxyPort)
                 return START_STICKY
             }
         }
