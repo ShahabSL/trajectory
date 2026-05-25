@@ -3,6 +3,8 @@ use std::fs;
 use std::path::Path;
 use trajectory_core::auth::StoredClientRegistry;
 
+pub mod runtime;
+
 pub fn load_client_registry(path: &Path) -> Result<StoredClientRegistry> {
     if !path.exists() {
         return Ok(StoredClientRegistry::default());

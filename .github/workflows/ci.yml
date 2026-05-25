@@ -21,8 +21,8 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace
 
-      - name: Run desktop smoke test
-        run: cargo run -p trajectory-desktop -- --smoke-test
+      - name: Run clippy
+        run: cargo clippy -p trajectory-core -p trajectory-cli --bins --tests -- -D warnings
 
       - name: Build Linux release bundles
         run: python3 scripts/package_release.py --target x86_64-unknown-linux-gnu --output-dir dist/ci
@@ -32,49 +32,6 @@ jobs:
         with:
           name: ci-linux-release-bundles
           path: dist/ci/*
-          if-no-files-found: error
-          retention-days: 7
-
-  android-build:
-    runs-on: ubuntu-22.04
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Set up Java
-        uses: actions/setup-java@v5
-        with:
-          java-version: "17"
-          distribution: "temurin"
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: ""
-
-      - name: Install Android SDK packages
-        run: |
-          sdkmanager \
-            "platforms;android-36" \
-            "build-tools;35.0.0" \
-            "ndk;29.0.14206865"
-
-      - name: Install Rust Android targets
-        run: rustup target add aarch64-linux-android x86_64-linux-android
-
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked --version 4.1.2
-
-      - name: Build Android release APK
-        env:
-          GRADLE_USER_HOME: ${{ github.workspace }}/.gradle-ci
-        run: scripts/build_android_release.sh
-
-      - name: Upload Android CI APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-android-apk
-          path: clients/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 7
 

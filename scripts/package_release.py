@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_COMPONENTS = ("cli", "desktop")
+DEFAULT_COMPONENTS = ("cli",)
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,7 +62,7 @@ def workspace_version() -> str:
     versions = {
         package["version"]
         for package in packages
-        if package["name"] in {"trajectory-core", "trajectory-cli", "trajectory-desktop"}
+        if package["name"] in {"trajectory-core", "trajectory-cli"}
     }
     if len(versions) != 1:
         raise SystemExit(f"expected one workspace version, found: {sorted(versions)}")
@@ -81,11 +81,6 @@ def artifact_manifest(target: str) -> dict[str, dict]:
                 release_dir / f"trajectory-server{binary_ext}",
             ],
             "readme": cli_readme(target),
-        },
-        "desktop": {
-            "display": "Desktop",
-            "binaries": [release_dir / f"trajectory-desktop{binary_ext}"],
-            "readme": desktop_readme(target),
         },
     }
 
@@ -110,25 +105,6 @@ See the repository README for the full tunnel and deployment flow.
 """
 
 
-def desktop_readme(target: str) -> str:
-    return f"""Trajectory Desktop
-==================
-
-Target: {target}
-
-Included binary:
-- trajectory-desktop
-
-The desktop client wraps the shared pure-Rust tunnel core with:
-- resolver and domain configuration
-- local listen port configuration
-- start/stop controls
-- diagnostics log and status cards
-
-The desktop app drives the same transport implementation used by the CLI.
-"""
-
-
 def build_component(target: str, component: str) -> None:
     if component == "cli":
         command = [
@@ -140,16 +116,6 @@ def build_component(target: str, component: str) -> None:
             "-p",
             "trajectory-cli",
             "--bins",
-        ]
-    elif component == "desktop":
-        command = [
-            "cargo",
-            "build",
-            "--release",
-            "--target",
-            target,
-            "-p",
-            "trajectory-desktop",
         ]
     else:
         raise SystemExit(f"unknown component: {component}")
@@ -182,7 +148,9 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def write_bundle_notes(bundle_dir: Path, version: str, target: str, component: str, tag: str | None) -> None:
+def write_bundle_notes(
+    bundle_dir: Path, version: str, target: str, component: str, tag: str | None
+) -> None:
     notes = [
         f"Trajectory release bundle",
         f"Version: {version}",
@@ -197,7 +165,6 @@ def write_bundle_notes(bundle_dir: Path, version: str, target: str, component: s
             "Repository layout:",
             "- crates/trajectory-core: shared transport engine",
             "- crates/trajectory-cli: CLI binaries",
-            "- clients/desktop: end-user desktop UI",
         ]
     )
     (bundle_dir / "BUILD-INFO.txt").write_text("\n".join(notes) + "\n", encoding="utf-8")

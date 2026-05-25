@@ -23,6 +23,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import textwrap
 import time
 from dataclasses import dataclass
@@ -151,6 +152,7 @@ class BenchResult:
     elapsed_seconds: float
     complete: bool
     timed_out: bool
+    diagnostic: str = ""
 
     @property
     def bytes_per_second(self) -> float:
@@ -275,16 +277,34 @@ def parse_args() -> argparse.Namespace:
         dest="resolvers",
         help="Public resolver to use. Repeat to benchmark multipath over several resolvers.",
     )
+    parser.add_argument(
+        "--resolver-file",
+        type=pathlib.Path,
+        default=None,
+        help="Read recursive resolvers from a file, ignoring blank lines and comments.",
+    )
     parser.add_argument("--domain", default="test.example.com")
     parser.add_argument("--size-bytes", type=int, default=65536)
     parser.add_argument("--slipstream-dir", type=pathlib.Path, default=DEFAULT_SLIPSTREAM_DIR)
     parser.add_argument("--native-cert-dir", type=pathlib.Path, default=DEFAULT_NATIVE_CERT_DIR)
     parser.add_argument("--keep-artifacts", action="store_true")
+    parser.add_argument(
+        "--implementation",
+        action="append",
+        choices=("trajectory", "slipstream"),
+        help="Implementation to benchmark. Repeatable; defaults to both.",
+    )
     parser.add_argument("--timeout-seconds", type=int, default=180)
     parser.add_argument("--stall-seconds", type=int, default=8)
     parser.add_argument("--trajectory-listen-port", type=int, default=27010)
     parser.add_argument("--slipstream-listen-port", type=int, default=27011)
     parser.add_argument("--trajectory-keep-alive-interval", type=int, default=0)
+    parser.add_argument("--trajectory-dns-max-payload", type=int, default=None)
+    parser.add_argument(
+        "--trajectory-resolver-socks-proxy",
+        default=None,
+        help="Optional SOCKS5 proxy for Trajectory resolver DNS-over-TCP.",
+    )
     parser.add_argument("--trajectory-client-bin", type=pathlib.Path, default=None)
     parser.add_argument("--trajectory-server-bin", type=pathlib.Path, default=None)
     parser.add_argument(
@@ -302,6 +322,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.resolver_file is not None:
+        args.resolvers = load_resolver_file(args.resolver_file)
     if not args.resolvers:
         args.resolvers = [
             "1.1.1.1:53",
@@ -335,7 +357,8 @@ def main() -> int:
         )
 
         results = []
-        for implementation in ("trajectory", "slipstream"):
+        implementations = args.implementation or ["trajectory", "slipstream"]
+        for implementation in implementations:
             result = benchmark_once(
                 ssh=ssh,
                 implementation=implementation,
@@ -345,6 +368,8 @@ def main() -> int:
                 timeout_seconds=args.timeout_seconds,
                 stall_seconds=args.stall_seconds,
                 trajectory_keep_alive_interval=args.trajectory_keep_alive_interval,
+                trajectory_dns_max_payload=args.trajectory_dns_max_payload,
+                trajectory_resolver_socks_proxy=args.trajectory_resolver_socks_proxy,
                 trajectory_paths=trajectory_paths,
                 slipstream_client=slipstream_paths["client"],
                 trajectory_listen_port=args.trajectory_listen_port,
@@ -376,6 +401,17 @@ def load_server_auth(path: pathlib.Path) -> ServerAuth:
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip()
     return ServerAuth(host=values["ip"], password=values["password"])
+
+
+def load_resolver_file(path: pathlib.Path) -> list[str]:
+    resolvers = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        entry = raw_line.split("#", 1)[0].strip()
+        if entry:
+            resolvers.append(entry)
+    if not resolvers:
+        raise ValueError(f"resolver file is empty: {path}")
+    return resolvers
 
 
 def run(
@@ -601,7 +637,7 @@ def install_remote_files(
             [Service]
             Type=simple
             WorkingDirectory={REMOTE_STAGE_DIR}
-            ExecStart={REMOTE_STAGE_DIR}/trajectory-server --dns-listen-port 53 --target-address 127.0.0.1:{REMOTE_SINK_PORT} --domain {domain} --client-db {REMOTE_STAGE_DIR}/trajectory-bench-clients.json --cert {REMOTE_STAGE_DIR}/cert.pem --key {REMOTE_STAGE_DIR}/key.pem
+            ExecStart={REMOTE_STAGE_DIR}/trajectory-server --dns-listen-port 53 --target-address 127.0.0.1:{REMOTE_SINK_PORT} --domain {domain} --client-db {REMOTE_STAGE_DIR}/trajectory-bench-clients.json
             Restart=no
             RuntimeMaxSec={runtime_max_seconds}
 
@@ -696,6 +732,8 @@ def benchmark_once(
     timeout_seconds: int,
     stall_seconds: int,
     trajectory_keep_alive_interval: int,
+    trajectory_dns_max_payload: int | None,
+    trajectory_resolver_socks_proxy: str | None,
     trajectory_paths: dict[str, pathlib.Path],
     slipstream_client: pathlib.Path,
     trajectory_listen_port: int,
@@ -722,6 +760,10 @@ def benchmark_once(
         if trajectory_access_key is None:
             raise ValueError("trajectory benchmark requires --trajectory-access-key")
         client_cmd.extend(["--access-key", trajectory_access_key])
+        if trajectory_dns_max_payload is not None:
+            client_cmd.extend(["--dns-max-payload", str(trajectory_dns_max_payload)])
+        if trajectory_resolver_socks_proxy:
+            client_cmd.extend(["--resolver-socks-proxy", trajectory_resolver_socks_proxy])
         for resolver in resolvers:
             client_cmd.extend(["--resolver", resolver])
     else:
@@ -768,10 +810,20 @@ def benchmark_once(
         stderr=subprocess.STDOUT,
         text=True,
     )
+    client_output: list[str] = []
+    start_output_reader(client, client_output)
     try:
-        time.sleep(2)
-        if client.poll() is not None:
-            raise RuntimeError(client.stdout.read() if client.stdout else "client exited early")
+        if implementation == "trajectory":
+            wait_for_output_pattern(
+                client_output,
+                "trajectory client listening",
+                timeout_seconds=timeout_seconds,
+                process=client,
+            )
+        else:
+            time.sleep(2)
+            if client.poll() is not None:
+                raise RuntimeError("".join(client_output) or "client exited early")
 
         fetch = start_http_fetch(listen_port, timeout_seconds)
         status = wait_for_remote_completion(
@@ -791,6 +843,9 @@ def benchmark_once(
             and client_fetch["bytes"] == size_bytes
             and delivered_bytes == size_bytes
         )
+        diagnostic = ""
+        if not complete or os.environ.get("TRAJECTORY_DIAG"):
+            diagnostic = build_failure_diagnostic(status, client_fetch, client_output)
         return BenchResult(
             implementation=implementation,
             bytes_sent=size_bytes,
@@ -798,6 +853,7 @@ def benchmark_once(
             elapsed_seconds=elapsed_seconds,
             complete=complete,
             timed_out=bool(status.get("timed_out", False)) or client_fetch["http_code"] != 200,
+            diagnostic=diagnostic,
         )
     finally:
         client.terminate()
@@ -848,6 +904,17 @@ def ensure_remote_service_active(ssh: SshSession, service: str, timeout_seconds:
         check=False,
     ).stdout
     raise RuntimeError(f"{service} failed to stay active:\\n{journal}")
+
+
+def start_output_reader(process: subprocess.Popen[str], output: list[str]) -> None:
+    def read() -> None:
+        if process.stdout is None:
+            return
+        for line in process.stdout:
+            output.append(line)
+
+    thread = threading.Thread(target=read, daemon=True)
+    thread.start()
 
 
 def fetch_remote_status(ssh: SshSession) -> dict[str, object]:
@@ -941,27 +1008,94 @@ def start_http_fetch(port: int, timeout_seconds: int) -> subprocess.Popen[str]:
     )
 
 
+def wait_for_output_pattern(
+    output: list[str],
+    pattern: str,
+    *,
+    timeout_seconds: int,
+    process: subprocess.Popen[str],
+) -> None:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if any(pattern in line for line in output):
+            return
+        if process.poll() is not None:
+            raise RuntimeError("".join(output) or "client exited early")
+        time.sleep(0.2)
+    raise TimeoutError(f"client did not report {pattern!r}:\n{''.join(output)[-4000:]}")
+
+
 def finish_http_fetch(process: subprocess.Popen[str], *, abort: bool) -> dict[str, object]:
     started = time.perf_counter()
     if abort and process.poll() is None:
         process.terminate()
     try:
-        stdout, _stderr = process.communicate(timeout=5)
+        if abort:
+            stdout, stderr = process.communicate(timeout=5)
+        else:
+            stdout, stderr = process.communicate()
     except subprocess.TimeoutExpired:
         process.kill()
-        stdout, _stderr = process.communicate()
+        stdout, stderr = process.communicate()
     elapsed = time.perf_counter() - started
-    if process.returncode != 0:
-        return {"http_code": 0, "bytes": 0, "elapsed": elapsed}
     parts = stdout.strip().split()
-    if len(parts) != 3:
+    if len(parts) == 3:
+        http_code, size_download, time_total = parts
+        return {
+            "http_code": int(http_code),
+            "bytes": int(float(size_download)),
+            "elapsed": float(time_total),
+            "returncode": process.returncode,
+            "stderr": stderr.strip(),
+            "stdout": stdout.strip(),
+        }
+    if process.returncode != 0:
+        return {
+            "http_code": 0,
+            "bytes": 0,
+            "elapsed": elapsed,
+            "returncode": process.returncode,
+            "stderr": stderr.strip(),
+            "stdout": stdout.strip(),
+        }
+    else:
         raise RuntimeError(f"unexpected curl output: {stdout!r}")
-    http_code, size_download, time_total = parts
-    return {
-        "http_code": int(http_code),
-        "bytes": int(float(size_download)),
-        "elapsed": float(time_total),
-    }
+
+
+def build_failure_diagnostic(
+    status: dict[str, object],
+    client_fetch: dict[str, object],
+    client_output: list[str],
+) -> str:
+    interesting_terms = (
+        "client_diag",
+        "resolver",
+        "session",
+        "request",
+        "failed",
+        "timeout",
+        "error",
+        "closed",
+        "connected",
+    )
+    sensitive_terms = ("KEY", "SECRET", "TOKEN", "PASSWORD")
+    lines = []
+    for line in client_output[-120:]:
+        upper = line.upper()
+        if any(term in upper for term in sensitive_terms):
+            continue
+        if any(term.upper() in upper for term in interesting_terms):
+            lines.append(line.strip())
+    return json.dumps(
+        {
+            "remote_status": status,
+            "curl_returncode": client_fetch.get("returncode"),
+            "curl_stderr": client_fetch.get("stderr"),
+            "curl_stdout": client_fetch.get("stdout"),
+            "client_log_tail": "\n".join(lines[-30:]),
+        },
+        sort_keys=True,
+    )
 
 
 def print_result(result: BenchResult) -> None:
@@ -975,6 +1109,7 @@ def print_result(result: BenchResult) -> None:
                 "bytes_per_second": round(result.bytes_per_second, 1),
                 "complete": result.complete,
                 "timed_out": result.timed_out,
+                "diagnostic": result.diagnostic,
             },
             sort_keys=True,
         )

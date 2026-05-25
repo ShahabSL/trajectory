@@ -1,0 +1,23 @@
+{
+  "name": "trajectory",
+  "version": "1.0.0",
+  "description": "Trajectory is a restricted-license Rust DNS transport with:",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShahabSL/trajectory.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/ShahabSL/trajectory/issues"
+  },
+  "homepage": "https://github.com/ShahabSL/trajectory#readme"
+}

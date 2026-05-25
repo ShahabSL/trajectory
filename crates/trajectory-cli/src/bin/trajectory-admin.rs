@@ -206,14 +206,14 @@ fn parse_id_command_args(args: Vec<String>, command: &str) -> Result<(PathBuf, u
 fn parse_client_id(value: &str) -> Result<u32> {
     let trimmed = value.trim();
     if let Some(hex) = trimmed.strip_prefix("0x") {
-        return Ok(u32::from_str_radix(hex, 16).context("invalid hex client id")?);
+        return u32::from_str_radix(hex, 16).context("invalid hex client id");
     }
     if trimmed.chars().all(|ch| ch.is_ascii_hexdigit())
         && trimmed.chars().any(|ch| ch.is_ascii_alphabetic())
     {
-        return Ok(u32::from_str_radix(trimmed, 16).context("invalid hex client id")?);
+        return u32::from_str_radix(trimmed, 16).context("invalid hex client id");
     }
-    Ok(trimmed.parse().context("invalid client id")?)
+    trimmed.parse().context("invalid client id")
 }
 
 #[derive(Clone, Copy)]
