@@ -1,0 +1,658 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trajectory Client Prototype</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      --background: #f7f7f5;
+      --foreground: #101010;
+      --muted: #6a6a66;
+      --panel: #ffffff;
+      --panel-strong: #eeeeeb;
+      --border: #d8d8d2;
+      --accent: #111111;
+      --success: #0f6b3f;
+      --warning: #8a5a00;
+      --danger: #9b1c1c;
+      --ring: #000000;
+      color-scheme: light;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--foreground);
+      letter-spacing: 0;
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 256px minmax(0, 1fr);
+    }
+
+    .sidebar {
+      border-right: 1px solid var(--border);
+      padding: 18px;
+      background: #fbfbfa;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 36px;
+    }
+
+    .mark {
+      width: 30px;
+      height: 30px;
+      border: 1px solid var(--foreground);
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+      font-size: 15px;
+      line-height: 1;
+    }
+
+    .brand-name {
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .brand-subtitle {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 1px;
+    }
+
+    .nav {
+      display: grid;
+      gap: 4px;
+    }
+
+    .nav button {
+      min-height: 36px;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      text-align: left;
+      padding: 0 10px;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+    }
+
+    .nav button[aria-current="page"] {
+      background: var(--foreground);
+      color: #ffffff;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: .55;
+    }
+
+    .side-footer {
+      margin-top: auto;
+      border-top: 1px solid var(--border);
+      padding-top: 14px;
+      color: var(--muted);
+      font-size: 12px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .main {
+      padding: 22px 28px 32px;
+      display: grid;
+      gap: 18px;
+      align-content: start;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      min-height: 52px;
+    }
+
+    h1 {
+      font-size: 24px;
+      line-height: 1.2;
+      margin: 0;
+      font-weight: 730;
+    }
+
+    .profile-line {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .icon-button,
+    .primary-button,
+    .secondary-button {
+      height: 36px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--foreground);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .icon-button {
+      width: 36px;
+      padding: 0;
+    }
+
+    .icon-button svg {
+      width: 16px;
+      height: 16px;
+      stroke: currentColor;
+      stroke-width: 1.8;
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .primary-button {
+      background: var(--foreground);
+      color: #ffffff;
+      border-color: var(--foreground);
+      padding: 0 14px;
+    }
+
+    .secondary-button {
+      padding: 0 12px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(280px, .95fr) minmax(320px, 1.25fr);
+      gap: 14px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      min-width: 0;
+    }
+
+    .panel h2 {
+      font-size: 14px;
+      margin: 0 0 14px;
+      font-weight: 700;
+    }
+
+    .status-panel {
+      min-height: 260px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .switch-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .switch-copy {
+      display: grid;
+      gap: 3px;
+    }
+
+    .large-state {
+      font-size: 34px;
+      line-height: 1.05;
+      font-weight: 760;
+      margin: 0;
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .toggle {
+      width: 62px;
+      height: 34px;
+      border-radius: 999px;
+      border: 1px solid var(--foreground);
+      background: var(--foreground);
+      padding: 3px;
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .toggle span {
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      background: #ffffff;
+      display: block;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .metric {
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 10px;
+      background: #fbfbfa;
+      min-height: 72px;
+    }
+
+    .metric-value {
+      font-size: 20px;
+      font-weight: 740;
+      margin-top: 6px;
+    }
+
+    .endpoint-grid {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .endpoint {
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 10px 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #fbfbfa;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .segmented {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      overflow: hidden;
+      width: 100%;
+      max-width: 310px;
+      min-width: 0;
+      background: #fbfbfa;
+    }
+
+    .segmented button {
+      border: 0;
+      border-right: 1px solid var(--border);
+      background: transparent;
+      height: 34px;
+      cursor: pointer;
+    }
+
+    .segmented button:last-child {
+      border-right: 0;
+    }
+
+    .segmented button[aria-pressed="true"] {
+      background: var(--foreground);
+      color: #ffffff;
+    }
+
+    .table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0 6px;
+    }
+
+    .table th {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+      text-align: left;
+      padding: 0 10px 6px;
+    }
+
+    .table td {
+      background: #fbfbfa;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      min-height: 36px;
+      padding: 8px 10px;
+    }
+
+    .table td:first-child {
+      border-left: 1px solid var(--border);
+      border-radius: 7px 0 0 7px;
+    }
+
+    .table td:last-child {
+      border-right: 1px solid var(--border);
+      border-radius: 0 7px 7px 0;
+    }
+
+    .pill {
+      min-height: 24px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 9px;
+      font-size: 12px;
+      font-weight: 650;
+      border: 1px solid var(--border);
+      width: fit-content;
+    }
+
+    .pill.good {
+      color: var(--success);
+      border-color: #b6d9c7;
+      background: #f2faf5;
+    }
+
+    .pill.warn {
+      color: var(--warning);
+      border-color: #e1cea2;
+      background: #fff9eb;
+    }
+
+    .settings {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .field {
+      display: grid;
+      gap: 7px;
+    }
+
+    label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    input,
+    select {
+      height: 36px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: #fbfbfa;
+      padding: 0 10px;
+      min-width: 0;
+      width: 100%;
+    }
+
+    .warning-line {
+      border: 1px solid #e1cea2;
+      background: #fff9eb;
+      color: var(--warning);
+      border-radius: 7px;
+      padding: 10px 12px;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    @media (max-width: 920px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .nav {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .nav button {
+        justify-content: center;
+      }
+
+      .nav button .dot {
+        display: none;
+      }
+
+      .grid,
+      .settings {
+        grid-template-columns: 1fr;
+      }
+
+      .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .actions {
+        justify-content: flex-start;
+      }
+    }
+
+    @media (max-width: 430px) {
+      .sidebar,
+      .main {
+        padding-left: 18px;
+        padding-right: 18px;
+      }
+
+      .nav {
+        display: flex;
+        overflow-x: auto;
+        padding-bottom: 4px;
+      }
+
+      .nav button {
+        flex: 0 0 auto;
+        padding: 0 14px;
+      }
+
+      .large-state {
+        font-size: 32px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="mark">T</div>
+        <div>
+          <div class="brand-name">Trajectory</div>
+          <div class="brand-subtitle">Proxy client</div>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="Client sections">
+        <button aria-current="page">Status <span class="dot"></span></button>
+        <button>Profiles <span class="dot"></span></button>
+        <button>Proxy <span class="dot"></span></button>
+        <button>Resolvers <span class="dot"></span></button>
+        <button>LAN <span class="dot"></span></button>
+        <button>VPN <span class="dot"></span></button>
+        <button>Diagnostics <span class="dot"></span></button>
+        <button>Settings <span class="dot"></span></button>
+      </nav>
+
+      <div class="side-footer">
+        <div>Local only</div>
+        <div>127.0.0.1 bindings</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1>Connected</h1>
+          <div class="profile-line">Prototype data · Profile: production / t.example.com</div>
+        </div>
+        <div class="actions">
+          <button class="icon-button" title="Copy endpoints" aria-label="Copy endpoints">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+          </button>
+          <button class="secondary-button">Export report</button>
+          <button class="primary-button">Disconnect</button>
+        </div>
+      </header>
+
+      <section class="grid">
+        <div class="panel status-panel">
+          <div class="switch-row">
+            <div class="switch-copy">
+              <p class="large-state">Tunnel healthy</p>
+              <div class="muted">4 active resolvers · 0 quarantined</div>
+            </div>
+            <button class="toggle" role="switch" aria-checked="true" aria-label="Connection toggle"><span></span></button>
+          </div>
+
+          <div class="metrics">
+            <div class="metric">
+              <div class="muted">Download</div>
+              <div class="metric-value">404 KB/s</div>
+            </div>
+            <div class="metric">
+              <div class="muted">Upload</div>
+              <div class="metric-value">77 KB/s</div>
+            </div>
+            <div class="metric">
+              <div class="muted">RTT p50</div>
+              <div class="metric-value">82 ms</div>
+            </div>
+            <div class="metric">
+              <div class="muted">Loss</div>
+              <div class="metric-value">1.0%</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Proxy endpoints</h2>
+          <div class="segmented" role="group" aria-label="Proxy mode">
+            <button aria-pressed="true">SOCKS5</button>
+            <button>HTTP</button>
+            <button>Raw</button>
+          </div>
+          <div style="height: 14px"></div>
+          <div class="endpoint-grid">
+            <div class="endpoint">socks5://127.0.0.1:7000</div>
+            <button class="icon-button" title="Copy SOCKS endpoint" aria-label="Copy SOCKS endpoint">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            </button>
+            <div class="endpoint">http://127.0.0.1:7080</div>
+            <button class="icon-button" title="Copy HTTP endpoint" aria-label="Copy HTTP endpoint">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            </button>
+          </div>
+          <div style="height: 14px"></div>
+          <div class="warning-line">LAN sharing is off. Enable auth before binding outside localhost.</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Resolvers</h2>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Resolver</th>
+              <th>State</th>
+              <th>RTT</th>
+              <th>Loss</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>8.8.4.4:53</td>
+              <td><span class="pill good">active</span></td>
+              <td>73 ms</td>
+              <td>0.4%</td>
+            </tr>
+            <tr>
+              <td>8.8.8.8:53</td>
+              <td><span class="pill good">active</span></td>
+              <td>80 ms</td>
+              <td>0.6%</td>
+            </tr>
+            <tr>
+              <td>1.1.1.1:53</td>
+              <td><span class="pill warn">standby</span></td>
+              <td>407 ms</td>
+              <td>14.8%</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <h2>Profile</h2>
+        <div class="settings">
+          <div class="field">
+            <label for="domain">Domain</label>
+            <input id="domain" value="t.example.com">
+          </div>
+          <div class="field">
+            <label for="bind">Bind address</label>
+            <select id="bind">
+              <option>127.0.0.1</option>
+              <option disabled>0.0.0.0 requires LAN auth</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="payload">DNS payload</label>
+            <select id="payload">
+              <option>1232 bytes</option>
+              <option>512 bytes</option>
+              <option>4096 bytes</option>
+            </select>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

@@ -48,6 +48,23 @@ async fn connect_with_retry(addr: SocketAddr, wait: Duration) -> TcpStream {
     }
 }
 
+async fn read_http_response_head(stream: &mut TcpStream) -> Vec<u8> {
+    let mut data = Vec::new();
+    let mut buf = [0u8; 128];
+    loop {
+        let n = timeout(Duration::from_secs(10), stream.read(&mut buf))
+            .await
+            .expect("read HTTP response before timeout")
+            .expect("read HTTP response");
+        assert!(n > 0, "HTTP proxy closed before response headers");
+        data.extend_from_slice(&buf[..n]);
+        if data.windows(4).any(|window| window == b"\r\n\r\n") {
+            return data;
+        }
+        assert!(data.len() < 4096, "HTTP response header too large");
+    }
+}
+
 async fn spawn_echo_target(addr: SocketAddr) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let listener = TcpListener::bind(addr).await.expect("bind echo");
@@ -350,12 +367,16 @@ async fn raw_tcp_stream_roundtrips_through_dns_udp() {
 
     let client = tokio::spawn(run_client(ClientConfig {
         listen: local_addr,
+        http_listen: None,
         resolvers: vec![dns_addr],
         domain,
         access_key: key,
         resolver_socks_proxy: None,
         poll_interval: Duration::from_millis(5),
         dns_max_payload: 1232,
+        admission_report: None,
+        resolver_cohort_size: None,
+        resolver_admission_min: 1,
     }));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -434,12 +455,16 @@ async fn socks_handshake_survives_dns_chunking() {
 
     let client = tokio::spawn(run_client(ClientConfig {
         listen: local_addr,
+        http_listen: None,
         resolvers: vec![dns_addr],
         domain,
         access_key: key,
         resolver_socks_proxy: None,
         poll_interval: Duration::from_millis(5),
         dns_max_payload: 1232,
+        admission_report: None,
+        resolver_cohort_size: None,
+        resolver_admission_min: 1,
     }));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -503,12 +528,16 @@ async fn server_direct_socks5_mode_connects_without_external_proxy() {
 
     let client = tokio::spawn(run_client(ClientConfig {
         listen: local_addr,
+        http_listen: None,
         resolvers: vec![dns_addr],
         domain,
         access_key: key,
         resolver_socks_proxy: None,
         poll_interval: Duration::from_millis(5),
         dns_max_payload: 1232,
+        admission_report: None,
+        resolver_cohort_size: None,
+        resolver_admission_min: 1,
     }));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -549,6 +578,74 @@ async fn server_direct_socks5_mode_connects_without_external_proxy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_connect_proxy_mode_uses_server_socks5_egress() {
+    let key = ClientAccessKey::generate();
+    let target_addr = free_tcp_addr();
+    let dns_addr = free_udp_addr();
+    let raw_local_addr = free_tcp_addr();
+    let http_local_addr = free_tcp_addr();
+    let domain = "tun.example.test".to_string();
+
+    let echo = spawn_echo_target(target_addr).await;
+
+    let mut registry = HashMap::new();
+    registry.insert(key.client_id, key.clone());
+    let server = tokio::spawn(run_server(ServerConfig {
+        bind: dns_addr,
+        domain: domain.clone(),
+        target: target_addr,
+        target_mode: ServerTargetMode::Socks5Direct,
+        authorized_clients: Arc::new(registry),
+    }));
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = tokio::spawn(run_client(ClientConfig {
+        listen: raw_local_addr,
+        http_listen: Some(http_local_addr),
+        resolvers: vec![dns_addr],
+        domain,
+        access_key: key,
+        resolver_socks_proxy: None,
+        poll_interval: Duration::from_millis(5),
+        dns_max_payload: 1232,
+        admission_report: None,
+        resolver_cohort_size: None,
+        resolver_admission_min: 1,
+    }));
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut app = connect_with_retry(http_local_addr, Duration::from_secs(30)).await;
+    app.write_all(
+        format!(
+            "CONNECT {target_addr} HTTP/1.1\r\nHost: {target_addr}\r\nProxy-Connection: keep-alive\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .await
+    .expect("write CONNECT request");
+    let response = read_http_response_head(&mut app).await;
+    assert!(
+        response.starts_with(b"HTTP/1.1 200 "),
+        "unexpected HTTP proxy response: {}",
+        String::from_utf8_lossy(&response)
+    );
+
+    app.write_all(b"ping").await.expect("write tunnel payload");
+    let mut pong = [0u8; 4];
+    timeout(Duration::from_secs(10), app.read_exact(&mut pong))
+        .await
+        .expect("read echoed tunnel payload before timeout")
+        .expect("read echoed tunnel payload");
+    assert_eq!(&pong, b"ping");
+
+    client.abort();
+    server.abort();
+    echo.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dns_tcp_over_socks_reuses_persistent_connection() {
     let key = ClientAccessKey::generate();
     let target_addr = free_tcp_addr();
@@ -575,12 +672,16 @@ async fn dns_tcp_over_socks_reuses_persistent_connection() {
 
     let client = tokio::spawn(run_client(ClientConfig {
         listen: local_addr,
+        http_listen: None,
         resolvers: vec![dns_addr],
         domain,
         access_key: key,
         resolver_socks_proxy: Some(proxy_addr),
         poll_interval: Duration::from_millis(5),
         dns_max_payload: 1232,
+        admission_report: None,
+        resolver_cohort_size: None,
+        resolver_admission_min: 1,
     }));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -647,12 +748,16 @@ async fn regression_closed_streams_do_not_starve_followup_stream() {
 
     let client = tokio::spawn(run_client(ClientConfig {
         listen: local_addr,
+        http_listen: None,
         resolvers: vec![dns_addr],
         domain,
         access_key: key,
         resolver_socks_proxy: None,
         poll_interval: Duration::from_millis(5),
         dns_max_payload: 512,
+        admission_report: None,
+        resolver_cohort_size: None,
+        resolver_admission_min: 1,
     }));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -702,12 +807,16 @@ async fn acceptance_concurrent_streams_share_one_transport_conn_id() {
 
     let client = tokio::spawn(run_client(ClientConfig {
         listen: local_addr,
+        http_listen: None,
         resolvers: vec![dns_addr],
         domain,
         access_key: key,
         resolver_socks_proxy: None,
         poll_interval: Duration::from_millis(5),
         dns_max_payload: 1232,
+        admission_report: None,
+        resolver_cohort_size: None,
+        resolver_admission_min: 1,
     }));
     sleep(Duration::from_millis(50)).await;
 

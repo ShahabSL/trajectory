@@ -96,10 +96,17 @@ Included binaries:
 - trajectory-admin
 - trajectory-server
 
+Included support files:
+- deploy/install_server.sh
+- docs/SELF_HOSTING.md
+- docs/client-ui-prototype.html
+
 Quick start:
 1. Install the server with deploy/install_server.sh.
 2. Create client access keys with trajectory-admin.
-3. Run trajectory-client locally and point applications at its SOCKS listener.
+3. Run trajectory-client locally. If the server target is socks5-direct or a
+   SOCKS5 upstream, point SOCKS5-capable applications at --listen and
+   HTTP-proxy applications at --http-listen.
 
 See the repository README for the full tunnel and deployment flow.
 """
@@ -170,6 +177,25 @@ def write_bundle_notes(
     (bundle_dir / "BUILD-INFO.txt").write_text("\n".join(notes) + "\n", encoding="utf-8")
 
 
+def copy_support_files(bundle_dir: Path) -> None:
+    deploy_dir = bundle_dir / "deploy"
+    deploy_dir.mkdir()
+    for name in [
+        "install_server.sh",
+        "bootstrap_server.sh",
+        "trajectory.service",
+        "trajectory-socks.service",
+        "server.env.example",
+        "hev-socks5-server.yml",
+    ]:
+        shutil.copy2(ROOT / "deploy" / name, deploy_dir / name)
+
+    docs_dir = bundle_dir / "docs"
+    docs_dir.mkdir()
+    for name in ["SELF_HOSTING.md", "CI_E2E.md", "CLIENT_APPS.md", "client-ui-prototype.html"]:
+        shutil.copy2(ROOT / "docs" / name, docs_dir / name)
+
+
 def package_component(
     *,
     version: str,
@@ -195,6 +221,8 @@ def package_component(
 
         (bundle_dir / "README.txt").write_text(config["readme"], encoding="utf-8")
         shutil.copy2(ROOT / "README.md", bundle_dir / "README-project.md")
+        shutil.copy2(ROOT / "LICENSE", bundle_dir / "LICENSE")
+        copy_support_files(bundle_dir)
         write_bundle_notes(bundle_dir, version, target, component, release_tag)
         archive_directory(bundle_dir, archive_path)
 

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;

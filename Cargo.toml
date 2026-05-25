@@ -2,12 +2,13 @@
 members = [
     "crates/trajectory-core",
     "crates/trajectory-cli",
+    "crates/trajectory-vpn-bridge",
 ]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
-version = "0.1.0"
+version = "0.1.3"
 publish = false
 license-file = "LICENSE"
 

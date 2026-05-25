@@ -1,0 +1,16 @@
+[package]
+name = "trajectory-vpn-bridge"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file.workspace = true
+description = "Android JNI bridge from VpnService TUN descriptors to the Trajectory SOCKS tunnel"
+
+[lib]
+name = "trajectory_vpn_bridge"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = { version = "0.22.4", default-features = false }
+tokio.workspace = true
+tun2proxy = { version = "0.8.0", default-features = false }

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 use trajectory_cli::runtime::{parse_socket_addr, run_client, ClientConfig};
 use trajectory_core::auth::ClientAccessKey;
@@ -15,12 +16,16 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let mut listen = "127.0.0.1:5201".parse::<SocketAddr>().unwrap();
+    let mut http_listen = None::<SocketAddr>;
     let mut resolvers = Vec::new();
     let mut domain = None::<String>;
     let mut access_key = None::<ClientAccessKey>;
     let mut resolver_socks_proxy = None::<SocketAddr>;
     let mut poll_interval = Duration::from_millis(25);
     let mut dns_max_payload = None::<u16>;
+    let mut admission_report = None::<PathBuf>;
+    let mut resolver_cohort_size = None::<usize>;
+    let mut resolver_admission_min = 1usize;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -39,6 +44,14 @@ async fn run() -> Result<()> {
                     .context("missing listen address")?
                     .parse()
                     .context("invalid listen address")?;
+            }
+            "--http-listen" => {
+                http_listen = Some(
+                    args.next()
+                        .context("missing HTTP proxy listen address")?
+                        .parse()
+                        .context("invalid HTTP proxy listen address")?,
+                );
             }
             "--resolver" | "-r" => {
                 let resolver = args.next().context("missing resolver")?;
@@ -82,6 +95,26 @@ async fn run() -> Result<()> {
                         .context("invalid dns max payload")?,
                 );
             }
+            "--admission-report" => {
+                admission_report = Some(PathBuf::from(
+                    args.next().context("missing admission report path")?,
+                ));
+            }
+            "--resolver-cohort-size" => {
+                resolver_cohort_size = Some(
+                    args.next()
+                        .context("missing resolver cohort size")?
+                        .parse()
+                        .context("invalid resolver cohort size")?,
+                );
+            }
+            "--resolver-admission-min" => {
+                resolver_admission_min = args
+                    .next()
+                    .context("missing resolver admission minimum")?
+                    .parse()
+                    .context("invalid resolver admission minimum")?;
+            }
             "--congestion-control" | "-c" => {
                 let _ = args.next().context("missing congestion control")?;
             }
@@ -113,12 +146,16 @@ async fn run() -> Result<()> {
 
     run_client(ClientConfig {
         listen,
+        http_listen,
         resolvers,
         domain,
         access_key,
         resolver_socks_proxy,
         poll_interval,
         dns_max_payload,
+        admission_report,
+        resolver_cohort_size,
+        resolver_admission_min,
     })
     .await
 }
@@ -135,11 +172,15 @@ Required:
 Optional:
   -l, --tcp-listen-port <PORT>       Local raw TCP listen port (default: 5201)
       --listen <HOST:PORT>           Full local listen address
+      --http-listen <HOST:PORT>      Local HTTP proxy listener for CONNECT and http:// requests
   -r, --resolver <HOST:PORT>         Recursive resolver; repeat for multiple
       --resolver-file <PATH>         Read recursive resolvers from a file
       --resolver-socks-proxy <ADDR>  Send DNS-over-TCP through SOCKS5 proxy
+      --resolver-cohort-size <N>     Active admitted resolver target when admission is used
+      --resolver-admission-min <N>   Minimum admitted resolvers required at startup (default: 1)
   -t, --poll-interval-ms <MS>        Delay after resolver failures
       --dns-max-payload <BYTES>      Advertised response payload budget (default: 1232, or 4096 with --resolver-socks-proxy)
+      --admission-report <PATH>      Write resolver admission JSONL diagnostics
   -h, --help                         Show this help"
     );
 }

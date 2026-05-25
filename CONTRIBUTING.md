@@ -13,10 +13,14 @@ Trajectory is now a core + CLI Rust workspace. Keep changes focused, keep docs a
 
 ```bash
 cargo fmt --all --check
-cargo test -p trajectory-core -p trajectory-cli --tests
-cargo clippy -p trajectory-core -p trajectory-cli --bins --tests -- -D warnings
+cargo test -p trajectory-core -p trajectory-cli --lib --bins
+cargo test -p trajectory-core --test core_wire
+cargo test -p trajectory-cli --test loopback_e2e
+cargo clippy -p trajectory-core -p trajectory-cli --all-targets -- -D warnings
 cargo build --release -p trajectory-cli --bins
 ```
+
+Live network e2e is secret-gated in GitHub Actions and must not run on pull requests. See [docs/CI_E2E.md](docs/CI_E2E.md).
 
 ## Maintained Surfaces
 

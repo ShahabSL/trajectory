@@ -8,7 +8,7 @@ SERVER_ENV_PATH="$ENV_DIR/server.env"
 SERVER_BIN="${SERVER_BIN:-$ROOT_DIR/target/release/trajectory-server}"
 ADMIN_BIN="${ADMIN_BIN:-$ROOT_DIR/target/release/trajectory-admin}"
 HEV_BIN="${HEV_BIN:-}"
-TARGET_ADDRESS="127.0.0.1:1080"
+TARGET_ADDRESS="socks5-direct"
 BIND_HOST="0.0.0.0"
 DNS_PORT="53"
 DOMAIN=""
@@ -27,14 +27,18 @@ Optional:
   --server-bin <PATH>               trajectory-server binary
   --admin-bin <PATH>                trajectory-admin binary
   --hev-binary <PATH>               Optional hev-socks5-server binary to install locally
-  --target-address <HOST:PORT>      Upstream SOCKS5 target (default: 127.0.0.1:1080)
+  --target-address <HOST:PORT|socks5-direct>
+                                     Server egress target. Use socks5-direct for built-in
+                                     SOCKS5 egress, or HOST:PORT for raw TCP upstream
+                                     (default: socks5-direct)
   --bind-host <HOST>                Bind host for DNS service (default: 0.0.0.0)
   --dns-port <PORT>                 DNS listen port (default: 53)
   --install-dir <PATH>              Install directory (default: /opt/trajectory)
   --env-dir <PATH>                  Environment directory (default: /etc/trajectory)
   --client-label <LABEL>            Create and print an initial client key with this label
   --no-client                       Do not create an initial client key
-  --disable-systemd-resolved        Stop/disable systemd-resolved and write a public resolv.conf
+  --disable-systemd-resolved        Stop/disable systemd-resolved, back up resolv.conf,
+                                    and write a public resolv.conf
   --no-start                        Install files without enabling/starting services
   -h, --help                        Show this help
 EOF
@@ -133,7 +137,25 @@ CLIENT_DB_PATH="$INSTALL_DIR/trajectory-clients.json"
 install -d -m 755 "$INSTALL_DIR" "$ENV_DIR"
 install -m 755 "$SERVER_BIN" "$INSTALL_DIR/trajectory-server"
 install -m 755 "$ADMIN_BIN" "$INSTALL_DIR/trajectory-admin"
-install -m 644 "$ROOT_DIR/deploy/trajectory.service" /etc/systemd/system/trajectory.service
+
+cat >/etc/systemd/system/trajectory.service <<EOF
+[Unit]
+Description=Trajectory high-throughput DNS tunnel server
+After=network-online.target
+Wants=network-online.target
+Conflicts=systemd-resolved.service
+
+[Service]
+Type=simple
+EnvironmentFile=$SERVER_ENV_PATH
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$INSTALL_DIR/trajectory-server --bind \${TRAJECTORY_BIND_HOST} --dns-listen-port \${TRAJECTORY_DNS_LISTEN_PORT} --target-address \${TRAJECTORY_TARGET_ADDRESS} --domain \${TRAJECTORY_DOMAIN} --client-db \${TRAJECTORY_CLIENT_DB}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
 
 cat >"$SERVER_ENV_PATH" <<EOF
 TRAJECTORY_BIND_HOST=$BIND_HOST
@@ -151,18 +173,37 @@ if [[ -n "$HEV_BIN" ]]; then
   fi
   install -m 755 "$HEV_BIN" "$INSTALL_DIR/hev-socks5-server"
   install -m 644 "$ROOT_DIR/deploy/hev-socks5-server.yml" "$INSTALL_DIR/hev-socks5-server.yml"
-  install -m 644 "$ROOT_DIR/deploy/trajectory-socks.service" /etc/systemd/system/trajectory-socks.service
+  cat >/etc/systemd/system/trajectory-socks.service <<EOF
+[Unit]
+Description=Trajectory local SOCKS5 upstream
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$INSTALL_DIR/hev-socks5-server $INSTALL_DIR/hev-socks5-server.yml
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
 fi
 
 if [[ "$CREATE_CLIENT_LABEL" != "" ]]; then
-  ACCESS_KEY="$("$INSTALL_DIR/trajectory-admin" create-client \
+  ACCESS_KEY="$(umask 077; "$INSTALL_DIR/trajectory-admin" create-client \
     --client-db "$CLIENT_DB_PATH" \
     --label "$CREATE_CLIENT_LABEL" \
     --format key)"
+  chmod 600 "$CLIENT_DB_PATH"
 fi
 
 if [[ "$DISABLE_SYSTEMD_RESOLVED" == "true" ]] && systemctl list-unit-files systemd-resolved.service >/dev/null 2>&1; then
   systemctl disable --now systemd-resolved.service || true
+  if [[ -e /etc/resolv.conf || -L /etc/resolv.conf ]]; then
+    cp -a /etc/resolv.conf "/etc/resolv.conf.trajectory.bak.$(date +%s)" || true
+  fi
   rm -f /etc/resolv.conf
   cat >/etc/resolv.conf <<'EOF'
 nameserver 1.1.1.1
@@ -191,4 +232,19 @@ if [[ "${ACCESS_KEY:-}" != "" ]]; then
   echo "$ACCESS_KEY"
   echo
   echo "Use this key with domain: $DOMAIN"
+  echo
+  echo "Client quickstart:"
+  cat <<EOF
+read -rsp 'Trajectory access key: ' TRAJECTORY_ACCESS_KEY; echo
+export TRAJECTORY_ACCESS_KEY
+trajectory-client \\
+  --listen 127.0.0.1:7000 \\
+  --http-listen 127.0.0.1:7001 \\
+  --domain $DOMAIN \\
+  --resolver 1.1.1.1:53 \\
+  --resolver 8.8.8.8:53
+
+curl -I --max-time 20 --socks5-hostname 127.0.0.1:7000 https://example.com
+curl -I --max-time 20 --proxy http://127.0.0.1:7001 https://example.com
+EOF
 fi

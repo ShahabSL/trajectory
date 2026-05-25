@@ -1,0 +1,24 @@
+[package]
+name = "trajectory-desktop"
+version = "0.1.3"
+description = "Trajectory desktop client"
+edition = "2021"
+
+[workspace]
+
+[lib]
+name = "trajectory_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "trajectory-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.5", features = [] }
+
+[dependencies]
+keyring = "3.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2.11", features = [] }

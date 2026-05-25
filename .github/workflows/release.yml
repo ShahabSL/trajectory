@@ -22,7 +22,7 @@ on:
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -50,12 +50,19 @@ jobs:
 
       - name: Resolve release ref
         shell: bash
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "RELEASE_TAG=${{ inputs.release_tag }}" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            release_tag="$INPUT_RELEASE_TAG"
           else
-            echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+            release_tag="$GITHUB_REF_NAME"
           fi
+          if [[ ! "$release_tag" =~ ^v[0-9A-Za-z._-]+$ ]]; then
+            echo "invalid release tag: $release_tag" >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
 
       - name: Check out release tag
         shell: bash
@@ -79,10 +86,157 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  desktop:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release ref
+        shell: bash
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            release_tag="$INPUT_RELEASE_TAG"
+          else
+            release_tag="$GITHUB_REF_NAME"
+          fi
+          if [[ ! "$release_tag" =~ ^v[0-9A-Za-z._-]+$ ]]; then
+            echo "invalid release tag: $release_tag" >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
+
+      - name: Check out release tag
+        shell: bash
+        run: |
+          git fetch --tags --force
+          git checkout "$RELEASE_TAG"
+
+      - name: Install Tauri Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: clients/desktop/package-lock.json
+
+      - name: Install desktop dependencies
+        run: npm ci
+        working-directory: clients/desktop
+
+      - name: Build Tauri desktop bundle
+        run: npm run tauri:build
+        working-directory: clients/desktop
+
+      - name: Upload desktop release bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.target }}
+          path: clients/desktop/src-tauri/target/release/bundle/**/*
+          if-no-files-found: error
+          retention-days: 14
+
+  android:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release ref
+        shell: bash
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            release_tag="$INPUT_RELEASE_TAG"
+          else
+            release_tag="$GITHUB_REF_NAME"
+          fi
+          if [[ ! "$release_tag" =~ ^v[0-9A-Za-z._-]+$ ]]; then
+            echo "invalid release tag: $release_tag" >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
+
+      - name: Check out release tag
+        shell: bash
+        run: |
+          git fetch --tags --force
+          git checkout "$RELEASE_TAG"
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android targets
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;29.0.14206865"
+
+      - name: Install Rust Android target
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+
+      - name: Run Android JVM unit tests
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
+        working-directory: clients/android
+
+      - name: Build Android release APK
+        run: ./gradlew :app:assembleRelease --no-daemon
+        working-directory: clients/android
+
+      - name: Check Android VPN manifest and packaged native libraries
+        run: scripts/ci_android_vpn_static_checks.sh clients/android/app/build/outputs/apk/release/app-release-unsigned.apk
+
+      - name: Upload Android release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-apk
+          path: clients/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
     needs:
       - build
+      - desktop
+      - android
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v5
@@ -96,28 +250,61 @@ jobs:
 
       - name: Resolve release ref
         shell: bash
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_DRAFT: ${{ inputs.draft }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "RELEASE_TAG=${{ inputs.release_tag }}" >> "$GITHUB_ENV"
-            echo "RELEASE_DRAFT=${{ inputs.draft }}" >> "$GITHUB_ENV"
-            echo "RELEASE_PRERELEASE=${{ inputs.prerelease }}" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            release_tag="$INPUT_RELEASE_TAG"
+            release_draft="$INPUT_DRAFT"
+            release_prerelease="$INPUT_PRERELEASE"
           else
-            echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
-            echo "RELEASE_DRAFT=false" >> "$GITHUB_ENV"
+            release_tag="$GITHUB_REF_NAME"
+            release_draft=false
             case "${GITHUB_REF_NAME}" in
               *-alpha*|*-beta*|*-rc*)
-                echo "RELEASE_PRERELEASE=true" >> "$GITHUB_ENV"
+                release_prerelease=true
                 ;;
               *)
-                echo "RELEASE_PRERELEASE=false" >> "$GITHUB_ENV"
+                release_prerelease=false
                 ;;
             esac
           fi
+          if [[ ! "$release_tag" =~ ^v[0-9A-Za-z._-]+$ ]]; then
+            echo "invalid release tag: $release_tag" >&2
+            exit 1
+          fi
+          case "$release_draft" in true|false) ;; *) echo "invalid draft value" >&2; exit 1 ;; esac
+          case "$release_prerelease" in true|false) ;; *) echo "invalid prerelease value" >&2; exit 1 ;; esac
+          echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
+          echo "RELEASE_DRAFT=$release_draft" >> "$GITHUB_ENV"
+          echo "RELEASE_PRERELEASE=$release_prerelease" >> "$GITHUB_ENV"
 
-      - name: Download release bundles
+      - name: Check out release tag
+        shell: bash
+        run: |
+          git fetch --tags --force
+          git checkout "$RELEASE_TAG"
+
+      - name: Download CLI release bundles
         uses: actions/download-artifact@v5
         with:
           pattern: release-*
+          path: dist/release
+          merge-multiple: true
+
+      - name: Download desktop release bundles
+        uses: actions/download-artifact@v5
+        with:
+          pattern: desktop-*
+          path: dist/release
+          merge-multiple: true
+
+      - name: Download Android release APK
+        uses: actions/download-artifact@v5
+        with:
+          pattern: android-*
           path: dist/release
           merge-multiple: true
 
@@ -152,10 +339,35 @@ jobs:
             prerelease_flag+=(--prerelease)
           fi
 
+          assets=()
+          while IFS= read -r -d '' asset; do
+            assets+=("$asset")
+          done < <(
+            find dist/release -type f \
+              ! -path '*/.*' \
+              \( -name 'trajectory-v*.tar.gz' \
+                 -o -name 'trajectory-v*.zip' \
+                 -o -name '*SHA256SUMS.txt' \
+                 -o -name '*.deb' \
+                 -o -name '*.rpm' \
+                 -o -name '*.AppImage' \
+                 -o -name '*.msi' \
+                 -o -name '*.exe' \
+                 -o -name '*.dmg' \
+                 -o -name '*.app.tar.gz' \
+                 -o -name '*.apk' \) \
+              -print0
+          )
+
+          if (( ${#assets[@]} == 0 )); then
+            echo "no release assets found" >&2
+            exit 1
+          fi
+
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" dist/release/* --clobber
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           else
-            gh release create "$RELEASE_TAG" dist/release/* \
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
               --verify-tag \
               --generate-notes \
               "${draft_flag[@]}" \

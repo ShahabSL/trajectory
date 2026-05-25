@@ -10,6 +10,7 @@ shape: local app -> local tunnel listener -> DNS tunnel -> remote SOCKS -> HTTP.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -114,16 +115,19 @@ TRANSFER_PAYLOAD_SCRIPT = textwrap.dedent(
             start = time.perf_counter()
             remaining = length
             total = 0
+            digest = __import__("hashlib").sha256()
             while remaining:
                 chunk = self.rfile.read(min(65536, remaining))
                 if not chunk:
                     break
+                digest.update(chunk)
                 total += len(chunk)
                 remaining -= len(chunk)
             payload = json.dumps({
                 "bytes": total,
                 "elapsed": time.perf_counter() - start,
                 "complete": total == length,
+                "sha256": digest.hexdigest(),
             }).encode("ascii")
             self.send_response(200 if total == length else 400)
             self.send_header("Content-Type", "application/json")
@@ -148,6 +152,9 @@ class TransferMeasurement:
     bytes_uploaded: int
     elapsed_seconds: float
     speed_bytes_per_second: float
+    checksum_ok: bool
+    expected_sha256: str
+    actual_sha256: str
     error: str
 
 
@@ -159,6 +166,7 @@ class ImplementationResult:
     download: TransferMeasurement
     upload: TransferMeasurement
     client_log_tail: list[str]
+    trajectory_diag: list[dict[str, object]]
     trajectory_diag_tail: list[dict[str, object]]
 
 
@@ -169,6 +177,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--size-bytes", type=int, default=DEFAULT_SIZE_BYTES)
     parser.add_argument("--timeout-seconds", type=int, default=420)
     parser.add_argument("--resolver", action="append", dest="resolvers")
+    parser.add_argument("--resolver-file", type=pathlib.Path, default=None)
     parser.add_argument(
         "--implementation",
         action="append",
@@ -176,6 +185,7 @@ def parse_args() -> argparse.Namespace:
         help="Repeat to choose a subset. Defaults to all.",
     )
     parser.add_argument("--trajectory-dns-max-payload", type=int, default=None)
+    parser.add_argument("--trajectory-resolver-socks-proxy", default=None)
     parser.add_argument("--slipstream-dir", type=pathlib.Path, default=DEFAULT_SLIPSTREAM_DIR)
     parser.add_argument("--native-cert-dir", type=pathlib.Path, default=DEFAULT_NATIVE_CERT_DIR)
     parser.add_argument("--report", type=pathlib.Path, default=None)
@@ -184,7 +194,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    resolvers = args.resolvers or DEFAULT_RESOLVERS
+    resolvers = load_resolvers(args)
     implementations = args.implementation or [
         "trajectory",
         "slipstream",
@@ -215,6 +225,7 @@ def main() -> int:
                 size_bytes=args.size_bytes,
                 timeout_seconds=args.timeout_seconds,
                 trajectory_dns_max_payload=args.trajectory_dns_max_payload,
+                trajectory_resolver_socks_proxy=args.trajectory_resolver_socks_proxy,
             )
             results.append(result)
             append_jsonl(report, {"event": "implementation_result", **result_to_json(result)})
@@ -233,6 +244,19 @@ def main() -> int:
     finally:
         restore_remote(ssh)
         ssh.close()
+
+
+def load_resolvers(args: argparse.Namespace) -> list[str]:
+    resolvers = list(args.resolvers or [])
+    if args.resolver_file is not None:
+        for raw in args.resolver_file.read_text(encoding="utf-8").splitlines():
+            resolver = raw.split("#", 1)[0].strip()
+            if not resolver:
+                continue
+            if ":" not in resolver:
+                resolver = f"{resolver}:53"
+            resolvers.append(resolver)
+    return resolvers or DEFAULT_RESOLVERS
 
 
 def prepare_assets(
@@ -428,6 +452,7 @@ def run_implementation(
     size_bytes: int,
     timeout_seconds: int,
     trajectory_dns_max_payload: int | None,
+    trajectory_resolver_socks_proxy: str | None,
 ) -> ImplementationResult:
     resolved_active = remote_is_active(ssh, "systemd-resolved")
     client: subprocess.Popen[str] | None = None
@@ -449,6 +474,7 @@ def run_implementation(
             resolvers=resolvers,
             assets=assets,
             trajectory_dns_max_payload=trajectory_dns_max_payload,
+            trajectory_resolver_socks_proxy=trajectory_resolver_socks_proxy,
         )
         ssh.remote(f"systemctl start {service}", check=True)
         ensure_remote_service_active(ssh, service, timeout_seconds=10)
@@ -489,6 +515,7 @@ def run_implementation(
             download=download,
             upload=upload,
             client_log_tail=sanitize_log_tail(client_output),
+            trajectory_diag=parse_trajectory_diag(client_output),
             trajectory_diag_tail=parse_trajectory_diag_tail(client_output),
         )
     finally:
@@ -515,6 +542,7 @@ def client_command_and_service(
     resolvers: list[str],
     assets: dict[str, object],
     trajectory_dns_max_payload: int | None,
+    trajectory_resolver_socks_proxy: str | None,
 ) -> tuple[list[str], pathlib.Path, str]:
     if implementation == "trajectory":
         trajectory_paths = assets["trajectory_paths"]
@@ -531,6 +559,8 @@ def client_command_and_service(
         ]
         if trajectory_dns_max_payload is not None:
             cmd.extend(["--dns-max-payload", str(trajectory_dns_max_payload)])
+        if trajectory_resolver_socks_proxy is not None:
+            cmd.extend(["--resolver-socks-proxy", trajectory_resolver_socks_proxy])
         for resolver in resolvers:
             cmd.extend(["--resolver", resolver])
         return cmd, REPO_ROOT, TRANSFER_TRAJECTORY_SERVICE
@@ -613,6 +643,14 @@ def run_transfer(
             write_payload(payload, size_bytes)
             payload.flush()
             os.fsync(payload.fileno())
+            expected_sha256 = file_sha256(pathlib.Path(payload.name))
+        else:
+            expected_sha256 = repeated_byte_sha256(b"x", size_bytes)
+        output = tempfile.NamedTemporaryFile(
+            prefix=f"trajectory-{direction}-", suffix=".out", delete=False
+        )
+        output_path = pathlib.Path(output.name)
+        output.close()
         url = f"http://127.0.0.1:{TRANSFER_PAYLOAD_PORT}/download"
         command = [
             "curl",
@@ -629,7 +667,7 @@ def run_transfer(
             "--max-time",
             str(timeout_seconds),
             "--output",
-            os.devnull,
+            str(output_path),
             "--write-out",
             "%{http_code}\t%{size_download}\t%{size_upload}\t%{time_total}\t%{speed_download}\t%{speed_upload}",
         ]
@@ -640,6 +678,14 @@ def run_transfer(
         command.append(url)
 
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        if direction == "download":
+            actual_sha256 = file_sha256(output_path) if output_path.exists() else ""
+        else:
+            actual_sha256 = upload_response_sha256(output_path)
+        try:
+            output_path.unlink()
+        except FileNotFoundError:
+            pass
     metrics = parse_curl_metrics(completed.stdout)
     http_code = int(metrics.get("http_code", 0))
     bytes_downloaded = int(metrics.get("size_download", 0))
@@ -649,7 +695,13 @@ def run_transfer(
     speed_upload = float(metrics.get("speed_upload", 0.0))
     speed = speed_download if direction == "download" else speed_upload
     expected_bytes = bytes_downloaded if direction == "download" else bytes_uploaded
-    success = completed.returncode == 0 and http_code == 200 and expected_bytes == size_bytes
+    checksum_ok = expected_sha256 == actual_sha256
+    success = (
+        completed.returncode == 0
+        and http_code == 200
+        and expected_bytes == size_bytes
+        and checksum_ok
+    )
     errors = []
     if completed.returncode != 0:
         errors.append(f"curl_exit={completed.returncode}")
@@ -657,6 +709,8 @@ def run_transfer(
         errors.append(f"http_code={http_code}")
     if expected_bytes != size_bytes:
         errors.append(f"bytes={expected_bytes}, expected={size_bytes}")
+    if not checksum_ok:
+        errors.append(f"sha256={actual_sha256 or 'missing'}, expected={expected_sha256}")
     if completed.stderr.strip():
         errors.append(completed.stderr.strip().replace("\n", " | "))
     return TransferMeasurement(
@@ -669,6 +723,9 @@ def run_transfer(
         bytes_uploaded=bytes_uploaded,
         elapsed_seconds=elapsed_seconds,
         speed_bytes_per_second=speed,
+        checksum_ok=checksum_ok,
+        expected_sha256=expected_sha256,
+        actual_sha256=actual_sha256,
         error="; ".join(errors),
     )
 
@@ -680,6 +737,35 @@ def write_payload(handle, size_bytes: int) -> None:
         part = chunk[: min(len(chunk), remaining)]
         handle.write(part)
         remaining -= len(part)
+
+
+def file_sha256(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def repeated_byte_sha256(byte: bytes, size_bytes: int) -> str:
+    digest = hashlib.sha256()
+    chunk = byte * 65536
+    remaining = size_bytes
+    while remaining:
+        part = chunk[: min(len(chunk), remaining)]
+        digest.update(part)
+        remaining -= len(part)
+    return digest.hexdigest()
+
+
+def upload_response_sha256(path: pathlib.Path) -> str:
+    if not path.exists():
+        return ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    return str(payload.get("sha256", ""))
 
 
 def parse_curl_metrics(stdout: str) -> dict[str, float]:
@@ -762,7 +848,7 @@ def sanitize_log_tail(lines: list[str]) -> list[str]:
     return output[-60:]
 
 
-def parse_trajectory_diag_tail(lines: list[str]) -> list[dict[str, object]]:
+def parse_trajectory_diag(lines: list[str]) -> list[dict[str, object]]:
     diags = []
     for line in lines:
         stripped = line.strip()
@@ -773,7 +859,11 @@ def parse_trajectory_diag_tail(lines: list[str]) -> list[dict[str, object]]:
         except json.JSONDecodeError:
             continue
         diags.append(payload)
-    return diags[-8:]
+    return diags
+
+
+def parse_trajectory_diag_tail(lines: list[str]) -> list[dict[str, object]]:
+    return parse_trajectory_diag(lines)[-8:]
 
 
 def result_to_json(result: ImplementationResult) -> dict[str, object]:
@@ -784,6 +874,7 @@ def result_to_json(result: ImplementationResult) -> dict[str, object]:
         "download": asdict(result.download),
         "upload": asdict(result.upload),
         "client_log_tail": result.client_log_tail,
+        "trajectory_diag": result.trajectory_diag,
         "trajectory_diag_tail": result.trajectory_diag_tail,
     }
 

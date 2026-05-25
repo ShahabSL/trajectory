@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -11,8 +12,8 @@ use tokio::task::JoinSet;
 use tokio::time::timeout;
 use trajectory_core::auth::ClientAccessKey;
 use trajectory_core::codec::{
-    open_packet_with_key, open_packet_with_registry, seal_packet, AckRange, Direction, Frame,
-    Packet, StreamRange,
+    open_packet_with_key, open_packet_with_registry, seal_packet, sealed_packet_len,
+    sealed_packet_len_with_extra_frame, AckRange, Direction, Frame, Packet, StreamRange,
 };
 use trajectory_core::dns::{
     build_a_response, build_aaaa_response, build_empty_response, build_ns_response, build_query,
@@ -21,22 +22,25 @@ use trajectory_core::dns::{
     TYPE_TXT,
 };
 use trajectory_core::engine::{
-    ack_ranges_contain, PacketHistory, RetainedByteSendBuffer, SendBufferSlice, StreamAssembler,
+    ack_ranges_contain, PacketHistory, RetainedByteSendBuffer, SendBufferMode, SendBufferSlice,
+    StreamAssembler,
 };
 
-const UPLOAD_READ_CHUNK: usize = 192;
-const UPLOAD_SEND_CHUNK_NORMAL: usize = 192;
-const UPLOAD_SEND_CHUNK_CONSTRAINED: usize = 192;
+const UPLOAD_READ_CHUNK: usize = 4096;
+const UPLOAD_SEND_CHUNK_NORMAL: usize = 4096;
+const UPLOAD_SEND_CHUNK_CONSTRAINED: usize = 4096;
 const CLIENT_INFLIGHT_WINDOW: usize = 128;
-const CLIENT_RECEIVE_WINDOW: u64 = 256 * 1024;
+const CLIENT_RECEIVE_WINDOW: u64 = 1024 * 1024;
 const CLIENT_MAX_ACTIVE_STREAMS: usize = 32;
-const SERVER_RECEIVE_WINDOW: u64 = 256 * 1024;
-const CLIENT_STREAM_ACK_RANGES: usize = 4;
-const SERVER_STREAM_ACK_RANGES: usize = 4;
+const SERVER_RECEIVE_WINDOW: u64 = 1024 * 1024;
+const CLIENT_STREAM_ACK_RANGES: usize = 8;
+const SERVER_STREAM_ACK_RANGES: usize = 8;
 const CLIENT_QUERY_TIMEOUT: Duration = Duration::from_secs(20);
+const DNS_TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(20);
+const SERVER_TCP_READ_TIMEOUT: Duration = Duration::from_secs(20);
 const PATH_MIN_CWND: u32 = 2;
 const PATH_INITIAL_CWND: u32 = 6;
-const PATH_MAX_CWND_UDP: u32 = 24;
+const PATH_MAX_CWND_UDP: u32 = 96;
 const PATH_MAX_CWND_TCP: u32 = 64;
 const PROXY_INITIAL_CWND: u32 = 24;
 const PROXY_MAX_CWND: u32 = 128;
@@ -44,6 +48,9 @@ const PATH_RTO_MIN_UDP: Duration = Duration::from_millis(250);
 const PATH_RTO_MIN_TCP: Duration = Duration::from_secs(1);
 const PATH_RTO_MAX_UDP: Duration = Duration::from_millis(2_500);
 const PATH_RTO_MAX_TCP: Duration = Duration::from_secs(30);
+const PATH_LOSS_EWMA_DENOMINATOR: u32 = 32;
+const PATH_BULK_LOSSY_PPM: u32 = 50_000;
+const PATH_SEVERE_LOSS_PPM: u32 = 80_000;
 const PATH_MIN_RESPONSE_BYTES: u16 = 512;
 const PATH_MTU_STEP: u16 = 128;
 const PATH_MTU_PROBE_SUCCESSES: u32 = 16;
@@ -58,7 +65,7 @@ const SERVER_UPLOAD_QUEUE: usize = 1024;
 const SERVER_UPLOAD_COALESCE_BYTES: usize = 4096;
 const SERVER_UPLOAD_COALESCE_DELAY: Duration = Duration::from_millis(1);
 const SERVER_DOWNLOAD_QUEUE: usize = 1024;
-const SERVER_TARGET_READ_CHUNK: usize = 1024;
+const SERVER_TARGET_READ_CHUNK: usize = 4096;
 const SERVER_RETAINED_BYTE_LIMIT: usize = SERVER_DOWNLOAD_QUEUE * SERVER_TARGET_READ_CHUNK;
 const SERVER_DOWNLOAD_FRAME_MAX: usize = 4096;
 const SERVER_DOWNLOAD_FAIR_FRAME_MAX: usize = 512;
@@ -79,7 +86,11 @@ const RESOLVER_ADMISSION_SAMPLE_FACTOR: usize = 1;
 const RESOLVER_ADMISSION_TIMEOUT: Duration = Duration::from_secs(8);
 const RESOLVER_ADMISSION_TIMEOUT_TCP: Duration = Duration::from_secs(20);
 const RESOLVER_ADMISSION_DEADLINE: Duration = Duration::from_secs(60);
-const RESOLVER_TCP_PREFERENCE: Duration = Duration::from_secs(60);
+const RESOLVER_ADMISSION_MAX_ELAPSED_UDP: Duration = Duration::from_secs(4);
+const RESOLVER_ADMISSION_MAX_ELAPSED_TCP: Duration = Duration::from_secs(14);
+const RESOLVER_ADMISSION_MIN_RESPONSE_BPS_UDP: u64 = 128;
+const RESOLVER_ADMISSION_MIN_RESPONSE_BPS_TCP: u64 = 64;
+const RESOLVER_TCP_PREFERENCE: Duration = Duration::from_secs(5 * 60);
 const CLIENT_PING_INFLIGHT_ACTIVE: usize = CLIENT_INFLIGHT_WINDOW / 2;
 const CLIENT_PING_INFLIGHT_IDLE: usize = 4;
 const CLIENT_GLOBAL_ACTIVE_PING_INFLIGHT: usize = 96;
@@ -87,8 +98,11 @@ const CLIENT_GLOBAL_IDLE_PING_INFLIGHT: usize = 2;
 const CLIENT_TRANSPORT_EVENT_QUEUE: usize = 1024;
 const CLIENT_STREAM_OUTPUT_QUEUE: usize = 256;
 const CLIENT_STREAM_PENDING_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+const HTTP_PROXY_HEADER_MAX: usize = 16 * 1024;
+const HTTP_PROXY_HEADER_TIMEOUT: Duration = Duration::from_secs(15);
 const CLIENT_ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const CLIENT_ACTIVE_POLL_GRACE: Duration = Duration::from_millis(1_500);
+const CLIENT_ACTIVE_POLL_DATA_BUDGET: usize = 12;
 const CLIENT_RESET_CLOSE_DELAY: Duration = Duration::from_millis(500);
 const CLIENT_POLL_PROXY_HEADROOM: u32 = 4;
 const CLIENT_POLL_RESOLVER_HEADROOM: u32 = 1;
@@ -96,12 +110,16 @@ const CLIENT_POLL_RESOLVER_HEADROOM: u32 = 1;
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
     pub listen: SocketAddr,
+    pub http_listen: Option<SocketAddr>,
     pub resolvers: Vec<SocketAddr>,
     pub domain: String,
     pub access_key: ClientAccessKey,
     pub resolver_socks_proxy: Option<SocketAddr>,
     pub poll_interval: Duration,
     pub dns_max_payload: u16,
+    pub admission_report: Option<PathBuf>,
+    pub resolver_cohort_size: Option<usize>,
+    pub resolver_admission_min: usize,
 }
 
 #[derive(Clone)]
@@ -134,6 +152,7 @@ struct ClientRuntime {
 
 impl ClientRuntime {
     fn new(config: ClientConfig) -> Self {
+        let resolver_count = config.resolvers.len();
         let tcp_pool = config
             .resolver_socks_proxy
             .map(|proxy| Arc::new(ResolverPool::new(Some(proxy))));
@@ -169,7 +188,8 @@ impl ClientRuntime {
             stream_slots: Arc::new(Semaphore::new(stream_capacity)),
             active_ping_slots: Arc::new(Semaphore::new(active_ping_capacity)),
             idle_ping_slots: Arc::new(Semaphore::new(CLIENT_GLOBAL_IDLE_PING_INFLIGHT)),
-            diag: std::env::var_os("TRAJECTORY_DIAG").map(|_| Arc::new(ClientDiag::default())),
+            diag: std::env::var_os("TRAJECTORY_DIAG")
+                .map(|_| Arc::new(ClientDiag::new(resolver_count))),
         }
     }
 
@@ -191,7 +211,13 @@ impl ClientRuntime {
             }
         }
         let mut best = None::<(usize, u128, usize)>;
+        let mut best_degraded = None::<(usize, u128, usize)>;
         let mut best_blocked = None::<(usize, u128, usize)>;
+        let bulk_rtt_cutoff = if class == ClientSendClass::Data && count > 1 {
+            self.bulk_rtt_cutoff(start, now).await
+        } else {
+            None
+        };
         for offset in 0..count {
             let index = (start + offset) % count;
             let health = self.resolver_health[index].lock().await;
@@ -220,11 +246,13 @@ impl ClientRuntime {
                 0
             };
             let failure_penalty = (health.failures as u128).saturating_mul(rtt_micros);
+            let loss_penalty = rtt_micros.saturating_mul(health.loss_ewma_ppm as u128) / 20_000;
             let mtu_bonus = (response_bytes as u128).saturating_mul(10);
             let score = rtt_micros
                 .saturating_add(queue_penalty)
                 .saturating_add(serialization_penalty)
                 .saturating_add(failure_penalty)
+                .saturating_add(loss_penalty)
                 .saturating_add(
                     blocked_for
                         .map(|duration| duration.as_micros().saturating_mul(4))
@@ -232,8 +260,17 @@ impl ClientRuntime {
                 )
                 .saturating_sub(mtu_bonus);
             let candidate = (index, score, offset);
+            let degraded_for_bulk = class == ClientSendClass::Data
+                && count > 1
+                && (health.failures > 0
+                    || health.loss_ewma_ppm >= PATH_BULK_LOSSY_PPM
+                    || bulk_rtt_cutoff
+                        .map(|cutoff| rtt_micros > cutoff)
+                        .unwrap_or(false));
             let target = if blocked_for.is_some() {
                 &mut best_blocked
+            } else if degraded_for_bulk {
+                &mut best_degraded
             } else {
                 &mut best
             };
@@ -249,10 +286,14 @@ impl ClientRuntime {
         }
 
         let index = match class {
-            ClientSendClass::Control => best.or(best_blocked).map(|(index, _, _)| index),
-            ClientSendClass::Data | ClientSendClass::Poll => {
-                best.or(best_blocked).map(|(index, _, _)| index)
-            }
+            ClientSendClass::Control => best
+                .or(best_degraded)
+                .or(best_blocked)
+                .map(|(index, _, _)| index),
+            ClientSendClass::Data | ClientSendClass::Poll => best
+                .or(best_degraded)
+                .or(best_blocked)
+                .map(|(index, _, _)| index),
         }?;
         if let Some(proxy) = &self.proxy_health {
             let mut proxy = proxy.lock().await;
@@ -263,7 +304,9 @@ impl ClientRuntime {
                 return None;
             }
             proxy.in_flight = proxy.in_flight.saturating_add(1);
-            proxy.next_send_at = now + proxy.pacing_interval;
+            if class != ClientSendClass::Poll {
+                proxy.next_send_at = now + proxy.pacing_interval;
+            }
         }
         {
             let mut health = self.resolver_health[index].lock().await;
@@ -277,7 +320,9 @@ impl ClientRuntime {
                 return None;
             }
             health.in_flight = health.in_flight.saturating_add(1);
-            health.next_send_at = now + health.pacing_interval;
+            if class != ClientSendClass::Poll {
+                health.next_send_at = now + health.pacing_interval;
+            }
             let timeout = health.timeout;
             let max_response_bytes = self.response_bytes_for_health(&health, now);
             *cursor = index.wrapping_add(1);
@@ -312,17 +357,18 @@ impl ClientRuntime {
             health.blocked_until = None;
             match transport {
                 Some(
-                    DnsTransportOutcome::TcpFallbackAfterUdpError
-                    | DnsTransportOutcome::TcpFallbackAfterTruncation,
+                    DnsTransportOutcome::TcpFallbackAfterTruncation
+                    | DnsTransportOutcome::TcpPreferred,
                 ) => {
                     health.prefer_tcp_until = Some(Instant::now() + RESOLVER_TCP_PREFERENCE);
                 }
                 Some(DnsTransportOutcome::Udp | DnsTransportOutcome::UdpAfterPreferredTcpError) => {
                     health.prefer_tcp_until = None;
                 }
-                Some(DnsTransportOutcome::TcpPreferred | DnsTransportOutcome::TcpProxy) | None => {}
+                Some(DnsTransportOutcome::TcpProxy) | None => {}
             }
             health.record_rtt(elapsed, self.rto_min(), self.rto_max());
+            health.record_loss_sample(false);
             if truncated {
                 health.clean_mtu_successes = 0;
                 health.max_response_bytes = health
@@ -331,7 +377,12 @@ impl ClientRuntime {
                     .max(PATH_MIN_RESPONSE_BYTES);
             } else {
                 health.cwnd_successes = health.cwnd_successes.saturating_add(1);
-                if health.cwnd_successes >= health.cwnd.max(1) {
+                let growth_threshold = if self.config.resolver_socks_proxy.is_some() {
+                    health.cwnd.max(1)
+                } else {
+                    (health.cwnd / 2).max(4)
+                };
+                if health.cwnd_successes >= growth_threshold {
                     health.cwnd_successes = 0;
                     health.cwnd = health.cwnd.saturating_add(1).min(self.path_max_cwnd());
                 }
@@ -350,7 +401,15 @@ impl ClientRuntime {
             }
         } else {
             health.failures = health.failures.saturating_add(1);
-            health.cwnd = (health.cwnd / 2).max(PATH_MIN_CWND);
+            health.record_loss_sample(true);
+            if self.config.resolver_socks_proxy.is_some()
+                || health.failures >= 2
+                || health.loss_ewma_ppm >= PATH_SEVERE_LOSS_PPM
+            {
+                health.cwnd = ((health.cwnd.saturating_mul(3)) / 4).max(PATH_MIN_CWND);
+            } else if health.cwnd > PATH_MIN_CWND {
+                health.cwnd = health.cwnd.saturating_sub(1).max(PATH_MIN_CWND);
+            }
             health.cwnd_successes = 0;
             health.timeout = (health.timeout * 2).min(self.rto_max());
             health.clean_mtu_successes = 0;
@@ -364,7 +423,7 @@ impl ClientRuntime {
                     .max(safe_response_bytes);
             }
             let tcp_path = self.config.resolver_socks_proxy.is_some();
-            let failure_limit = if tcp_path { 3 } else { 2 };
+            let failure_limit = if tcp_path { 3 } else { 4 };
             if health.failures >= failure_limit {
                 health.blocked_until = Some(Instant::now() + self.resolver_quarantine());
             }
@@ -390,6 +449,28 @@ impl ClientRuntime {
         }
         let mut health = self.resolver_health[index].lock().await;
         health.in_flight = health.in_flight.saturating_sub(1);
+    }
+
+    async fn bulk_rtt_cutoff(&self, start: usize, now: Instant) -> Option<u128> {
+        let mut best = None::<u128>;
+        let count = self.config.resolvers.len();
+        for offset in 0..count {
+            let index = (start + offset) % count;
+            let health = self.resolver_health[index].lock().await;
+            if health
+                .blocked_until
+                .is_some_and(|blocked_until| blocked_until > now)
+                || health.loss_ewma_ppm >= PATH_BULK_LOSSY_PPM
+            {
+                continue;
+            }
+            let rtt = health
+                .srtt
+                .unwrap_or_else(|| self.initial_rto())
+                .as_micros();
+            best = Some(best.map(|current| current.min(rtt)).unwrap_or(rtt));
+        }
+        best.map(|rtt| rtt.saturating_mul(7) / 4)
     }
 
     fn path_max_cwnd(&self) -> u32 {
@@ -450,6 +531,7 @@ impl ClientRuntime {
 
 struct ResolverHealth {
     failures: u32,
+    loss_ewma_ppm: u32,
     in_flight: u32,
     cwnd: u32,
     cwnd_successes: u32,
@@ -469,6 +551,7 @@ impl ResolverHealth {
     fn new(initial_timeout: Duration, initial_response_bytes: u16) -> Self {
         Self {
             failures: 0,
+            loss_ewma_ppm: 0,
             in_flight: 0,
             cwnd: PATH_INITIAL_CWND,
             cwnd_successes: 0,
@@ -500,6 +583,14 @@ impl ResolverHealth {
         }
         let srtt = self.srtt.unwrap_or(sample);
         self.timeout = (srtt + self.rttvar * 4).clamp(min_timeout, max_timeout);
+    }
+
+    fn record_loss_sample(&mut self, lost: bool) {
+        let sample = if lost { 1_000_000 } else { 0 };
+        self.loss_ewma_ppm = ((self.loss_ewma_ppm as u64)
+            .saturating_mul((PATH_LOSS_EWMA_DENOMINATOR - 1) as u64)
+            .saturating_add(sample as u64)
+            / PATH_LOSS_EWMA_DENOMINATOR as u64) as u32;
     }
 
     fn update_pacing(&mut self, tcp_path: bool) {
@@ -810,24 +901,114 @@ struct ClientTransport {
     response_rx: mpsc::Receiver<ClientDnsResult>,
     last_ping_sent_at: Instant,
     active_poll_until: Instant,
+    data_since_poll: usize,
     diag_started: Instant,
     next_diag_at: Instant,
 }
 
-#[derive(Default)]
 struct ClientDiag {
     queries_sent: AtomicU64,
     queries_ok: AtomicU64,
     queries_failed: AtomicU64,
     query_wire_bytes: AtomicU64,
+    request_packet_body_bytes: AtomicU64,
+    request_envelope_bytes: AtomicU64,
+    request_qname_chars: AtomicU64,
     response_wire_bytes: AtomicU64,
+    response_useful_bytes: AtomicU64,
     data_bytes_received: AtomicU64,
     data_frames_received: AtomicU64,
+    upload_data_bytes_sent: AtomicU64,
+    upload_data_frames_sent: AtomicU64,
+    upload_new_bytes_sent: AtomicU64,
+    upload_repair_bytes_sent: AtomicU64,
+    upload_new_packets_sent: AtomicU64,
+    upload_repair_packets_sent: AtomicU64,
+    upload_fin_packets_sent: AtomicU64,
+    stream_ack_frames_sent: AtomicU64,
+    packet_ack_ranges_sent: AtomicU64,
     data_packets_sent: AtomicU64,
     ping_packets_sent: AtomicU64,
+    ping_responses_ok: AtomicU64,
+    ping_responses_with_data: AtomicU64,
+    ping_response_data_bytes: AtomicU64,
+    data_responses_ok: AtomicU64,
+    data_response_data_bytes: AtomicU64,
     open_packets_sent: AtomicU64,
     qname_too_long_splits: AtomicU64,
     tcp_fallbacks: AtomicU64,
+    fill_stop_no_kind: AtomicU64,
+    fill_stop_no_resolver_control: AtomicU64,
+    fill_stop_no_resolver_data: AtomicU64,
+    fill_stop_no_resolver_poll: AtomicU64,
+    fill_stop_ping_slot: AtomicU64,
+    resolver: Vec<ResolverDiag>,
+}
+
+impl ClientDiag {
+    fn new(resolver_count: usize) -> Self {
+        Self {
+            queries_sent: AtomicU64::new(0),
+            queries_ok: AtomicU64::new(0),
+            queries_failed: AtomicU64::new(0),
+            query_wire_bytes: AtomicU64::new(0),
+            request_packet_body_bytes: AtomicU64::new(0),
+            request_envelope_bytes: AtomicU64::new(0),
+            request_qname_chars: AtomicU64::new(0),
+            response_wire_bytes: AtomicU64::new(0),
+            response_useful_bytes: AtomicU64::new(0),
+            data_bytes_received: AtomicU64::new(0),
+            data_frames_received: AtomicU64::new(0),
+            upload_data_bytes_sent: AtomicU64::new(0),
+            upload_data_frames_sent: AtomicU64::new(0),
+            upload_new_bytes_sent: AtomicU64::new(0),
+            upload_repair_bytes_sent: AtomicU64::new(0),
+            upload_new_packets_sent: AtomicU64::new(0),
+            upload_repair_packets_sent: AtomicU64::new(0),
+            upload_fin_packets_sent: AtomicU64::new(0),
+            stream_ack_frames_sent: AtomicU64::new(0),
+            packet_ack_ranges_sent: AtomicU64::new(0),
+            data_packets_sent: AtomicU64::new(0),
+            ping_packets_sent: AtomicU64::new(0),
+            ping_responses_ok: AtomicU64::new(0),
+            ping_responses_with_data: AtomicU64::new(0),
+            ping_response_data_bytes: AtomicU64::new(0),
+            data_responses_ok: AtomicU64::new(0),
+            data_response_data_bytes: AtomicU64::new(0),
+            open_packets_sent: AtomicU64::new(0),
+            qname_too_long_splits: AtomicU64::new(0),
+            tcp_fallbacks: AtomicU64::new(0),
+            fill_stop_no_kind: AtomicU64::new(0),
+            fill_stop_no_resolver_control: AtomicU64::new(0),
+            fill_stop_no_resolver_data: AtomicU64::new(0),
+            fill_stop_no_resolver_poll: AtomicU64::new(0),
+            fill_stop_ping_slot: AtomicU64::new(0),
+            resolver: (0..resolver_count)
+                .map(|_| ResolverDiag::default())
+                .collect(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ResolverDiag {
+    sent: AtomicU64,
+    ok: AtomicU64,
+    failed: AtomicU64,
+    query_wire_bytes: AtomicU64,
+    response_wire_bytes: AtomicU64,
+    useful_response_bytes: AtomicU64,
+    elapsed_us_sum: AtomicU64,
+    elapsed_us_max: AtomicU64,
+    control_sent: AtomicU64,
+    data_sent: AtomicU64,
+    poll_sent: AtomicU64,
+    udp_ok: AtomicU64,
+    tcp_preferred_ok: AtomicU64,
+    tcp_truncation_ok: AtomicU64,
+    udp_after_tcp_error_ok: AtomicU64,
+    tcp_proxy_ok: AtomicU64,
+    truncated: AtomicU64,
 }
 
 impl ResolverPool {
@@ -837,9 +1018,13 @@ impl ResolverPool {
         } else {
             TCP_RESOLVER_LANES_DIRECT
         };
+        Self::new_with_lanes(proxy, lanes_per_resolver)
+    }
+
+    fn new_with_lanes(proxy: Option<SocketAddr>, lanes_per_resolver: usize) -> Self {
         Self {
             proxy,
-            lanes_per_resolver,
+            lanes_per_resolver: lanes_per_resolver.max(1),
             senders: Mutex::new(HashMap::new()),
         }
     }
@@ -969,11 +1154,25 @@ pub async fn run_client(mut config: ClientConfig) -> Result<()> {
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("bind local listener {}", config.listen))?;
+    let http_listener = match config.http_listen {
+        Some(addr) => Some(
+            TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("bind local HTTP proxy listener {addr}"))?,
+        ),
+        None => None,
+    };
     eprintln!(
         "trajectory client listening on {} via {} resolver(s)",
         listener.local_addr()?,
         config.resolvers.len()
     );
+    if let Some(listener) = &http_listener {
+        eprintln!(
+            "trajectory HTTP proxy listening on {}",
+            listener.local_addr()?
+        );
+    }
 
     let runtime = Arc::new(ClientRuntime::new(config));
     let (transport_tx, transport_rx) =
@@ -985,13 +1184,25 @@ pub async fn run_client(mut config: ClientConfig) -> Result<()> {
         }
     });
 
-    let mut next_stream_id = 0u64;
+    let next_stream_id = Arc::new(AtomicU64::new(0));
+    if let Some(listener) = http_listener {
+        let transport_tx = transport_tx.clone();
+        let runtime = Arc::clone(&runtime);
+        let next_stream_id = Arc::clone(&next_stream_id);
+        tokio::spawn(async move {
+            if let Err(error) =
+                accept_http_proxy_streams(listener, runtime, transport_tx, next_stream_id).await
+            {
+                eprintln!("HTTP proxy listener failed: {error:#}");
+            }
+        });
+    }
+
     loop {
         let (stream, peer) = listener.accept().await?;
         let runtime = Arc::clone(&runtime);
         let transport_tx = transport_tx.clone();
-        let stream_id = next_stream_id;
-        next_stream_id = next_stream_id.wrapping_add(1);
+        let stream_id = next_stream_id.fetch_add(1, Ordering::Relaxed);
         tokio::spawn(async move {
             let _stream_slot = match Arc::clone(&runtime.stream_slots).acquire_owned().await {
                 Ok(permit) => permit,
@@ -1014,18 +1225,46 @@ fn dedupe_resolvers(resolvers: Vec<SocketAddr>) -> Vec<SocketAddr> {
 
 async fn admit_resolvers(config: ClientConfig) -> Result<Vec<SocketAddr>> {
     let tcp_path = config.resolver_socks_proxy.is_some();
-    let target = resolver_target_admitted(tcp_path).min(config.resolvers.len());
+    let requested_min = config.resolver_admission_min.max(1);
+    if requested_min > config.resolvers.len() {
+        bail!(
+            "resolver admission minimum {} exceeds {} candidate resolver(s)",
+            requested_min,
+            config.resolvers.len()
+        );
+    }
+    if let Some(cohort_size) = config.resolver_cohort_size {
+        if requested_min > cohort_size {
+            bail!(
+                "resolver admission minimum {} exceeds resolver cohort size {}",
+                requested_min,
+                cohort_size
+            );
+        }
+    }
+    let target = config
+        .resolver_cohort_size
+        .unwrap_or_else(|| resolver_target_admitted(tcp_path))
+        .max(requested_min)
+        .clamp(1, config.resolvers.len());
+    let min_required = requested_min;
     let sample_target = (target * RESOLVER_ADMISSION_SAMPLE_FACTOR).min(config.resolvers.len());
-    let probe_runtime = Arc::new(ClientRuntime::new(config.clone()));
+    let mut probe_runtime = ClientRuntime::new(config.clone());
+    if let Some(proxy) = config.resolver_socks_proxy {
+        probe_runtime.tcp_pool = Some(Arc::new(ResolverPool::new_with_lanes(Some(proxy), 1)));
+    }
+    let probe_runtime = Arc::new(probe_runtime);
     let mut admitted = Vec::<(SocketAddr, Duration)>::new();
+    let mut results = Vec::<AdmissionProbeResult>::new();
+    let verbose_failures = std::env::var_os("TRAJECTORY_ADMISSION_DIAG").is_some();
     eprintln!(
         "probing {} resolver(s) before admission",
         config.resolvers.len()
     );
     let parallelism = resolver_probe_parallelism(tcp_path).min(config.resolvers.len().max(1));
-    let probe_timeout = resolver_admission_timeout(tcp_path);
+    let probe_timeout = resolver_admission_probe_timeout(tcp_path);
     let mut candidates = config.resolvers.iter().copied();
-    let mut probes = JoinSet::<(SocketAddr, Option<Duration>)>::new();
+    let mut probes = JoinSet::<AdmissionProbeResult>::new();
     fill_resolver_probe_set(
         &mut probes,
         &probe_runtime,
@@ -1034,15 +1273,35 @@ async fn admit_resolvers(config: ClientConfig) -> Result<Vec<SocketAddr>> {
         probe_timeout,
     );
 
-    let deadline = tokio::time::sleep(RESOLVER_ADMISSION_DEADLINE);
+    let deadline = tokio::time::sleep(resolver_admission_deadline(
+        config.resolvers.len(),
+        parallelism,
+        probe_timeout,
+    ));
     tokio::pin!(deadline);
     while !probes.is_empty() {
         tokio::select! {
             maybe_result = probes.join_next() => {
                 match maybe_result {
-                    Some(Ok((resolver, Some(rtt)))) => {
-                    eprintln!("admitted resolver {resolver} rtt={}ms", rtt.as_millis());
-                    admitted.push((resolver, rtt));
+                    Some(Ok(result)) => {
+                    if result.admitted {
+                        eprintln!(
+                            "admitted resolver {} elapsed={}ms response_bps={}",
+                            result.resolver,
+                            result.elapsed.as_millis(),
+                            result.response_bps
+                        );
+                        admitted.push((result.resolver, result.elapsed));
+                    } else if verbose_failures {
+                        eprintln!(
+                            "rejected resolver {} stage={} elapsed={}ms reason={}",
+                            result.resolver,
+                            result.stage,
+                            result.elapsed.as_millis(),
+                            result.error.as_deref().unwrap_or("unknown")
+                        );
+                    }
+                    results.push(result);
                     if admitted.len() >= sample_target {
                         probes.abort_all();
                         admitted.sort_by_key(|(_, rtt)| *rtt);
@@ -1051,6 +1310,15 @@ async fn admit_resolvers(config: ClientConfig) -> Result<Vec<SocketAddr>> {
                             .take(target)
                             .map(|(resolver, _)| resolver)
                             .collect::<Vec<_>>();
+                        if resolvers.len() < min_required {
+                            write_admission_report_if_requested(&config, &results, &resolvers)?;
+                            bail!(
+                                "only {} resolver(s) passed signed tunnel admission; required {}",
+                                resolvers.len(),
+                                min_required
+                            );
+                        }
+                        write_admission_report_if_requested(&config, &results, &resolvers)?;
                         eprintln!(
                             "using {} admitted resolver(s) out of {} candidate(s)",
                             resolvers.len(),
@@ -1059,7 +1327,7 @@ async fn admit_resolvers(config: ClientConfig) -> Result<Vec<SocketAddr>> {
                         return Ok(resolvers);
                     }
                     }
-                    Some(Ok((_, None))) | Some(Err(_)) => {}
+                    Some(Err(_)) => {}
                     None => break,
                 }
                 fill_resolver_probe_set(
@@ -1077,8 +1345,13 @@ async fn admit_resolvers(config: ClientConfig) -> Result<Vec<SocketAddr>> {
         }
     }
 
-    if admitted.is_empty() {
-        bail!("no resolvers passed signed tunnel admission");
+    if admitted.len() < min_required {
+        write_admission_report_if_requested(&config, &results, &[])?;
+        bail!(
+            "only {} resolver(s) passed signed tunnel admission; required {}",
+            admitted.len(),
+            min_required
+        );
     }
     eprintln!(
         "using {} admitted resolver(s) out of {} candidate(s)",
@@ -1086,11 +1359,13 @@ async fn admit_resolvers(config: ClientConfig) -> Result<Vec<SocketAddr>> {
         config.resolvers.len()
     );
     admitted.sort_by_key(|(_, rtt)| *rtt);
-    Ok(admitted
+    let resolvers = admitted
         .into_iter()
         .take(target)
         .map(|(resolver, _)| resolver)
-        .collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    write_admission_report_if_requested(&config, &results, &resolvers)?;
+    Ok(resolvers)
 }
 
 fn resolver_target_admitted(tcp_path: bool) -> usize {
@@ -1121,8 +1396,24 @@ fn resolver_admission_timeout(tcp_path: bool) -> Duration {
     }
 }
 
+fn resolver_admission_probe_timeout(tcp_path: bool) -> Duration {
+    resolver_admission_timeout(tcp_path).saturating_mul(admission_challenges(tcp_path).len() as u32)
+}
+
+fn resolver_admission_deadline(
+    candidate_count: usize,
+    parallelism: usize,
+    probe_timeout: Duration,
+) -> Duration {
+    let waves = candidate_count.div_ceil(parallelism.max(1)).max(1);
+    let wave_budget = probe_timeout.saturating_mul(waves.min(12) as u32);
+    RESOLVER_ADMISSION_DEADLINE
+        .max(wave_budget)
+        .min(Duration::from_secs(10 * 60))
+}
+
 fn fill_resolver_probe_set<I>(
-    probes: &mut JoinSet<(SocketAddr, Option<Duration>)>,
+    probes: &mut JoinSet<AdmissionProbeResult>,
     runtime: &Arc<ClientRuntime>,
     candidates: &mut I,
     parallelism: usize,
@@ -1136,25 +1427,330 @@ fn fill_resolver_probe_set<I>(
         };
         let runtime = Arc::clone(runtime);
         probes.spawn(async move {
-            let rtt = timeout(probe_timeout, probe_resolver(runtime, resolver))
-                .await
-                .ok()
-                .flatten();
-            (resolver, rtt)
+            match timeout(probe_timeout, probe_resolver(runtime, resolver)).await {
+                Ok(result) => result,
+                Err(_) => AdmissionProbeResult::rejected(
+                    resolver,
+                    "timeout",
+                    probe_timeout,
+                    format!(
+                        "admission probe timed out after {}ms",
+                        probe_timeout.as_millis()
+                    ),
+                ),
+            }
         });
     }
 }
 
-async fn probe_resolver(runtime: Arc<ClientRuntime>, resolver: SocketAddr) -> Option<Duration> {
+async fn probe_resolver(runtime: Arc<ClientRuntime>, resolver: SocketAddr) -> AdmissionProbeResult {
     let started = Instant::now();
+    let tcp_path = runtime.config.resolver_socks_proxy.is_some();
     let mut probe = AdmissionProbe::new(runtime, resolver);
-    probe.send_path_challenge(64, 16).await?;
-    probe.send_path_challenge(96, 24).await?;
-    if probe.runtime.config.resolver_socks_proxy.is_some() {
-        probe.send_path_challenge(0, 28).await?;
-        probe.send_path_challenge(0, 28).await?;
+    let mut total_response_bytes = 0usize;
+    let mut last_rtt = Duration::ZERO;
+    let mut challenge_count = 0usize;
+
+    let max_elapsed = admission_max_elapsed(tcp_path);
+    for challenge in admission_challenges(tcp_path) {
+        let elapsed = started.elapsed();
+        if elapsed >= max_elapsed {
+            return AdmissionProbeResult::rejected(
+                resolver,
+                challenge.stage,
+                elapsed,
+                format!(
+                    "admission probe exceeded max elapsed before stage: {}ms >= {}ms",
+                    elapsed.as_millis(),
+                    max_elapsed.as_millis()
+                ),
+            )
+            .with_probe_stats(last_rtt, challenge_count, total_response_bytes);
+        }
+        let remaining = max_elapsed.saturating_sub(elapsed);
+        match timeout(remaining, probe.send_path_challenge(*challenge)).await {
+            Ok(Ok(result)) => {
+                challenge_count += 1;
+                total_response_bytes += result.response_payload_bytes;
+                last_rtt = result.rtt;
+            }
+            Ok(Err(error)) => {
+                return AdmissionProbeResult {
+                    resolver,
+                    admitted: false,
+                    stage: challenge.stage,
+                    elapsed: started.elapsed(),
+                    last_rtt,
+                    challenge_count,
+                    response_payload_bytes: total_response_bytes,
+                    response_bps: response_bps(total_response_bytes, started.elapsed()),
+                    error: Some(error),
+                };
+            }
+            Err(_) => {
+                return AdmissionProbeResult {
+                    resolver,
+                    admitted: false,
+                    stage: challenge.stage,
+                    elapsed: started.elapsed(),
+                    last_rtt,
+                    challenge_count,
+                    response_payload_bytes: total_response_bytes,
+                    response_bps: response_bps(total_response_bytes, started.elapsed()),
+                    error: Some(format!(
+                        "admission stage timed out after {}ms",
+                        remaining.as_millis()
+                    )),
+                };
+            }
+        }
     }
-    Some(started.elapsed())
+
+    let elapsed = started.elapsed();
+    if elapsed > max_elapsed {
+        return AdmissionProbeResult::rejected(
+            resolver,
+            "sustained_probe",
+            elapsed,
+            format!(
+                "admission probe exceeded max elapsed: {}ms > {}ms",
+                elapsed.as_millis(),
+                max_elapsed.as_millis()
+            ),
+        )
+        .with_probe_stats(last_rtt, challenge_count, total_response_bytes);
+    }
+
+    let response_bps = response_bps(total_response_bytes, elapsed);
+    let min_response_bps = admission_min_response_bps(tcp_path);
+    if response_bps < min_response_bps {
+        return AdmissionProbeResult::rejected(
+            resolver,
+            "sustained_probe",
+            elapsed,
+            format!(
+                "admission probe response goodput too low: {response_bps} B/s < {min_response_bps} B/s"
+            ),
+        )
+        .with_probe_stats(last_rtt, challenge_count, total_response_bytes);
+    }
+
+    AdmissionProbeResult {
+        resolver,
+        admitted: true,
+        stage: "admitted",
+        elapsed,
+        last_rtt,
+        challenge_count,
+        response_payload_bytes: total_response_bytes,
+        response_bps,
+        error: None,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AdmissionChallenge {
+    stage: &'static str,
+    response_bytes: u16,
+    request_padding: usize,
+}
+
+struct AdmissionChallengeResult {
+    rtt: Duration,
+    response_payload_bytes: usize,
+}
+
+#[derive(Debug)]
+struct AdmissionProbeResult {
+    resolver: SocketAddr,
+    admitted: bool,
+    stage: &'static str,
+    elapsed: Duration,
+    last_rtt: Duration,
+    challenge_count: usize,
+    response_payload_bytes: usize,
+    response_bps: u64,
+    error: Option<String>,
+}
+
+impl AdmissionProbeResult {
+    fn rejected(
+        resolver: SocketAddr,
+        stage: &'static str,
+        elapsed: Duration,
+        error: String,
+    ) -> Self {
+        Self {
+            resolver,
+            admitted: false,
+            stage,
+            elapsed,
+            last_rtt: Duration::ZERO,
+            challenge_count: 0,
+            response_payload_bytes: 0,
+            response_bps: 0,
+            error: Some(error),
+        }
+    }
+
+    fn with_probe_stats(
+        mut self,
+        last_rtt: Duration,
+        challenge_count: usize,
+        response_payload_bytes: usize,
+    ) -> Self {
+        self.last_rtt = last_rtt;
+        self.challenge_count = challenge_count;
+        self.response_payload_bytes = response_payload_bytes;
+        self.response_bps = response_bps(response_payload_bytes, self.elapsed);
+        self
+    }
+}
+
+const UDP_ADMISSION_CHALLENGES: [AdmissionChallenge; 4] = [
+    AdmissionChallenge {
+        stage: "signed_challenge",
+        response_bytes: 64,
+        request_padding: 16,
+    },
+    AdmissionChallenge {
+        stage: "signed_challenge",
+        response_bytes: 96,
+        request_padding: 24,
+    },
+    AdmissionChallenge {
+        stage: "sustained_probe",
+        response_bytes: 192,
+        request_padding: 32,
+    },
+    AdmissionChallenge {
+        stage: "sustained_probe",
+        response_bytes: 256,
+        request_padding: 40,
+    },
+];
+
+const TCP_PROXY_ADMISSION_CHALLENGES: [AdmissionChallenge; 6] = [
+    AdmissionChallenge {
+        stage: "signed_challenge",
+        response_bytes: 64,
+        request_padding: 16,
+    },
+    AdmissionChallenge {
+        stage: "signed_challenge",
+        response_bytes: 128,
+        request_padding: 24,
+    },
+    AdmissionChallenge {
+        stage: "sustained_probe",
+        response_bytes: 256,
+        request_padding: 32,
+    },
+    AdmissionChallenge {
+        stage: "sustained_probe",
+        response_bytes: 512,
+        request_padding: 40,
+    },
+    AdmissionChallenge {
+        stage: "sustained_probe",
+        response_bytes: 512,
+        request_padding: 48,
+    },
+    AdmissionChallenge {
+        stage: "sustained_probe",
+        response_bytes: 512,
+        request_padding: 48,
+    },
+];
+
+fn admission_challenges(tcp_path: bool) -> &'static [AdmissionChallenge] {
+    if tcp_path {
+        &TCP_PROXY_ADMISSION_CHALLENGES
+    } else {
+        &UDP_ADMISSION_CHALLENGES
+    }
+}
+
+fn admission_max_elapsed(tcp_path: bool) -> Duration {
+    if tcp_path {
+        RESOLVER_ADMISSION_MAX_ELAPSED_TCP.max(Duration::from_secs(30))
+    } else {
+        RESOLVER_ADMISSION_MAX_ELAPSED_UDP
+    }
+}
+
+fn admission_min_response_bps(tcp_path: bool) -> u64 {
+    if tcp_path {
+        RESOLVER_ADMISSION_MIN_RESPONSE_BPS_TCP
+    } else {
+        RESOLVER_ADMISSION_MIN_RESPONSE_BPS_UDP
+    }
+}
+
+fn response_bps(response_payload_bytes: usize, elapsed: Duration) -> u64 {
+    if elapsed.is_zero() {
+        return response_payload_bytes as u64;
+    }
+    ((response_payload_bytes as u128 * 1_000_000_000u128) / elapsed.as_nanos())
+        .min(u64::MAX as u128) as u64
+}
+
+fn write_admission_report_if_requested(
+    config: &ClientConfig,
+    results: &[AdmissionProbeResult],
+    selected: &[SocketAddr],
+) -> Result<()> {
+    let Some(path) = &config.admission_report else {
+        return Ok(());
+    };
+    write_admission_report(path, results, selected, config)
+}
+
+fn write_admission_report(
+    path: &Path,
+    results: &[AdmissionProbeResult],
+    selected: &[SocketAddr],
+    config: &ClientConfig,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create admission report directory {}", parent.display()))?;
+    }
+    let selected = selected.iter().copied().collect::<HashSet<_>>();
+    let mut file = std::fs::File::create(path)
+        .with_context(|| format!("create admission report {}", path.display()))?;
+    use std::io::Write;
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "event": "admission_summary",
+            "candidate_count": config.resolvers.len(),
+            "selected_count": selected.len(),
+            "tcp_path": config.resolver_socks_proxy.is_some(),
+            "domain": config.domain,
+        })
+    )?;
+    for result in results {
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "event": "admission_probe",
+                "resolver": result.resolver.to_string(),
+                "selected": selected.contains(&result.resolver),
+                "admitted": result.admitted,
+                "stage": result.stage,
+                "elapsed_ms": result.elapsed.as_millis() as u64,
+                "last_rtt_ms": result.last_rtt.as_millis() as u64,
+                "challenge_count": result.challenge_count,
+                "response_payload_bytes": result.response_payload_bytes,
+                "response_bps": result.response_bps,
+                "error": result.error,
+            })
+        )?;
+    }
+    Ok(())
 }
 
 struct AdmissionProbe {
@@ -1178,53 +1774,84 @@ impl AdmissionProbe {
 
     async fn send_path_challenge(
         &mut self,
-        response_bytes: u16,
-        request_padding: usize,
-    ) -> Option<()> {
+        challenge: AdmissionChallenge,
+    ) -> Result<AdmissionChallengeResult, String> {
         let current_packet_no = self.packet_no;
-        self.packet_no = self.packet_no.checked_add(1)?;
+        self.packet_no = self
+            .packet_no
+            .checked_add(1)
+            .ok_or_else(|| "admission packet number overflow".to_string())?;
         let mut packet = Packet::new(self.conn_id, current_packet_no);
-        packet.max_response_bytes = 512;
+        packet.max_response_bytes = self
+            .runtime
+            .config
+            .dns_max_payload
+            .max(PATH_MIN_RESPONSE_BYTES);
+        let required_response_bytes =
+            admission_challenge_response_bytes(challenge.response_bytes, packet.max_response_bytes);
         packet.ack_ranges = self.received_server.ack_ranges(1);
         packet.frames.push(Frame::PathChallenge {
             nonce: current_packet_no,
-            response_bytes,
+            response_bytes: required_response_bytes,
         });
-        if request_padding > 0 {
+        if challenge.request_padding > 0 {
             packet.frames.push(Frame::PathResponse {
                 nonce: current_packet_no,
-                bytes: vec![0; request_padding],
+                bytes: vec![0; challenge.request_padding],
             });
         }
+        let started = Instant::now();
         let response = send_dns_packet(
             &self.runtime,
             None,
             self.resolver,
+            None,
             &packet,
-            RESOLVER_ADMISSION_TIMEOUT,
+            resolver_admission_timeout(self.runtime.config.resolver_socks_proxy.is_some()),
         )
         .await
-        .ok()?;
+        .map_err(|error| error.to_string())?;
+        let rtt = started.elapsed();
         if response.packet.conn_id != self.conn_id
             || self.received_server.is_acked(response.packet.packet_no)
             || !ack_ranges_contain(&response.packet.ack_ranges, current_packet_no)
         {
-            return None;
+            return Err("signed challenge response did not acknowledge request packet".to_string());
         }
-        let has_response = response_bytes == 0
+        let response_payload_bytes = response
+            .packet
+            .frames
+            .iter()
+            .map(|frame| match frame {
+                Frame::PathResponse { bytes, .. } => bytes.len(),
+                Frame::Data { bytes, .. } => bytes.len(),
+                _ => 0,
+            })
+            .sum();
+        let has_response = required_response_bytes == 0
             || response.packet.frames.iter().any(|frame| {
                 matches!(
                     frame,
                     Frame::PathResponse { nonce, bytes }
-                        if *nonce == current_packet_no && bytes.len() >= response_bytes as usize / 2
+                        if *nonce == current_packet_no && bytes.len() >= required_response_bytes as usize
                 )
             });
         if !has_response {
-            return None;
+            return Err("signed challenge response missed required path response".to_string());
         }
         self.received_server.insert(response.packet.packet_no);
-        Some(())
+        Ok(AdmissionChallengeResult {
+            rtt,
+            response_payload_bytes,
+        })
     }
+}
+
+fn admission_challenge_response_bytes(requested: u16, max_response_bytes: u16) -> u16 {
+    let payload_cap = max_response_bytes
+        .saturating_sub((DNS_RESPONSE_SAFETY_MARGIN + 256) as u16)
+        .max(64);
+    requested.min(payload_cap)
 }
 
 async fn run_local_stream_io(
@@ -1302,6 +1929,381 @@ async fn write_local_stream_output(
     Ok(())
 }
 
+async fn accept_http_proxy_streams(
+    listener: TcpListener,
+    runtime: Arc<ClientRuntime>,
+    transport_tx: mpsc::Sender<ClientTransportEvent>,
+    next_stream_id: Arc<AtomicU64>,
+) -> Result<()> {
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let runtime = Arc::clone(&runtime);
+        let transport_tx = transport_tx.clone();
+        let stream_id = next_stream_id.fetch_add(1, Ordering::Relaxed);
+        tokio::spawn(async move {
+            let _stream_slot = match Arc::clone(&runtime.stream_slots).acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => return,
+            };
+            if let Err(error) = run_http_proxy_stream_io(transport_tx, stream_id, stream).await {
+                eprintln!("HTTP proxy stream {stream_id} from {peer} failed: {error:#}");
+            }
+        });
+    }
+}
+
+async fn run_http_proxy_stream_io(
+    transport_tx: mpsc::Sender<ClientTransportEvent>,
+    stream_id: u64,
+    mut local: TcpStream,
+) -> Result<()> {
+    local.set_nodelay(true).ok();
+    let (header, after_header) = timeout(
+        HTTP_PROXY_HEADER_TIMEOUT,
+        read_http_proxy_header(&mut local),
+    )
+    .await
+    .context("HTTP proxy request header timed out")??;
+    let request = parse_http_proxy_request(&header, &after_header)?;
+    let output_rx = register_client_stream(&transport_tx, stream_id).await?;
+    let mut remote = TransportOutputReader::new(output_rx);
+
+    match socks5_connect_via_transport(
+        &transport_tx,
+        stream_id,
+        remote,
+        &request.host,
+        request.port,
+    )
+    .await
+    {
+        Ok(reader) => remote = reader,
+        Err(error) => {
+            let _ = local
+                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                .await;
+            let _ = transport_tx
+                .send(ClientTransportEvent::LocalClosed { stream_id })
+                .await;
+            return Err(error);
+        }
+    }
+
+    if request.respond_connect_ok {
+        local
+            .write_all(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: trajectory\r\n\r\n")
+            .await
+            .context("write HTTP CONNECT success")?;
+    }
+    if !request.initial_upstream.is_empty() {
+        send_transport_bytes(&transport_tx, stream_id, request.initial_upstream).await?;
+    }
+
+    let (mut reader, mut writer) = local.into_split();
+    let read_tx = transport_tx.clone();
+    let reader_task = tokio::spawn(async move {
+        let mut buf = [0u8; UPLOAD_READ_CHUNK];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => {
+                    let _ = read_tx
+                        .send(ClientTransportEvent::LocalFin { stream_id })
+                        .await;
+                    return;
+                }
+                Ok(n) => {
+                    if read_tx
+                        .send(ClientTransportEvent::LocalBytes {
+                            stream_id,
+                            bytes: buf[..n].to_vec(),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(_) => {
+                    let _ = read_tx
+                        .send(ClientTransportEvent::LocalClosed { stream_id })
+                        .await;
+                    return;
+                }
+            }
+        }
+    });
+
+    let writer_result = remote.write_to_local(&mut writer).await;
+    reader_task.abort();
+    let _ = transport_tx
+        .send(ClientTransportEvent::LocalClosed { stream_id })
+        .await;
+    writer_result
+}
+
+async fn register_client_stream(
+    transport_tx: &mpsc::Sender<ClientTransportEvent>,
+    stream_id: u64,
+) -> Result<mpsc::Receiver<ClientStreamOutput>> {
+    let (output_tx, output_rx) = mpsc::channel(CLIENT_STREAM_OUTPUT_QUEUE);
+    transport_tx
+        .send(ClientTransportEvent::OpenStream {
+            stream_id,
+            output: output_tx,
+        })
+        .await
+        .context("register local stream with client transport")?;
+    Ok(output_rx)
+}
+
+async fn send_transport_bytes(
+    transport_tx: &mpsc::Sender<ClientTransportEvent>,
+    stream_id: u64,
+    bytes: Vec<u8>,
+) -> Result<()> {
+    transport_tx
+        .send(ClientTransportEvent::LocalBytes { stream_id, bytes })
+        .await
+        .context("send local bytes to client transport")
+}
+
+async fn read_http_proxy_header(stream: &mut TcpStream) -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut data = Vec::with_capacity(1024);
+    let mut buf = [0u8; 1024];
+    loop {
+        let n = stream
+            .read(&mut buf)
+            .await
+            .context("read HTTP proxy request header")?;
+        if n == 0 {
+            bail!("HTTP proxy client closed before sending headers");
+        }
+        data.extend_from_slice(&buf[..n]);
+        if data.len() > HTTP_PROXY_HEADER_MAX {
+            bail!("HTTP proxy request header exceeded {HTTP_PROXY_HEADER_MAX} bytes");
+        }
+        if let Some(end) = find_http_header_end(&data) {
+            let after = data.split_off(end);
+            return Ok((data, after));
+        }
+    }
+}
+
+fn find_http_header_end(data: &[u8]) -> Option<usize> {
+    data.windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+}
+
+struct HttpProxyRequest {
+    host: String,
+    port: u16,
+    respond_connect_ok: bool,
+    initial_upstream: Vec<u8>,
+}
+
+fn parse_http_proxy_request(header: &[u8], after_header: &[u8]) -> Result<HttpProxyRequest> {
+    let text = std::str::from_utf8(header).context("HTTP proxy request was not UTF-8")?;
+    let mut lines = text.split("\r\n");
+    let request_line = lines.next().context("missing HTTP request line")?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().context("missing HTTP method")?;
+    let target = request_parts.next().context("missing HTTP target")?;
+    let version = request_parts.next().context("missing HTTP version")?;
+    if !version.starts_with("HTTP/") {
+        bail!("unsupported HTTP proxy request version: {version}");
+    }
+
+    if method.eq_ignore_ascii_case("CONNECT") {
+        let (host, port) = split_host_port(target, 443)?;
+        return Ok(HttpProxyRequest {
+            host,
+            port,
+            respond_connect_ok: true,
+            initial_upstream: after_header.to_vec(),
+        });
+    }
+
+    let Some(rest) = target.strip_prefix("http://") else {
+        bail!("HTTP proxy mode supports CONNECT and absolute http:// requests");
+    };
+    let slash = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..slash];
+    let path = if slash < rest.len() {
+        &rest[slash..]
+    } else {
+        "/"
+    };
+    let (host, port) = split_host_port(authority, 80)?;
+    let mut initial_upstream = format!("{method} {path} {version}\r\n").into_bytes();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if line
+            .split_once(':')
+            .map(|(name, _)| name.eq_ignore_ascii_case("Proxy-Connection"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        initial_upstream.extend_from_slice(line.as_bytes());
+        initial_upstream.extend_from_slice(b"\r\n");
+    }
+    initial_upstream.extend_from_slice(b"\r\n");
+    initial_upstream.extend_from_slice(after_header);
+
+    Ok(HttpProxyRequest {
+        host,
+        port,
+        respond_connect_ok: false,
+        initial_upstream,
+    })
+}
+
+fn split_host_port(value: &str, default_port: u16) -> Result<(String, u16)> {
+    if value.is_empty() {
+        bail!("empty proxy target host");
+    }
+    if let Some(rest) = value.strip_prefix('[') {
+        let Some((host, remainder)) = rest.split_once(']') else {
+            bail!("invalid bracketed IPv6 proxy target");
+        };
+        let port = if let Some(port) = remainder.strip_prefix(':') {
+            parse_port(port)?
+        } else {
+            default_port
+        };
+        return Ok((host.to_string(), port));
+    }
+
+    let (host, port) = match value.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') => (host, parse_port(port)?),
+        Some(_) => bail!("IPv6 proxy targets must use [addr]:port syntax"),
+        None => (value, default_port),
+    };
+    if host.is_empty() {
+        bail!("empty proxy target host");
+    }
+    Ok((host.to_string(), port))
+}
+
+fn parse_port(value: &str) -> Result<u16> {
+    let port = value.parse::<u16>().context("invalid proxy target port")?;
+    if port == 0 {
+        bail!("proxy target port must be non-zero");
+    }
+    Ok(port)
+}
+
+async fn socks5_connect_via_transport(
+    transport_tx: &mpsc::Sender<ClientTransportEvent>,
+    stream_id: u64,
+    mut remote: TransportOutputReader,
+    host: &str,
+    port: u16,
+) -> Result<TransportOutputReader> {
+    send_transport_bytes(transport_tx, stream_id, vec![0x05, 0x01, 0x00]).await?;
+    let method = remote.read_exact_vec(2).await?;
+    if method != [0x05, 0x00] {
+        bail!("server SOCKS5 egress rejected no-auth method");
+    }
+
+    send_transport_bytes(transport_tx, stream_id, socks5_connect_request(host, port)?).await?;
+    let head = remote.read_exact_vec(4).await?;
+    if head[0] != 0x05 {
+        bail!("server SOCKS5 egress returned invalid version");
+    }
+    if head[1] != 0x00 {
+        bail!("server SOCKS5 egress connect failed with code {}", head[1]);
+    }
+    match head[3] {
+        0x01 => {
+            let _ = remote.read_exact_vec(6).await?;
+        }
+        0x03 => {
+            let len = remote.read_exact_vec(1).await?[0] as usize;
+            let _ = remote.read_exact_vec(len + 2).await?;
+        }
+        0x04 => {
+            let _ = remote.read_exact_vec(18).await?;
+        }
+        other => bail!("server SOCKS5 egress returned unsupported address type {other}"),
+    }
+    Ok(remote)
+}
+
+fn socks5_connect_request(host: &str, port: u16) -> Result<Vec<u8>> {
+    let mut request = vec![0x05, 0x01, 0x00];
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(addr) => {
+                request.push(0x01);
+                request.extend_from_slice(&addr.octets());
+            }
+            std::net::IpAddr::V6(addr) => {
+                request.push(0x04);
+                request.extend_from_slice(&addr.octets());
+            }
+        }
+    } else {
+        let host_bytes = host.as_bytes();
+        if host_bytes.is_empty() || host_bytes.len() > u8::MAX as usize {
+            bail!("domain proxy target must be 1..=255 bytes");
+        }
+        request.push(0x03);
+        request.push(host_bytes.len() as u8);
+        request.extend_from_slice(host_bytes);
+    }
+    request.extend_from_slice(&port.to_be_bytes());
+    Ok(request)
+}
+
+struct TransportOutputReader {
+    output_rx: mpsc::Receiver<ClientStreamOutput>,
+    pending: VecDeque<u8>,
+}
+
+impl TransportOutputReader {
+    fn new(output_rx: mpsc::Receiver<ClientStreamOutput>) -> Self {
+        Self {
+            output_rx,
+            pending: VecDeque::new(),
+        }
+    }
+
+    async fn read_exact_vec(&mut self, len: usize) -> Result<Vec<u8>> {
+        while self.pending.len() < len {
+            match self.output_rx.recv().await {
+                Some(ClientStreamOutput::Bytes(bytes)) => self.pending.extend(bytes),
+                Some(ClientStreamOutput::Close) | None => {
+                    bail!("remote stream closed during proxy handshake")
+                }
+            }
+        }
+        Ok(self.pending.drain(..len).collect())
+    }
+
+    async fn write_to_local(mut self, writer: &mut tokio::net::tcp::OwnedWriteHalf) -> Result<()> {
+        if !self.pending.is_empty() {
+            let bytes = self.pending.drain(..).collect::<Vec<_>>();
+            writer.write_all(&bytes).await?;
+        }
+        while let Some(output) = self.output_rx.recv().await {
+            match output {
+                ClientStreamOutput::Bytes(bytes) => {
+                    if !bytes.is_empty() {
+                        writer.write_all(&bytes).await?;
+                    }
+                }
+                ClientStreamOutput::Close => break,
+            }
+        }
+        writer.shutdown().await.ok();
+        Ok(())
+    }
+}
+
 async fn run_client_transport(
     runtime: Arc<ClientRuntime>,
     event_rx: mpsc::Receiver<ClientTransportEvent>,
@@ -1322,6 +2324,7 @@ async fn run_client_transport(
         response_rx,
         last_ping_sent_at: now.checked_sub(Duration::from_secs(1)).unwrap_or(now),
         active_poll_until: now,
+        data_since_poll: 0,
         diag_started: now,
         next_diag_at: now + Duration::from_secs(1),
     };
@@ -1334,7 +2337,7 @@ impl ClientTransport {
             self.drain_events(&mut event_rx).await?;
             self.flush_pending_outputs();
             self.cleanup_drained_streams().await;
-            self.emit_diag_if_due();
+            self.emit_diag_if_due().await;
             self.fill_outbound_window().await?;
 
             tokio::select! {
@@ -1458,7 +2461,7 @@ impl ClientTransport {
         }
     }
 
-    fn emit_diag_if_due(&mut self) {
+    async fn emit_diag_if_due(&mut self) {
         let Some(diag) = &self.runtime.diag else {
             return;
         };
@@ -1476,32 +2479,106 @@ impl ClientTransport {
             .values()
             .map(|stream| stream.downlink.pending_len())
             .sum::<usize>();
-        eprintln!(
-            "{{\"kind\":\"client_transport_diag\",\"conn_id\":{},\"elapsed_ms\":{},\"streams\":{},\"outstanding\":{},\"downlink_pending\":{},\"queries_sent\":{},\"queries_ok\":{},\"queries_failed\":{},\"query_wire_bytes\":{},\"response_wire_bytes\":{},\"data_bytes_received\":{},\"data_frames_received\":{},\"open_packets_sent\":{},\"data_packets_sent\":{},\"ping_packets_sent\":{},\"qname_too_long_splits\":{},\"tcp_fallbacks\":{}}}",
-            self.conn_id,
-            self.diag_started.elapsed().as_millis(),
-            pending_streams,
-            self.outstanding.len(),
-            downlink_pending,
-            diag.queries_sent.load(Ordering::Relaxed),
-            diag.queries_ok.load(Ordering::Relaxed),
-            diag.queries_failed.load(Ordering::Relaxed),
-            diag.query_wire_bytes.load(Ordering::Relaxed),
-            diag.response_wire_bytes.load(Ordering::Relaxed),
-            diag.data_bytes_received.load(Ordering::Relaxed),
-            diag.data_frames_received.load(Ordering::Relaxed),
-            diag.open_packets_sent.load(Ordering::Relaxed),
-            diag.data_packets_sent.load(Ordering::Relaxed),
-            diag.ping_packets_sent.load(Ordering::Relaxed),
-            diag.qname_too_long_splits.load(Ordering::Relaxed),
-            diag.tcp_fallbacks.load(Ordering::Relaxed),
-        );
+        let mut resolver_snapshots = Vec::with_capacity(self.runtime.config.resolvers.len());
+        for (index, resolver) in self.runtime.config.resolvers.iter().enumerate() {
+            let health = self.runtime.resolver_health[index].lock().await;
+            let resolver_diag = &diag.resolver[index];
+            let blocked_ms = health
+                .blocked_until
+                .and_then(|until| (until > now).then_some(until.duration_since(now).as_millis()))
+                .unwrap_or(0) as u64;
+            let prefer_tcp_ms = health
+                .prefer_tcp_until
+                .and_then(|until| (until > now).then_some(until.duration_since(now).as_millis()))
+                .unwrap_or(0) as u64;
+            resolver_snapshots.push(serde_json::json!({
+                "index": index,
+                "resolver": resolver.to_string(),
+                "cwnd": health.cwnd,
+                "in_flight": health.in_flight,
+                "failures": health.failures,
+                "loss_ewma_ppm": health.loss_ewma_ppm,
+                "max_response_bytes": health.max_response_bytes,
+                "goodput_ewma_Bps": health.goodput_ewma,
+                "pacing_ms": health.pacing_interval.as_millis() as u64,
+                "srtt_ms": health.srtt.map(|duration| duration.as_millis() as u64),
+                "rttvar_ms": health.rttvar.as_millis() as u64,
+                "timeout_ms": health.timeout.as_millis() as u64,
+                "blocked_ms": blocked_ms,
+                "prefer_tcp_ms": prefer_tcp_ms,
+                "sent": resolver_diag.sent.load(Ordering::Relaxed),
+                "ok": resolver_diag.ok.load(Ordering::Relaxed),
+                "failed": resolver_diag.failed.load(Ordering::Relaxed),
+                "control_sent": resolver_diag.control_sent.load(Ordering::Relaxed),
+                "data_sent": resolver_diag.data_sent.load(Ordering::Relaxed),
+                "poll_sent": resolver_diag.poll_sent.load(Ordering::Relaxed),
+                "query_wire_bytes": resolver_diag.query_wire_bytes.load(Ordering::Relaxed),
+                "response_wire_bytes": resolver_diag.response_wire_bytes.load(Ordering::Relaxed),
+                "useful_response_bytes": resolver_diag.useful_response_bytes.load(Ordering::Relaxed),
+                "elapsed_us_sum": resolver_diag.elapsed_us_sum.load(Ordering::Relaxed),
+                "elapsed_us_max": resolver_diag.elapsed_us_max.load(Ordering::Relaxed),
+                "udp_ok": resolver_diag.udp_ok.load(Ordering::Relaxed),
+                "tcp_preferred_ok": resolver_diag.tcp_preferred_ok.load(Ordering::Relaxed),
+                "tcp_truncation_ok": resolver_diag.tcp_truncation_ok.load(Ordering::Relaxed),
+                "udp_after_tcp_error_ok": resolver_diag.udp_after_tcp_error_ok.load(Ordering::Relaxed),
+                "tcp_proxy_ok": resolver_diag.tcp_proxy_ok.load(Ordering::Relaxed),
+                "truncated": resolver_diag.truncated.load(Ordering::Relaxed),
+            }));
+        }
+        let payload = serde_json::json!({
+            "kind": "client_transport_diag",
+            "conn_id": self.conn_id,
+            "elapsed_ms": self.diag_started.elapsed().as_millis() as u64,
+            "streams": pending_streams,
+            "outstanding": self.outstanding.len(),
+            "downlink_pending": downlink_pending,
+            "queries_sent": diag.queries_sent.load(Ordering::Relaxed),
+            "queries_ok": diag.queries_ok.load(Ordering::Relaxed),
+            "queries_failed": diag.queries_failed.load(Ordering::Relaxed),
+            "query_wire_bytes": diag.query_wire_bytes.load(Ordering::Relaxed),
+            "request_packet_body_bytes": diag.request_packet_body_bytes.load(Ordering::Relaxed),
+            "request_envelope_bytes": diag.request_envelope_bytes.load(Ordering::Relaxed),
+            "request_qname_chars": diag.request_qname_chars.load(Ordering::Relaxed),
+            "response_wire_bytes": diag.response_wire_bytes.load(Ordering::Relaxed),
+            "response_useful_bytes": diag.response_useful_bytes.load(Ordering::Relaxed),
+            "data_bytes_received": diag.data_bytes_received.load(Ordering::Relaxed),
+            "data_frames_received": diag.data_frames_received.load(Ordering::Relaxed),
+            "upload_data_bytes_sent": diag.upload_data_bytes_sent.load(Ordering::Relaxed),
+            "upload_data_frames_sent": diag.upload_data_frames_sent.load(Ordering::Relaxed),
+            "upload_new_bytes_sent": diag.upload_new_bytes_sent.load(Ordering::Relaxed),
+            "upload_repair_bytes_sent": diag.upload_repair_bytes_sent.load(Ordering::Relaxed),
+            "upload_new_packets_sent": diag.upload_new_packets_sent.load(Ordering::Relaxed),
+            "upload_repair_packets_sent": diag.upload_repair_packets_sent.load(Ordering::Relaxed),
+            "upload_fin_packets_sent": diag.upload_fin_packets_sent.load(Ordering::Relaxed),
+            "stream_ack_frames_sent": diag.stream_ack_frames_sent.load(Ordering::Relaxed),
+            "packet_ack_ranges_sent": diag.packet_ack_ranges_sent.load(Ordering::Relaxed),
+            "open_packets_sent": diag.open_packets_sent.load(Ordering::Relaxed),
+            "data_packets_sent": diag.data_packets_sent.load(Ordering::Relaxed),
+            "ping_packets_sent": diag.ping_packets_sent.load(Ordering::Relaxed),
+            "ping_responses_ok": diag.ping_responses_ok.load(Ordering::Relaxed),
+            "ping_responses_with_data": diag.ping_responses_with_data.load(Ordering::Relaxed),
+            "ping_response_data_bytes": diag.ping_response_data_bytes.load(Ordering::Relaxed),
+            "data_responses_ok": diag.data_responses_ok.load(Ordering::Relaxed),
+            "data_response_data_bytes": diag.data_response_data_bytes.load(Ordering::Relaxed),
+            "qname_too_long_splits": diag.qname_too_long_splits.load(Ordering::Relaxed),
+            "tcp_fallbacks": diag.tcp_fallbacks.load(Ordering::Relaxed),
+            "fill_stop_no_kind": diag.fill_stop_no_kind.load(Ordering::Relaxed),
+            "fill_stop_no_resolver_control": diag.fill_stop_no_resolver_control.load(Ordering::Relaxed),
+            "fill_stop_no_resolver_data": diag.fill_stop_no_resolver_data.load(Ordering::Relaxed),
+            "fill_stop_no_resolver_poll": diag.fill_stop_no_resolver_poll.load(Ordering::Relaxed),
+            "fill_stop_ping_slot": diag.fill_stop_ping_slot.load(Ordering::Relaxed),
+            "resolvers": resolver_snapshots,
+        });
+        eprintln!("{payload}");
         self.next_diag_at = now + Duration::from_secs(1);
     }
 
     async fn fill_outbound_window(&mut self) -> Result<()> {
         while self.outstanding.len() < CLIENT_INFLIGHT_WINDOW {
             let Some(kind) = self.next_send_kind() else {
+                if let Some(diag) = &self.runtime.diag {
+                    diag.fill_stop_no_kind.fetch_add(1, Ordering::Relaxed);
+                }
                 break;
             };
             let class = mux_send_class(&kind);
@@ -1510,6 +2587,19 @@ impl ClientTransport {
                 .pick_resolver(&mut self.resolver_cursor, class)
                 .await
             else {
+                if let Some(diag) = &self.runtime.diag {
+                    match class {
+                        ClientSendClass::Control => diag
+                            .fill_stop_no_resolver_control
+                            .fetch_add(1, Ordering::Relaxed),
+                        ClientSendClass::Data => diag
+                            .fill_stop_no_resolver_data
+                            .fetch_add(1, Ordering::Relaxed),
+                        ClientSendClass::Poll => diag
+                            .fill_stop_no_resolver_poll
+                            .fetch_add(1, Ordering::Relaxed),
+                    };
+                }
                 break;
             };
 
@@ -1537,6 +2627,22 @@ impl ClientTransport {
                 &mut request,
                 sent.kind,
             )?;
+            match &sent.kind {
+                MuxSentKind::Open {
+                    first_data: Some(_),
+                    ..
+                }
+                | MuxSentKind::Data { .. } => {
+                    self.data_since_poll = self.data_since_poll.saturating_add(1);
+                }
+                MuxSentKind::Ping => {
+                    self.data_since_poll = 0;
+                }
+                MuxSentKind::Open {
+                    first_data: None, ..
+                }
+                | MuxSentKind::Close { .. } => {}
+            }
             sent.stream_acks = stream_acks_in_request(&request);
             let is_poll = matches!(mux_send_class(&sent.kind), ClientSendClass::Poll);
             let ping_slot = if is_poll {
@@ -1551,6 +2657,9 @@ impl ClientTransport {
                         Some(permit)
                     }
                     Err(_) => {
+                        if let Some(diag) = &self.runtime.diag {
+                            diag.fill_stop_ping_slot.fetch_add(1, Ordering::Relaxed);
+                        }
                         self.runtime.release_resolver(path.resolver_index).await;
                         break;
                     }
@@ -1562,13 +2671,16 @@ impl ClientTransport {
             match &sent.kind {
                 MuxSentKind::Open {
                     stream_id,
-                    first_data: _,
+                    first_data,
                 } => {
                     if let Some(stream) = self.streams.get_mut(stream_id) {
                         stream.open_in_flight = true;
                     }
                     if let Some(diag) = &self.runtime.diag {
                         diag.open_packets_sent.fetch_add(1, Ordering::Relaxed);
+                        if let Some(slice) = first_data {
+                            count_upload_slice_diag(diag, slice);
+                        }
                     }
                 }
                 MuxSentKind::Data { stream_id, slice } => {
@@ -1577,6 +2689,7 @@ impl ClientTransport {
                     }
                     if let Some(diag) = &self.runtime.diag {
                         diag.data_packets_sent.fetch_add(1, Ordering::Relaxed);
+                        count_upload_slice_diag(diag, slice);
                     }
                 }
                 MuxSentKind::Close { stream_id } => {
@@ -1601,6 +2714,7 @@ impl ClientTransport {
                     &runtime_for_query,
                     Some(path.resolver_index),
                     path.resolver,
+                    Some(class),
                     &request,
                     path.timeout,
                 )
@@ -1619,6 +2733,57 @@ impl ClientTransport {
                     .as_ref()
                     .map(|outcome| packet_useful_data_bytes(&outcome.packet))
                     .unwrap_or(0);
+                if let Some(diag) = &runtime_for_query.diag {
+                    diag.response_useful_bytes
+                        .fetch_add(useful_bytes as u64, Ordering::Relaxed);
+                    if let Some(resolver_diag) = diag.resolver.get(path.resolver_index) {
+                        if result.is_ok() {
+                            resolver_diag.ok.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            resolver_diag.failed.fetch_add(1, Ordering::Relaxed);
+                        }
+                        resolver_diag
+                            .response_wire_bytes
+                            .fetch_add(response_wire_bytes as u64, Ordering::Relaxed);
+                        resolver_diag
+                            .useful_response_bytes
+                            .fetch_add(useful_bytes as u64, Ordering::Relaxed);
+                        let elapsed_us = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+                        resolver_diag
+                            .elapsed_us_sum
+                            .fetch_add(elapsed_us, Ordering::Relaxed);
+                        resolver_diag
+                            .elapsed_us_max
+                            .fetch_max(elapsed_us, Ordering::Relaxed);
+                        if truncated {
+                            resolver_diag.truncated.fetch_add(1, Ordering::Relaxed);
+                        }
+                        match transport {
+                            Some(DnsTransportOutcome::Udp) => {
+                                resolver_diag.udp_ok.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Some(DnsTransportOutcome::TcpPreferred) => {
+                                resolver_diag
+                                    .tcp_preferred_ok
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            Some(DnsTransportOutcome::TcpFallbackAfterTruncation) => {
+                                resolver_diag
+                                    .tcp_truncation_ok
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            Some(DnsTransportOutcome::UdpAfterPreferredTcpError) => {
+                                resolver_diag
+                                    .udp_after_tcp_error_ok
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            Some(DnsTransportOutcome::TcpProxy) => {
+                                resolver_diag.tcp_proxy_ok.fetch_add(1, Ordering::Relaxed);
+                            }
+                            None => {}
+                        }
+                    }
+                }
                 let request_too_large = result
                     .as_ref()
                     .err()
@@ -1741,20 +2906,44 @@ impl ClientTransport {
                 first_data,
             });
         }
+        let now = Instant::now();
+        if self.poll_should_preempt_data(now) {
+            return Some(MuxSentKind::Ping);
+        }
         if let Some((stream_id, slice)) = self.choose_stream_for_data() {
             return Some(MuxSentKind::Data { stream_id, slice });
         }
-        let now = Instant::now();
         let ping_inflight = self
             .outstanding
             .values()
             .filter(|sent| matches!(sent.kind, MuxSentKind::Ping))
             .count();
-        let can_poll = now
-            .checked_duration_since(self.last_ping_sent_at)
-            .map(|elapsed| elapsed >= self.poll_interval(now))
-            .unwrap_or(true);
+        let poll_demand = self.streams.values().any(|stream| stream.wants_poll(now));
+        let can_poll = poll_demand
+            || now
+                .checked_duration_since(self.last_ping_sent_at)
+                .map(|elapsed| elapsed >= self.poll_interval(now))
+                .unwrap_or(true);
         (can_poll && ping_inflight < self.ping_inflight_limit(now)).then_some(MuxSentKind::Ping)
+    }
+
+    fn poll_should_preempt_data(&self, now: Instant) -> bool {
+        if self.data_since_poll < CLIENT_ACTIVE_POLL_DATA_BUDGET {
+            return false;
+        }
+        if !self.streams.values().any(|stream| stream.wants_poll(now)) {
+            return false;
+        }
+        let ping_inflight = self
+            .outstanding
+            .values()
+            .filter(|sent| matches!(sent.kind, MuxSentKind::Ping))
+            .count();
+        ping_inflight < self.ping_inflight_limit(now)
+            && now
+                .checked_duration_since(self.last_ping_sent_at)
+                .map(|elapsed| elapsed >= CLIENT_ACTIVE_POLL_INTERVAL)
+                .unwrap_or(true)
     }
 
     fn choose_stream_for_open(&mut self) -> Option<u64> {
@@ -1901,6 +3090,7 @@ impl ClientTransport {
         };
         match result.result {
             Ok(response) => {
+                let response_useful_bytes = packet_useful_data_bytes(&response);
                 if response.conn_id != self.conn_id {
                     if let Some(diag) = &self.runtime.diag {
                         diag.queries_failed.fetch_add(1, Ordering::Relaxed);
@@ -1927,6 +3117,23 @@ impl ClientTransport {
                     diag.queries_ok.fetch_add(1, Ordering::Relaxed);
                     diag.response_wire_bytes
                         .fetch_add(result.response_wire_bytes as u64, Ordering::Relaxed);
+                    match &sent.kind {
+                        MuxSentKind::Ping => {
+                            diag.ping_responses_ok.fetch_add(1, Ordering::Relaxed);
+                            diag.ping_response_data_bytes
+                                .fetch_add(response_useful_bytes as u64, Ordering::Relaxed);
+                            if response_useful_bytes > 0 {
+                                diag.ping_responses_with_data
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        MuxSentKind::Data { .. } => {
+                            diag.data_responses_ok.fetch_add(1, Ordering::Relaxed);
+                            diag.data_response_data_bytes
+                                .fetch_add(response_useful_bytes as u64, Ordering::Relaxed);
+                        }
+                        MuxSentKind::Open { .. } | MuxSentKind::Close { .. } => {}
+                    }
                 }
                 let acked = ack_ranges_contain(&response.ack_ranges, result.packet_no);
                 if acked {
@@ -2100,6 +3307,7 @@ async fn send_dns_packet(
     runtime: &ClientRuntime,
     resolver_index: Option<usize>,
     resolver: SocketAddr,
+    class: Option<ClientSendClass>,
     packet: &Packet,
     query_timeout: Duration,
 ) -> Result<DnsPacketOutcome> {
@@ -2112,6 +3320,39 @@ async fn send_dns_packet(
         diag.queries_sent.fetch_add(1, Ordering::Relaxed);
         diag.query_wire_bytes
             .fetch_add(query.len() as u64, Ordering::Relaxed);
+        diag.request_packet_body_bytes
+            .fetch_add(packet.encoded_len() as u64, Ordering::Relaxed);
+        diag.request_envelope_bytes
+            .fetch_add(envelope.len() as u64, Ordering::Relaxed);
+        diag.request_qname_chars
+            .fetch_add(qname.len() as u64, Ordering::Relaxed);
+        let frame_stats = request_frame_diag(packet);
+        diag.upload_data_bytes_sent
+            .fetch_add(frame_stats.data_bytes as u64, Ordering::Relaxed);
+        diag.upload_data_frames_sent
+            .fetch_add(frame_stats.data_frames as u64, Ordering::Relaxed);
+        diag.stream_ack_frames_sent
+            .fetch_add(frame_stats.stream_ack_frames as u64, Ordering::Relaxed);
+        diag.packet_ack_ranges_sent
+            .fetch_add(packet.ack_ranges.len() as u64, Ordering::Relaxed);
+        if let Some(index) = resolver_index.and_then(|index| diag.resolver.get(index)) {
+            index.sent.fetch_add(1, Ordering::Relaxed);
+            index
+                .query_wire_bytes
+                .fetch_add(query.len() as u64, Ordering::Relaxed);
+            match class {
+                Some(ClientSendClass::Control) => {
+                    index.control_sent.fetch_add(1, Ordering::Relaxed);
+                }
+                Some(ClientSendClass::Data) => {
+                    index.data_sent.fetch_add(1, Ordering::Relaxed);
+                }
+                Some(ClientSendClass::Poll) => {
+                    index.poll_sent.fetch_add(1, Ordering::Relaxed);
+                }
+                None => {}
+            }
+        }
     }
     let prefer_tcp = match resolver_index {
         Some(index) => runtime.prefer_tcp_for_resolver(index).await,
@@ -2156,20 +3397,7 @@ async fn send_dns_packet(
         {
             Ok(response) => response,
             Err(udp_error) => {
-                if let Some(diag) = &runtime.diag {
-                    diag.tcp_fallbacks.fetch_add(1, Ordering::Relaxed);
-                }
-                eprintln!("resolver {resolver} UDP failed ({udp_error:#}); retrying over TCP");
-                let tcp_response = runtime
-                    .tcp_fallback_pool
-                    .query(resolver, &query, query_timeout.max(PATH_RTO_MIN_TCP))
-                    .await?;
-                return Ok(DnsPacketOutcome {
-                    packet: open_dns_response(&config.access_key, &tcp_response)?,
-                    response_wire_bytes: tcp_response.len(),
-                    truncated: false,
-                    transport: DnsTransportOutcome::TcpFallbackAfterUdpError,
-                });
+                return Err(udp_error.context("UDP DNS response failed"));
             }
         };
         match open_dns_response(&config.access_key, &response) {
@@ -2215,7 +3443,6 @@ async fn send_dns_packet(
 enum DnsTransportOutcome {
     Udp,
     TcpPreferred,
-    TcpFallbackAfterUdpError,
     TcpFallbackAfterTruncation,
     UdpAfterPreferredTcpError,
     TcpProxy,
@@ -2226,6 +3453,51 @@ struct DnsPacketOutcome {
     response_wire_bytes: usize,
     truncated: bool,
     transport: DnsTransportOutcome,
+}
+
+#[derive(Default)]
+struct RequestFrameDiag {
+    data_frames: usize,
+    data_bytes: usize,
+    stream_ack_frames: usize,
+}
+
+fn request_frame_diag(packet: &Packet) -> RequestFrameDiag {
+    packet
+        .frames
+        .iter()
+        .fold(RequestFrameDiag::default(), |mut diag, frame| {
+            match frame {
+                Frame::Data { bytes, .. } => {
+                    diag.data_frames += 1;
+                    diag.data_bytes += bytes.len();
+                }
+                Frame::StreamAck { .. } => {
+                    diag.stream_ack_frames += 1;
+                }
+                _ => {}
+            }
+            diag
+        })
+}
+
+fn count_upload_slice_diag(diag: &ClientDiag, slice: &SendBufferSlice) {
+    if slice.fin {
+        diag.upload_fin_packets_sent.fetch_add(1, Ordering::Relaxed);
+    }
+    match slice.mode {
+        SendBufferMode::New => {
+            diag.upload_new_packets_sent.fetch_add(1, Ordering::Relaxed);
+            diag.upload_new_bytes_sent
+                .fetch_add(slice.bytes.len() as u64, Ordering::Relaxed);
+        }
+        SendBufferMode::Repair => {
+            diag.upload_repair_packets_sent
+                .fetch_add(1, Ordering::Relaxed);
+            diag.upload_repair_bytes_sent
+                .fetch_add(slice.bytes.len() as u64, Ordering::Relaxed);
+        }
+    }
 }
 
 fn packet_useful_data_bytes(packet: &Packet) -> usize {
@@ -2602,8 +3874,12 @@ where
     let mut message = Vec::with_capacity(query.len() + 2);
     message.extend_from_slice(&(query.len() as u16).to_be_bytes());
     message.extend_from_slice(query);
-    writer.write_all(&message).await?;
-    writer.flush().await?;
+    timeout(DNS_TCP_WRITE_TIMEOUT, async {
+        writer.write_all(&message).await?;
+        writer.flush().await
+    })
+    .await
+    .context("DNS-over-TCP write timed out")??;
     Ok(())
 }
 
@@ -2628,10 +3904,14 @@ where
     R: AsyncRead + Unpin,
 {
     let mut len_buf = [0u8; 2];
-    reader.read_exact(&mut len_buf).await?;
+    timeout(SERVER_TCP_READ_TIMEOUT, reader.read_exact(&mut len_buf))
+        .await
+        .context("TCP DNS length timed out")??;
     let len = u16::from_be_bytes(len_buf) as usize;
     let mut response = vec![0u8; len];
-    reader.read_exact(&mut response).await?;
+    timeout(SERVER_TCP_READ_TIMEOUT, reader.read_exact(&mut response))
+        .await
+        .context("TCP DNS message timed out")??;
     Ok(response)
 }
 
@@ -3275,18 +4555,41 @@ async fn run_server_socks5_direct_session(
 
     let (mut upstream_reader, mut upstream_writer) = upstream.into_split();
     let upload_task = tokio::spawn(async move {
+        let mut pending = Vec::with_capacity(SERVER_UPLOAD_COALESCE_BYTES);
         if !upload.pending.is_empty() {
-            let pending = upload.take_pending();
+            pending.extend_from_slice(&upload.take_pending());
+        }
+        loop {
+            if pending.is_empty() {
+                let Some(chunk) = upload.next_chunk().await else {
+                    break;
+                };
+                pending.extend_from_slice(&chunk);
+            }
+
+            let coalesce_delay = tokio::time::sleep(SERVER_UPLOAD_COALESCE_DELAY);
+            tokio::pin!(coalesce_delay);
+            loop {
+                if upload.is_finished() || pending.len() >= SERVER_UPLOAD_COALESCE_BYTES {
+                    break;
+                }
+                tokio::select! {
+                    _ = &mut coalesce_delay => break,
+                    maybe_chunk = upload.next_chunk() => {
+                        match maybe_chunk {
+                            Some(chunk) => pending.extend_from_slice(&chunk),
+                            None => break,
+                        }
+                    }
+                }
+            }
+
             if !pending.is_empty() {
                 upstream_writer.write_all(&pending).await?;
+                pending.clear();
             }
-        }
-        while !upload.is_finished() {
-            let Some(chunk) = upload.next_chunk().await else {
+            if upload.is_finished() {
                 break;
-            };
-            if !chunk.is_empty() {
-                upstream_writer.write_all(&chunk).await?;
             }
         }
         upstream_writer.shutdown().await.ok();
@@ -3458,7 +4761,7 @@ async fn handle_dns_query(state: Arc<ServerState>, query_bytes: &[u8]) -> Result
     }
 
     let mut response = Packet::new(packet.conn_id, connection.next_packet_no().await?);
-    response.max_response_bytes = packet.max_response_bytes;
+    response.max_response_bytes = query.udp_payload_size.unwrap_or(packet.max_response_bytes);
     let (ack_ranges, duplicate_client_packet) =
         connection.ack_ranges_after_insert(packet.packet_no).await;
     response.ack_ranges = ack_ranges;
@@ -3852,13 +5155,13 @@ fn next_download_slice_that_fits(
 
 fn response_frame_fits(
     query: &trajectory_core::dns::DnsQuery,
-    key: &ClientAccessKey,
+    _key: &ClientAccessKey,
     response: &Packet,
     frame: &Frame,
 ) -> Result<bool> {
-    let mut candidate = response.clone();
-    candidate.frames.push(frame.clone());
-    response_packet_fits(query, key, &candidate)
+    let budget = dns_response_budget(response.max_response_bytes);
+    let envelope_len = sealed_packet_len_with_extra_frame(response, frame)?;
+    Ok(txt_response_wire_len(query, envelope_len) <= budget)
 }
 
 fn response_packet_fits(
@@ -3866,20 +5169,19 @@ fn response_packet_fits(
     _key: &ClientAccessKey,
     response: &Packet,
 ) -> Result<bool> {
-    let advertised_budget = response.max_response_bytes.max(512) as usize;
+    let budget = dns_response_budget(response.max_response_bytes);
+    let envelope_len = sealed_packet_len(response)?;
+    Ok(txt_response_wire_len(query, envelope_len) <= budget)
+}
+
+fn dns_response_budget(max_response_bytes: u16) -> usize {
+    let advertised_budget = max_response_bytes.max(512) as usize;
     let safety_margin = if advertised_budget <= 512 {
         0
     } else {
         DNS_RESPONSE_SAFETY_MARGIN
     };
-    let budget = advertised_budget.saturating_sub(safety_margin).max(256);
-    let envelope_len = sealed_packet_len(response);
-    Ok(txt_response_wire_len(query, envelope_len) <= budget)
-}
-
-fn sealed_packet_len(packet: &Packet) -> usize {
-    const SEALED_HEADER_AND_TAG_LEN: usize = 4 + 1 + 24 + 16;
-    SEALED_HEADER_AND_TAG_LEN.saturating_add(packet.encoded_len())
+    advertised_budget.saturating_sub(safety_margin).max(256)
 }
 
 fn ensure_response_packet_fits(
@@ -4222,12 +5524,16 @@ mod tests {
     fn test_client_config(tcp_path: bool, dns_max_payload: u16) -> ClientConfig {
         ClientConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
+            http_listen: None,
             resolvers: vec!["192.0.2.1:53".parse().unwrap()],
             domain: "t.example.test".to_string(),
             access_key: ClientAccessKey::generate(),
             resolver_socks_proxy: tcp_path.then(|| "127.0.0.1:11092".parse().unwrap()),
             poll_interval: Duration::from_millis(5),
             dns_max_payload,
+            admission_report: None,
+            resolver_cohort_size: None,
+            resolver_admission_min: 1,
         }
     }
 
@@ -4286,6 +5592,27 @@ mod tests {
             RESOLVER_TARGET_ADMITTED_UDP + 1,
             false
         ));
+    }
+
+    #[test]
+    fn admission_thresholds_are_stricter_for_proxy_paths() {
+        assert!(admission_challenges(true).len() > admission_challenges(false).len());
+        assert!(admission_max_elapsed(true) > admission_max_elapsed(false));
+        assert!(admission_min_response_bps(false) > admission_min_response_bps(true));
+        assert!(resolver_admission_probe_timeout(true) > resolver_admission_timeout(true));
+    }
+
+    #[test]
+    fn response_bps_handles_zero_elapsed() {
+        assert_eq!(response_bps(512, Duration::ZERO), 512);
+        assert_eq!(response_bps(1000, Duration::from_secs(1)), 1000);
+    }
+
+    #[test]
+    fn admission_deadline_scales_with_candidate_waves() {
+        let deadline = resolver_admission_deadline(588, 32, Duration::from_secs(20));
+        assert!(deadline > RESOLVER_ADMISSION_DEADLINE);
+        assert!(deadline <= Duration::from_secs(10 * 60));
     }
 
     #[tokio::test]
@@ -4407,7 +5734,7 @@ mod tests {
         let response = build_txt_response(&query, &envelope, 0).unwrap();
 
         assert_eq!(
-            txt_response_wire_len(&query, sealed_packet_len(&packet)),
+            txt_response_wire_len(&query, sealed_packet_len(&packet).unwrap()),
             response.len()
         );
     }

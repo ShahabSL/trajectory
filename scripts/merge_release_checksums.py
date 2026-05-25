@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Merge per-target release checksum manifests into one sorted file."""
+"""Create one checksum manifest for all final release assets."""
 
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import hashlib
 from pathlib import Path
 
 
@@ -22,20 +24,59 @@ def main() -> None:
     args = parse_args()
     input_dir = Path(args.input_dir)
     output = Path(args.output)
-    manifests = sorted(input_dir.glob("trajectory-v*-SHA256SUMS.txt"))
-    if not manifests:
-        raise SystemExit(f"no checksum manifests found in {input_dir}")
+    output.parent.mkdir(parents=True, exist_ok=True)
 
-    lines: list[str] = []
+    checksums: dict[str, str] = {}
+    manifests = sorted(input_dir.glob("trajectory-v*-SHA256SUMS.txt"))
     for manifest in manifests:
+        if manifest.resolve() == output.resolve():
+            continue
         for line in manifest.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
-            if stripped:
-                lines.append(stripped)
+            if not stripped:
+                continue
+            digest, filename = stripped.split(None, 1)
+            checksums[Path(filename).name] = digest
 
-    unique_lines = sorted(set(lines), key=lambda item: item.split(None, 1)[1])
-    output.write_text("\n".join(unique_lines) + "\n", encoding="utf-8")
-    print(f"merged {len(manifests)} manifests into {output}")
+    for asset in sorted(input_dir.rglob("*")):
+        if not asset.is_file() or asset.resolve() == output.resolve():
+            continue
+        if asset.name.endswith("SHA256SUMS.txt"):
+            continue
+        if not is_release_asset(asset.name):
+            continue
+        checksums[asset.name] = sha256(asset)
+
+    if not checksums:
+        raise SystemExit(f"no release assets found in {input_dir}")
+
+    lines = [f"{digest}  {name}" for name, digest in sorted(checksums.items())]
+    output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"wrote {len(lines)} checksums to {output}")
+
+
+def is_release_asset(name: str) -> bool:
+    patterns = [
+        "trajectory-v*.tar.gz",
+        "trajectory-v*.zip",
+        "*.deb",
+        "*.rpm",
+        "*.AppImage",
+        "*.msi",
+        "*.exe",
+        "*.dmg",
+        "*.app.tar.gz",
+        "*.apk",
+    ]
+    return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 if __name__ == "__main__":

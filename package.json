@@ -1,13 +1,17 @@
 {
   "name": "trajectory",
   "version": "1.0.0",
-  "description": "Trajectory is a restricted-license Rust DNS transport with:",
-  "main": "index.js",
+  "description": "Restricted-license Rust DNS transport",
+  "private": true,
   "directories": {
     "doc": "docs"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "client:desktop:dev": "npm --prefix clients/desktop run dev",
+    "client:desktop:build": "npm --prefix clients/desktop run build",
+    "client:desktop:tauri": "npm --prefix clients/desktop run tauri",
+    "client:desktop:tauri:build": "npm --prefix clients/desktop run tauri:build",
+    "client:desktop:tauri:check": "npm --prefix clients/desktop run tauri:check"
   },
   "repository": {
     "type": "git",
@@ -15,7 +19,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "SEE LICENSE IN LICENSE",
   "bugs": {
     "url": "https://github.com/ShahabSL/trajectory/issues"
   },

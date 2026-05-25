@@ -15,6 +15,7 @@ pub struct DnsQuery {
     pub qname: String,
     pub qtype: u16,
     pub qclass: u16,
+    pub udp_payload_size: Option<u16>,
     question: Vec<u8>,
 }
 
@@ -32,10 +33,11 @@ pub fn envelope_to_qname(envelope: &[u8], domain: &str) -> Result<String> {
     let mut labels = Vec::new();
     let mut pos = 0;
     while pos < encoded.len() {
-        let end = (pos + 50).min(encoded.len());
+        let chunk_len = if pos == 0 { 62 } else { 63 };
+        let end = (pos + chunk_len).min(encoded.len());
         let chunk = &encoded[pos..end];
         if pos == 0 {
-            labels.push(format!("t-{chunk}"));
+            labels.push(format!("t{chunk}"));
         } else {
             labels.push(chunk.to_string());
         }
@@ -65,8 +67,8 @@ pub fn qname_to_envelope(qname: &str, domain: &str) -> Result<Vec<u8>> {
     {
         if index == 0 {
             let stripped = label
-                .strip_prefix("t-")
-                .context("tunnel label missing t- prefix")?;
+                .strip_prefix('t')
+                .context("tunnel label missing t prefix")?;
             encoded.push_str(stripped);
         } else {
             encoded.push_str(label);
@@ -106,6 +108,7 @@ pub fn parse_query(bytes: &[u8]) -> Result<DnsQuery> {
     }
     let id = u16::from_be_bytes(bytes[0..2].try_into().unwrap());
     let qdcount = u16::from_be_bytes(bytes[4..6].try_into().unwrap());
+    let arcount = u16::from_be_bytes(bytes[10..12].try_into().unwrap()) as usize;
     if qdcount == 0 {
         bail!("DNS query has no question");
     }
@@ -115,11 +118,43 @@ pub fn parse_query(bytes: &[u8]) -> Result<DnsQuery> {
     }
     let qtype = u16::from_be_bytes(bytes[after_name..after_name + 2].try_into().unwrap());
     let qclass = u16::from_be_bytes(bytes[after_name + 2..after_name + 4].try_into().unwrap());
+    let mut pos = after_name + 4;
+    let mut udp_payload_size = None;
+    for _ in 0..arcount {
+        let (_name, after_additional_name) = decode_name(bytes, pos)?;
+        if after_additional_name + 10 > bytes.len() {
+            bail!("DNS additional record truncated");
+        }
+        let rr_type = u16::from_be_bytes(
+            bytes[after_additional_name..after_additional_name + 2]
+                .try_into()
+                .unwrap(),
+        );
+        let rr_class = u16::from_be_bytes(
+            bytes[after_additional_name + 2..after_additional_name + 4]
+                .try_into()
+                .unwrap(),
+        );
+        let rdlen = u16::from_be_bytes(
+            bytes[after_additional_name + 8..after_additional_name + 10]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        pos = after_additional_name + 10;
+        if pos + rdlen > bytes.len() {
+            bail!("DNS additional rdata truncated");
+        }
+        if rr_type == TYPE_OPT {
+            udp_payload_size = Some(rr_class);
+        }
+        pos += rdlen;
+    }
     Ok(DnsQuery {
         id,
         qname,
         qtype,
         qclass,
+        udp_payload_size,
         question: bytes[12..after_name + 4].to_vec(),
     })
 }
@@ -363,17 +398,19 @@ mod tests {
     fn dns_txt_roundtrip() {
         let query_bytes = build_query(7, "t-aa.example.com", 1232).unwrap();
         let parsed = parse_query(&query_bytes).unwrap();
+        assert_eq!(parsed.udp_payload_size, Some(1232));
         let response = build_txt_response(&parsed, b"payload", 0).unwrap();
         assert_eq!(parse_txt_response(&response).unwrap(), b"payload");
     }
 
     #[test]
-    fn qname_uses_conservative_label_capacity() {
+    fn qname_uses_full_label_capacity() {
         let payload = vec![7u8; 96];
         let qname = envelope_to_qname(&payload, "tun.example.com").unwrap();
         let labels = qname.split('.').collect::<Vec<_>>();
 
-        assert_eq!(labels[0].len(), 52);
+        assert_eq!(labels[0].len(), 63);
+        assert_eq!(labels[1].len(), 63);
         assert!(labels.iter().all(|label| label.len() <= 63));
         assert_eq!(
             qname_to_envelope(&qname, "tun.example.com").unwrap(),

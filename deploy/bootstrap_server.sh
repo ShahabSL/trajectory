@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/ShahabSL/trajectory.git}"
 REPO_REF="${REPO_REF:-main}"
-TARGET_ADDRESS="127.0.0.1:1080"
+TARGET_ADDRESS="socks5-direct"
 DOMAIN=""
 CLIENT_LABEL="phone"
 DISABLE_SYSTEMD_RESOLVED="false"
@@ -18,10 +18,11 @@ Required:
   --domain <DOMAIN>                 Authoritative domain served by this host
 
 Optional:
-  --target-address <HOST:PORT>      Upstream SOCKS5 target (default: 127.0.0.1:1080)
+  --target-address <HOST:PORT|socks5-direct>
+                                    Server egress target (default: socks5-direct)
   --client-label <LABEL>            Initial client label (default: phone)
   --disable-systemd-resolved        Stop/disable systemd-resolved and free port 53
-  --install-hev                     Install and manage hev-socks5-server locally
+  --install-hev                     Reserved; not implemented by this bootstrap script
   --repo-url <URL>                  Git URL to clone (default: ShahabSL/trajectory)
   --repo-ref <REF>                  Git branch or tag to install (default: main)
   -h, --help                        Show this help

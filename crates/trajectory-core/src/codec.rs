@@ -2,18 +2,19 @@ use crate::auth::ClientAccessKey;
 use anyhow::{bail, Context, Result};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
-    XChaCha20Poly1305, XNonce,
+    ChaCha20Poly1305, Nonce,
 };
 use std::collections::HashMap;
 
-const MAGIC: &[u8; 4] = b"TRJ2";
-const VERSION: u8 = 1;
+const VERSION: u8 = 3;
 const MAX_ACK_RANGES: usize = 64;
 const MAX_STREAM_RANGES: usize = 64;
 const MAX_FRAMES: usize = 64;
 const MAX_FRAME_LEN: usize = 4096;
 const MAX_HOST_LEN: usize = 253;
-const SEALED_HEADER_LEN: usize = 4 + 1 + 24;
+const SEALED_FIXED_HEADER_LEN: usize = 4 + 8;
+const AEAD_TAG_LEN: usize = 16;
+const DEFAULT_MAX_RESPONSE_BYTES: u16 = 900;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Direction {
@@ -26,14 +27,6 @@ impl Direction {
         match self {
             Self::ClientToServer => 0,
             Self::ServerToClient => 1,
-        }
-    }
-
-    fn from_wire(value: u8) -> Result<Self> {
-        match value {
-            0 => Ok(Self::ClientToServer),
-            1 => Ok(Self::ServerToClient),
-            _ => bail!("invalid packet direction"),
         }
     }
 }
@@ -102,7 +95,7 @@ impl Packet {
         Self {
             conn_id,
             packet_no,
-            max_response_bytes: 900,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             stream_ack_offset: None,
             ack_ranges: Vec::new(),
             frames: Vec::new(),
@@ -110,9 +103,7 @@ impl Packet {
     }
 
     pub fn encoded_len(&self) -> usize {
-        encode_packet(self)
-            .map(|bytes| bytes.len())
-            .unwrap_or(usize::MAX)
+        encoded_packet_len(self).unwrap_or(usize::MAX)
     }
 }
 
@@ -122,29 +113,24 @@ pub fn seal_packet(
     packet: &Packet,
 ) -> Result<Vec<u8>> {
     let plaintext = encode_packet(packet)?;
-    let nonce = packet_nonce(direction, packet.conn_id, packet.packet_no);
-    let cipher = XChaCha20Poly1305::new_from_slice(&key.secret)
+    let header = sealed_header(key.client_id, packet.conn_id, packet.packet_no);
+    let nonce = packet_nonce(direction, packet.packet_no);
+    let packet_key = connection_packet_key(key, packet.conn_id);
+    let cipher = ChaCha20Poly1305::new_from_slice(&packet_key)
         .map_err(|_| anyhow::anyhow!("invalid AEAD key length"))?;
-
-    let mut aad = Vec::with_capacity(SEALED_HEADER_LEN);
-    put_u32(&mut aad, key.client_id);
-    aad.push(direction.wire());
-    aad.extend_from_slice(&nonce);
 
     let ciphertext = cipher
         .encrypt(
-            XNonce::from_slice(&nonce),
+            Nonce::from_slice(&nonce),
             Payload {
                 msg: &plaintext,
-                aad: &aad,
+                aad: &header,
             },
         )
         .map_err(|_| anyhow::anyhow!("packet encryption failed"))?;
 
-    let mut out = Vec::with_capacity(SEALED_HEADER_LEN + ciphertext.len());
-    put_u32(&mut out, key.client_id);
-    out.push(direction.wire());
-    out.extend_from_slice(&nonce);
+    let mut out = Vec::with_capacity(header.len() + ciphertext.len());
+    out.extend_from_slice(&header);
     out.extend_from_slice(&ciphertext);
     Ok(out)
 }
@@ -154,23 +140,22 @@ pub fn open_packet_with_key(
     expected_direction: Direction,
     envelope: &[u8],
 ) -> Result<Packet> {
-    let (client_id, plaintext) = open_sealed(envelope, |client_id| {
+    let opened = open_sealed(envelope, expected_direction, |client_id| {
         if client_id == key.client_id {
             Some(key)
         } else {
             None
         }
     })?;
-    if client_id != key.client_id {
+    if opened.client_id != key.client_id {
         bail!("response client id mismatch");
     }
-    let direction = envelope_direction(envelope)?;
-    if direction != expected_direction {
-        bail!("packet direction mismatch");
-    }
-    let packet = decode_packet(&plaintext)?;
-    verify_packet_nonce(envelope, expected_direction, &packet)?;
-    Ok(packet)
+    decode_packet(
+        &opened.plaintext,
+        opened.conn_id,
+        opened.packet_no,
+        DEFAULT_MAX_RESPONSE_BYTES,
+    )
 }
 
 pub fn open_packet_with_registry(
@@ -179,76 +164,142 @@ pub fn open_packet_with_registry(
     envelope: &[u8],
 ) -> Result<(ClientAccessKey, Packet)> {
     let mut found = None;
-    let (_, plaintext) = open_sealed(envelope, |client_id| {
+    let opened = open_sealed(envelope, expected_direction, |client_id| {
         let key = registry.get(&client_id)?;
         found = Some(key.clone());
         Some(key)
     })?;
-    let direction = envelope_direction(envelope)?;
-    if direction != expected_direction {
-        bail!("packet direction mismatch");
-    }
     let key = found.context("authorized key disappeared")?;
-    let packet = decode_packet(&plaintext)?;
-    verify_packet_nonce(envelope, expected_direction, &packet)?;
+    let packet = decode_packet(
+        &opened.plaintext,
+        opened.conn_id,
+        opened.packet_no,
+        DEFAULT_MAX_RESPONSE_BYTES,
+    )?;
     Ok((key, packet))
 }
 
-fn open_sealed<'a, F>(envelope: &[u8], key_for: F) -> Result<(u32, Vec<u8>)>
+struct OpenedSealed {
+    client_id: u32,
+    conn_id: u64,
+    packet_no: u64,
+    plaintext: Vec<u8>,
+}
+
+fn open_sealed<'a, F>(
+    envelope: &[u8],
+    expected_direction: Direction,
+    key_for: F,
+) -> Result<OpenedSealed>
 where
     F: FnOnce(u32) -> Option<&'a ClientAccessKey>,
 {
-    if envelope.len() < SEALED_HEADER_LEN + 16 {
-        bail!("sealed packet too short");
-    }
-    let client_id = u32::from_be_bytes(envelope[0..4].try_into().unwrap());
-    let _direction = Direction::from_wire(envelope[4])?;
-    let nonce: [u8; 24] = envelope[5..29].try_into().unwrap();
-    let ciphertext = &envelope[SEALED_HEADER_LEN..];
-    let key = key_for(client_id).context("unknown client id")?;
-    let cipher = XChaCha20Poly1305::new_from_slice(&key.secret)
+    let header = parse_sealed_header(envelope)?;
+    let ciphertext = &envelope[header.header_len..];
+    let key = key_for(header.client_id).context("unknown client id")?;
+    let packet_key = connection_packet_key(key, header.conn_id);
+    let cipher = ChaCha20Poly1305::new_from_slice(&packet_key)
         .map_err(|_| anyhow::anyhow!("invalid AEAD key length"))?;
+    let nonce = packet_nonce(expected_direction, header.packet_no);
 
     let plaintext = cipher
         .decrypt(
-            XNonce::from_slice(&nonce),
+            Nonce::from_slice(&nonce),
             Payload {
                 msg: ciphertext,
-                aad: &envelope[..SEALED_HEADER_LEN],
+                aad: &envelope[..header.header_len],
             },
         )
         .map_err(|_| anyhow::anyhow!("packet authentication failed"))?;
-    Ok((client_id, plaintext))
+    Ok(OpenedSealed {
+        client_id: header.client_id,
+        conn_id: header.conn_id,
+        packet_no: header.packet_no,
+        plaintext,
+    })
 }
 
-fn envelope_direction(envelope: &[u8]) -> Result<Direction> {
-    if envelope.len() < SEALED_HEADER_LEN {
-        bail!("sealed packet too short");
-    }
-    Direction::from_wire(envelope[4])
-}
-
-fn verify_packet_nonce(envelope: &[u8], direction: Direction, packet: &Packet) -> Result<()> {
-    if envelope.len() < SEALED_HEADER_LEN {
-        bail!("sealed packet too short");
-    }
-    let nonce: [u8; 24] = envelope[5..29].try_into().unwrap();
-    if nonce != packet_nonce(direction, packet.conn_id, packet.packet_no) {
-        bail!("packet nonce does not match packet fields");
-    }
-    Ok(())
-}
-
-fn packet_nonce(direction: Direction, conn_id: u64, packet_no: u64) -> [u8; 24] {
-    let mut nonce = [0u8; 24];
+fn packet_nonce(direction: Direction, packet_no: u64) -> [u8; 12] {
+    let mut nonce = [0u8; 12];
     nonce[0] = direction.wire();
-    nonce[1..9].copy_from_slice(&conn_id.to_be_bytes());
-    nonce[9..17].copy_from_slice(&packet_no.to_be_bytes());
-    nonce[17..24].copy_from_slice(b"trj2-v1");
+    nonce[4..12].copy_from_slice(&packet_no.to_be_bytes());
     nonce
 }
 
-pub fn encode_packet(packet: &Packet) -> Result<Vec<u8>> {
+fn sealed_header(client_id: u32, conn_id: u64, packet_no: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(sealed_header_len(packet_no));
+    put_u32(&mut out, client_id);
+    put_u64(&mut out, conn_id);
+    put_var_u64(&mut out, packet_no);
+    out
+}
+
+struct SealedHeader {
+    client_id: u32,
+    conn_id: u64,
+    packet_no: u64,
+    header_len: usize,
+}
+
+fn parse_sealed_header(envelope: &[u8]) -> Result<SealedHeader> {
+    if envelope.len() < SEALED_FIXED_HEADER_LEN + 1 + AEAD_TAG_LEN {
+        bail!("sealed packet too short");
+    }
+    let client_id = u32::from_be_bytes(envelope[0..4].try_into().unwrap());
+    let conn_id = u64::from_be_bytes(envelope[4..12].try_into().unwrap());
+    let mut packet_no = 0u64;
+    for index in 0..10 {
+        let pos = SEALED_FIXED_HEADER_LEN + index;
+        if pos >= envelope.len() {
+            bail!("sealed packet truncated");
+        }
+        let byte = envelope[pos];
+        if index == 9 && byte & 0xfe != 0 {
+            bail!("sealed packet number varint exceeds u64");
+        }
+        packet_no |= ((byte & 0x7f) as u64) << (index * 7);
+        if byte & 0x80 == 0 {
+            let header_len = pos + 1;
+            if envelope.len() < header_len + AEAD_TAG_LEN {
+                bail!("sealed packet too short");
+            }
+            return Ok(SealedHeader {
+                client_id,
+                conn_id,
+                packet_no,
+                header_len,
+            });
+        }
+    }
+    bail!("sealed packet number varint exceeds u64")
+}
+
+fn connection_packet_key(key: &ClientAccessKey, conn_id: u64) -> [u8; 32] {
+    let mut material = Vec::with_capacity(32);
+    material.extend_from_slice(b"trajectory-v3 packet key");
+    material.extend_from_slice(&conn_id.to_be_bytes());
+    *blake3::keyed_hash(&key.secret, &material).as_bytes()
+}
+
+pub fn sealed_packet_len(packet: &Packet) -> Result<usize> {
+    checked_add_len(
+        checked_add_len(sealed_header_len(packet.packet_no), AEAD_TAG_LEN)?,
+        encoded_packet_len(packet)?,
+    )
+}
+
+pub fn sealed_packet_len_with_extra_frame(packet: &Packet, frame: &Frame) -> Result<usize> {
+    checked_add_len(
+        checked_add_len(sealed_header_len(packet.packet_no), AEAD_TAG_LEN)?,
+        encoded_packet_len_with_extra_frame(packet, frame)?,
+    )
+}
+
+fn sealed_header_len(packet_no: u64) -> usize {
+    SEALED_FIXED_HEADER_LEN + var_len_u64(packet_no)
+}
+
+pub fn encoded_packet_len(packet: &Packet) -> Result<usize> {
     if packet.ack_ranges.len() > MAX_ACK_RANGES {
         bail!("too many ack ranges");
     }
@@ -256,27 +307,51 @@ pub fn encode_packet(packet: &Packet) -> Result<Vec<u8>> {
         bail!("too many frames");
     }
 
-    let mut out = Vec::with_capacity(128);
-    out.extend_from_slice(MAGIC);
+    let mut len = 1;
+    len = checked_add_len(len, 1)?;
+    if let Some(offset) = packet.stream_ack_offset {
+        len = checked_add_len(len, var_len_u64(offset))?;
+    }
+    len = checked_add_len(len, 1)?;
+    for range in &packet.ack_ranges {
+        if range.first > range.last {
+            bail!("invalid ack range");
+        }
+        len = checked_add_len(len, var_len_u64(range.first))?;
+        len = checked_add_len(len, var_len_u64(range.last - range.first))?;
+    }
+    len = checked_add_len(len, 1)?;
+    for frame in &packet.frames {
+        len = checked_add_len(len, frame_encoded_len(frame)?)?;
+    }
+    Ok(len)
+}
+
+pub fn encoded_packet_len_with_extra_frame(packet: &Packet, frame: &Frame) -> Result<usize> {
+    if packet.frames.len() >= MAX_FRAMES {
+        bail!("too many frames");
+    }
+    checked_add_len(encoded_packet_len(packet)?, frame_encoded_len(frame)?)
+}
+
+pub fn encode_packet(packet: &Packet) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(encoded_packet_len(packet)?);
     out.push(VERSION);
-    put_u64(&mut out, packet.conn_id);
-    put_u64(&mut out, packet.packet_no);
-    put_u16(&mut out, packet.max_response_bytes);
     let mut flags = 0u8;
     if packet.stream_ack_offset.is_some() {
         flags |= 1;
     }
     out.push(flags);
     if let Some(offset) = packet.stream_ack_offset {
-        put_u64(&mut out, offset);
+        put_var_u64(&mut out, offset);
     }
     out.push(packet.ack_ranges.len() as u8);
     for range in &packet.ack_ranges {
         if range.first > range.last {
             bail!("invalid ack range");
         }
-        put_u64(&mut out, range.first);
-        put_u64(&mut out, range.last);
+        put_var_u64(&mut out, range.first);
+        put_var_u64(&mut out, range.last - range.first);
     }
     out.push(packet.frames.len() as u8);
     for frame in &packet.frames {
@@ -285,25 +360,23 @@ pub fn encode_packet(packet: &Packet) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-pub fn decode_packet(bytes: &[u8]) -> Result<Packet> {
+fn decode_packet(
+    bytes: &[u8],
+    conn_id: u64,
+    packet_no: u64,
+    max_response_bytes: u16,
+) -> Result<Packet> {
     let mut cur = Cursor::new(bytes);
-    let magic = cur.take(4)?;
-    if magic != MAGIC {
-        bail!("invalid packet magic");
-    }
     let version = cur.u8()?;
     if version != VERSION {
         bail!("unsupported packet version {version}");
     }
-    let conn_id = cur.u64()?;
-    let packet_no = cur.u64()?;
-    let max_response_bytes = cur.u16()?;
     let flags = cur.u8()?;
     if flags & !1 != 0 {
         bail!("unsupported packet flags");
     }
     let stream_ack_offset = if flags & 1 != 0 {
-        Some(cur.u64()?)
+        Some(cur.var_u64()?)
     } else {
         None
     };
@@ -313,8 +386,11 @@ pub fn decode_packet(bytes: &[u8]) -> Result<Packet> {
     }
     let mut ack_ranges = Vec::with_capacity(ack_count);
     for _ in 0..ack_count {
-        let first = cur.u64()?;
-        let last = cur.u64()?;
+        let first = cur.var_u64()?;
+        let span = cur.var_u64()?;
+        let last = first
+            .checked_add(span)
+            .context("ack range exceeds packet number space")?;
         if first > last {
             bail!("invalid ack range");
         }
@@ -342,8 +418,7 @@ pub fn decode_packet(bytes: &[u8]) -> Result<Packet> {
 }
 
 fn encode_frame(out: &mut Vec<u8>, frame: &Frame) -> Result<()> {
-    let mut body = Vec::new();
-    let ty = match frame {
+    match frame {
         Frame::Open {
             stream_id,
             host,
@@ -353,11 +428,11 @@ fn encode_frame(out: &mut Vec<u8>, frame: &Frame) -> Result<()> {
             if host_bytes.len() > MAX_HOST_LEN {
                 bail!("invalid host length");
             }
-            put_u64(&mut body, *stream_id);
-            put_u16(&mut body, host_bytes.len() as u16);
-            body.extend_from_slice(host_bytes);
-            put_u16(&mut body, *port);
-            1
+            out.push(1);
+            put_var_u64(out, *stream_id);
+            put_var_u64(out, host_bytes.len() as u64);
+            out.extend_from_slice(host_bytes);
+            put_var_u64(out, *port as u64);
         }
         Frame::Data {
             stream_id,
@@ -368,21 +443,21 @@ fn encode_frame(out: &mut Vec<u8>, frame: &Frame) -> Result<()> {
             if bytes.len() > MAX_FRAME_LEN {
                 bail!("data frame too large");
             }
-            put_u64(&mut body, *stream_id);
-            put_u64(&mut body, *offset);
-            body.push(u8::from(*fin));
-            put_u16(&mut body, bytes.len() as u16);
-            body.extend_from_slice(bytes);
-            2
+            out.push(2);
+            put_var_u64(out, *stream_id);
+            put_var_u64(out, *offset);
+            out.push(u8::from(*fin));
+            put_var_u64(out, bytes.len() as u64);
+            out.extend_from_slice(bytes);
         }
         Frame::Close { stream_id, code } => {
-            put_u64(&mut body, *stream_id);
-            put_u16(&mut body, *code);
-            3
+            out.push(3);
+            put_var_u64(out, *stream_id);
+            put_var_u64(out, *code as u64);
         }
         Frame::Ping { nonce } => {
-            put_u64(&mut body, *nonce);
-            4
+            out.push(4);
+            put_var_u64(out, *nonce);
         }
         Frame::StreamAck {
             stream_id,
@@ -392,108 +467,101 @@ fn encode_frame(out: &mut Vec<u8>, frame: &Frame) -> Result<()> {
             ranges,
         } => {
             validate_stream_ack(*cumulative_offset, *max_stream_data, *fin_offset, ranges)?;
-            put_u64(&mut body, *stream_id);
-            put_u64(&mut body, *cumulative_offset);
-            put_u64(&mut body, *max_stream_data);
+            out.push(5);
+            put_var_u64(out, *stream_id);
+            put_var_u64(out, *cumulative_offset);
+            put_var_u64(out, *max_stream_data);
             match fin_offset {
                 Some(offset) => {
-                    body.push(1);
-                    put_u64(&mut body, *offset);
+                    out.push(1);
+                    put_var_u64(out, *offset);
                 }
-                None => body.push(0),
+                None => out.push(0),
             }
-            body.push(ranges.len() as u8);
+            out.push(ranges.len() as u8);
+            let mut previous_end = *cumulative_offset;
             for range in ranges {
-                put_u64(&mut body, range.start);
-                put_u64(&mut body, range.end);
+                put_var_u64(out, range.start - previous_end);
+                put_var_u64(out, range.end - range.start);
+                previous_end = range.end;
             }
-            5
         }
         Frame::PathChallenge {
             nonce,
             response_bytes,
         } => {
-            put_u64(&mut body, *nonce);
-            put_u16(&mut body, *response_bytes);
-            6
+            out.push(6);
+            put_var_u64(out, *nonce);
+            put_var_u64(out, *response_bytes as u64);
         }
         Frame::PathResponse { nonce, bytes } => {
             if bytes.len() > MAX_FRAME_LEN {
                 bail!("path response frame too large");
             }
-            put_u64(&mut body, *nonce);
-            put_u16(&mut body, bytes.len() as u16);
-            body.extend_from_slice(bytes);
-            7
+            out.push(7);
+            put_var_u64(out, *nonce);
+            put_var_u64(out, bytes.len() as u64);
+            out.extend_from_slice(bytes);
         }
-    };
-    if body.len() > u16::MAX as usize {
-        bail!("frame too large");
     }
-    out.push(ty);
-    put_u16(out, body.len() as u16);
-    out.extend_from_slice(&body);
     Ok(())
 }
 
 fn decode_frame(cur: &mut Cursor<'_>) -> Result<Frame> {
     let ty = cur.u8()?;
-    let len = cur.u16()? as usize;
-    if len > MAX_FRAME_LEN + 32 {
-        bail!("frame length exceeds limit");
-    }
-    let body = cur.take(len)?;
-    let mut cur = Cursor::new(body);
-    let frame = match ty {
+    match ty {
         1 => {
-            let stream_id = cur.u64()?;
-            let host_len = cur.u16()? as usize;
+            let stream_id = cur.var_u64()?;
+            let host_len = usize::try_from(cur.var_u64()?).context("host length exceeds usize")?;
             if host_len > MAX_HOST_LEN {
                 bail!("invalid host length");
             }
             let host = std::str::from_utf8(cur.take(host_len)?)
                 .context("host is not utf-8")?
                 .to_string();
-            let port = cur.u16()?;
-            Frame::Open {
+            let port = u16_from_var(cur.var_u64()?, "port")?;
+            Ok(Frame::Open {
                 stream_id,
                 host,
                 port,
-            }
+            })
         }
         2 => {
-            let stream_id = cur.u64()?;
-            let offset = cur.u64()?;
+            let stream_id = cur.var_u64()?;
+            let offset = cur.var_u64()?;
             let fin = match cur.u8()? {
                 0 => false,
                 1 => true,
                 _ => bail!("invalid fin value"),
             };
-            let data_len = cur.u16()? as usize;
+            let data_len = usize::try_from(cur.var_u64()?).context("data length exceeds usize")?;
+            if data_len > MAX_FRAME_LEN {
+                bail!("data frame too large");
+            }
             let bytes = cur.take(data_len)?.to_vec();
-            Frame::Data {
+            Ok(Frame::Data {
                 stream_id,
                 offset,
                 fin,
                 bytes,
-            }
+            })
         }
         3 => {
-            let stream_id = cur.u64()?;
-            let code = cur.u16()?;
-            Frame::Close { stream_id, code }
+            let stream_id = cur.var_u64()?;
+            let code = u16_from_var(cur.var_u64()?, "close code")?;
+            Ok(Frame::Close { stream_id, code })
         }
         4 => {
-            let nonce = cur.u64()?;
-            Frame::Ping { nonce }
+            let nonce = cur.var_u64()?;
+            Ok(Frame::Ping { nonce })
         }
         5 => {
-            let stream_id = cur.u64()?;
-            let cumulative_offset = cur.u64()?;
-            let max_stream_data = cur.u64()?;
+            let stream_id = cur.var_u64()?;
+            let cumulative_offset = cur.var_u64()?;
+            let max_stream_data = cur.var_u64()?;
             let fin_offset = match cur.u8()? {
                 0 => None,
-                1 => Some(cur.u64()?),
+                1 => Some(cur.var_u64()?),
                 other => bail!("invalid stream ack fin flag {other}"),
             };
             let range_count = cur.u8()? as usize;
@@ -501,41 +569,129 @@ fn decode_frame(cur: &mut Cursor<'_>) -> Result<Frame> {
                 bail!("too many stream ack ranges");
             }
             let mut ranges = Vec::with_capacity(range_count);
+            let mut previous_end = cumulative_offset;
             for _ in 0..range_count {
-                ranges.push(StreamRange {
-                    start: cur.u64()?,
-                    end: cur.u64()?,
-                });
+                let start_delta = cur.var_u64()?;
+                let start = previous_end
+                    .checked_add(start_delta)
+                    .context("stream ack range start overflow")?;
+                let len = cur.var_u64()?;
+                let end = start
+                    .checked_add(len)
+                    .context("stream ack range end overflow")?;
+                ranges.push(StreamRange { start, end });
+                previous_end = end;
             }
             validate_stream_ack(cumulative_offset, max_stream_data, fin_offset, &ranges)?;
-            Frame::StreamAck {
+            Ok(Frame::StreamAck {
                 stream_id,
                 cumulative_offset,
                 max_stream_data,
                 fin_offset,
                 ranges,
-            }
+            })
         }
         6 => {
-            let nonce = cur.u64()?;
-            let response_bytes = cur.u16()?;
-            Frame::PathChallenge {
+            let nonce = cur.var_u64()?;
+            let response_bytes = u16_from_var(cur.var_u64()?, "response_bytes")?;
+            Ok(Frame::PathChallenge {
                 nonce,
                 response_bytes,
-            }
+            })
         }
         7 => {
-            let nonce = cur.u64()?;
-            let len = cur.u16()? as usize;
+            let nonce = cur.var_u64()?;
+            let len =
+                usize::try_from(cur.var_u64()?).context("path response length exceeds usize")?;
+            if len > MAX_FRAME_LEN {
+                bail!("path response frame too large");
+            }
             let bytes = cur.take(len)?.to_vec();
-            Frame::PathResponse { nonce, bytes }
+            Ok(Frame::PathResponse { nonce, bytes })
         }
         _ => bail!("unknown frame type {ty}"),
-    };
-    if !cur.is_empty() {
-        bail!("trailing frame bytes");
     }
-    Ok(frame)
+}
+
+fn frame_encoded_len(frame: &Frame) -> Result<usize> {
+    let mut len = 1usize;
+    match frame {
+        Frame::Open {
+            stream_id,
+            host,
+            port,
+        } => {
+            let host_bytes = host.as_bytes();
+            if host_bytes.len() > MAX_HOST_LEN {
+                bail!("invalid host length");
+            }
+            len = checked_add_len(len, var_len_u64(*stream_id))?;
+            len = checked_add_len(len, var_len_u64(host_bytes.len() as u64))?;
+            len = checked_add_len(len, host_bytes.len())?;
+            len = checked_add_len(len, var_len_u64(*port as u64))?;
+        }
+        Frame::Data {
+            stream_id,
+            offset,
+            bytes,
+            ..
+        } => {
+            if bytes.len() > MAX_FRAME_LEN {
+                bail!("data frame too large");
+            }
+            len = checked_add_len(len, var_len_u64(*stream_id))?;
+            len = checked_add_len(len, var_len_u64(*offset))?;
+            len = checked_add_len(len, 1)?;
+            len = checked_add_len(len, var_len_u64(bytes.len() as u64))?;
+            len = checked_add_len(len, bytes.len())?;
+        }
+        Frame::Close { stream_id, code } => {
+            len = checked_add_len(len, var_len_u64(*stream_id))?;
+            len = checked_add_len(len, var_len_u64(*code as u64))?;
+        }
+        Frame::Ping { nonce } => {
+            len = checked_add_len(len, var_len_u64(*nonce))?;
+        }
+        Frame::StreamAck {
+            stream_id,
+            cumulative_offset,
+            max_stream_data,
+            fin_offset,
+            ranges,
+        } => {
+            validate_stream_ack(*cumulative_offset, *max_stream_data, *fin_offset, ranges)?;
+            len = checked_add_len(len, var_len_u64(*stream_id))?;
+            len = checked_add_len(len, var_len_u64(*cumulative_offset))?;
+            len = checked_add_len(len, var_len_u64(*max_stream_data))?;
+            len = checked_add_len(len, 1)?;
+            if let Some(offset) = fin_offset {
+                len = checked_add_len(len, var_len_u64(*offset))?;
+            }
+            len = checked_add_len(len, 1)?;
+            let mut previous_end = *cumulative_offset;
+            for range in ranges {
+                len = checked_add_len(len, var_len_u64(range.start - previous_end))?;
+                len = checked_add_len(len, var_len_u64(range.end - range.start))?;
+                previous_end = range.end;
+            }
+        }
+        Frame::PathChallenge {
+            nonce,
+            response_bytes,
+        } => {
+            len = checked_add_len(len, var_len_u64(*nonce))?;
+            len = checked_add_len(len, var_len_u64(*response_bytes as u64))?;
+        }
+        Frame::PathResponse { nonce, bytes } => {
+            if bytes.len() > MAX_FRAME_LEN {
+                bail!("path response frame too large");
+            }
+            len = checked_add_len(len, var_len_u64(*nonce))?;
+            len = checked_add_len(len, var_len_u64(bytes.len() as u64))?;
+            len = checked_add_len(len, bytes.len())?;
+        }
+    }
+    Ok(len)
 }
 
 fn validate_stream_ack(
@@ -580,16 +736,38 @@ fn validate_stream_ack(
     Ok(())
 }
 
-fn put_u16(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_be_bytes());
-}
-
 fn put_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_be_bytes());
 }
 
 fn put_u64(out: &mut Vec<u8>, value: u64) {
     out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn put_var_u64(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn var_len_u64(mut value: u64) -> usize {
+    let mut len = 1;
+    while value >= 0x80 {
+        len += 1;
+        value >>= 7;
+    }
+    len
+}
+
+fn checked_add_len(lhs: usize, rhs: usize) -> Result<usize> {
+    lhs.checked_add(rhs)
+        .context("encoded packet length overflow")
+}
+
+fn u16_from_var(value: u64, field: &str) -> Result<u16> {
+    u16::try_from(value).with_context(|| format!("{field} exceeds u16"))
 }
 
 struct Cursor<'a> {
@@ -619,12 +797,19 @@ impl<'a> Cursor<'a> {
         Ok(self.take(1)?[0])
     }
 
-    fn u16(&mut self) -> Result<u16> {
-        Ok(u16::from_be_bytes(self.take(2)?.try_into().unwrap()))
-    }
-
-    fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
+    fn var_u64(&mut self) -> Result<u64> {
+        let mut value = 0u64;
+        for index in 0..10 {
+            let byte = self.u8()?;
+            if index == 9 && byte & 0xfe != 0 {
+                bail!("varint exceeds u64");
+            }
+            value |= ((byte & 0x7f) as u64) << (index * 7);
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+        }
+        bail!("varint exceeds u64")
     }
 
     fn is_empty(&self) -> bool {
@@ -677,8 +862,70 @@ mod tests {
             ],
         };
         let encoded = encode_packet(&packet).unwrap();
-        let decoded = decode_packet(&encoded).unwrap();
+        let decoded = decode_packet(
+            &encoded,
+            packet.conn_id,
+            packet.packet_no,
+            packet.max_response_bytes,
+        )
+        .unwrap();
         assert_eq!(decoded, packet);
+    }
+
+    #[test]
+    fn encoded_len_matches_actual_wire_bytes() {
+        let mut packet = Packet {
+            conn_id: u64::MAX - 1,
+            packet_no: 16384,
+            max_response_bytes: 4096,
+            stream_ack_offset: Some(4096),
+            ack_ranges: vec![
+                AckRange { first: 1, last: 3 },
+                AckRange {
+                    first: 1024,
+                    last: 2048,
+                },
+            ],
+            frames: vec![
+                Frame::Open {
+                    stream_id: 44,
+                    host: "example.com".into(),
+                    port: 443,
+                },
+                Frame::Data {
+                    stream_id: 44,
+                    offset: 7,
+                    fin: true,
+                    bytes: b"hello".to_vec(),
+                },
+                Frame::StreamAck {
+                    stream_id: 44,
+                    cumulative_offset: 1024,
+                    max_stream_data: 8192,
+                    fin_offset: Some(4096),
+                    ranges: vec![StreamRange {
+                        start: 2048,
+                        end: 3072,
+                    }],
+                },
+                Frame::PathChallenge {
+                    nonce: 55,
+                    response_bytes: 64,
+                },
+                Frame::PathResponse {
+                    nonce: 55,
+                    bytes: vec![7; 64],
+                },
+            ],
+        };
+        let actual = encode_packet(&packet).unwrap().len();
+        assert_eq!(encoded_packet_len(&packet).unwrap(), actual);
+        assert_eq!(packet.encoded_len(), actual);
+
+        let extra = Frame::Ping { nonce: 99 };
+        let with_extra = encoded_packet_len_with_extra_frame(&packet, &extra).unwrap();
+        packet.frames.push(extra);
+        assert_eq!(with_extra, encode_packet(&packet).unwrap().len());
     }
 
     #[test]
@@ -711,5 +958,31 @@ mod tests {
         let last = sealed.len() - 1;
         sealed[last] ^= 1;
         assert!(open_packet_with_key(&key, Direction::ClientToServer, &sealed).is_err());
+    }
+
+    #[test]
+    fn sealed_len_matches_actual_wire_bytes() {
+        let key = ClientAccessKey::generate();
+        let mut packet = Packet::new(99, 16_384);
+        packet.ack_ranges = vec![AckRange { first: 7, last: 9 }];
+        packet.frames.push(Frame::Data {
+            stream_id: 3,
+            offset: 0,
+            fin: false,
+            bytes: vec![1; 96],
+        });
+
+        let sealed = seal_packet(&key, Direction::ClientToServer, &packet).unwrap();
+        assert_eq!(sealed_packet_len(&packet).unwrap(), sealed.len());
+
+        let extra = Frame::Ping { nonce: 123 };
+        let with_extra = sealed_packet_len_with_extra_frame(&packet, &extra).unwrap();
+        packet.frames.push(extra);
+        assert_eq!(
+            with_extra,
+            seal_packet(&key, Direction::ClientToServer, &packet)
+                .unwrap()
+                .len()
+        );
     }
 }
