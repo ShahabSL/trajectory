@@ -271,7 +271,7 @@ jobs:
           api-level: 35
           target: google_apis
           arch: x86_64
-          profile: pixel_7
+          profile: pixel
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
           script: scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/android-ui"
