@@ -49,11 +49,23 @@ The APKs are written to:
 
 ```text
 clients/android/app/build/outputs/apk/debug/app-debug.apk
-clients/android/app/build/outputs/apk/release/app-release-unsigned.apk
+clients/android/app/build/outputs/apk/release/app-release.apk
 ```
 
-The release APK is unsigned unless a signing configuration is added through
-protected release secrets.
+`app-debug.apk` is debug-signed by the Android SDK and is suitable for local
+device testing. `app-release.apk` is produced only when release signing
+environment variables are provided:
+
+```text
+TRAJECTORY_ANDROID_KEYSTORE_FILE
+TRAJECTORY_ANDROID_KEYSTORE_PASSWORD
+TRAJECTORY_ANDROID_KEY_ALIAS
+TRAJECTORY_ANDROID_KEY_PASSWORD
+```
+
+GitHub release builds require the matching protected secrets and verify the
+final APK with `apksigner` before uploading it. An unsigned release APK is not a
+valid release artifact.
 
 ## Product Boundary
 

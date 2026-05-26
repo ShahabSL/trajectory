@@ -12,6 +12,17 @@ val androidTargets = listOf(
     Triple("aarch64-linux-android", "arm64-v8a", "aarch64-linux-android24-clang"),
     Triple("x86_64-linux-android", "x86_64", "x86_64-linux-android24-clang"),
 )
+val releaseSigningConfigName = "trajectoryRelease"
+val releaseKeystoreFile = providers.environmentVariable("TRAJECTORY_ANDROID_KEYSTORE_FILE").orNull
+val releaseKeystorePassword = providers.environmentVariable("TRAJECTORY_ANDROID_KEYSTORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("TRAJECTORY_ANDROID_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("TRAJECTORY_ANDROID_KEY_PASSWORD").orNull
+val hasReleaseSigning = listOf(
+    releaseKeystoreFile,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
 
 fun localProperties(): Properties {
     val properties = Properties()
@@ -137,8 +148,8 @@ android {
         applicationId = "app.trajectory.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.3"
+        versionCode = 4
+        versionName = "0.1.4"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -158,6 +169,25 @@ android {
     sourceSets {
         getByName("main") {
             jniLibs.srcDir(generatedJniLibs)
+        }
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create(releaseSigningConfigName) {
+                storeFile = file(releaseKeystoreFile!!)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName(releaseSigningConfigName)
+            }
         }
     }
 

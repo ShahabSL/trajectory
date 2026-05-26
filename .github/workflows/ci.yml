@@ -167,6 +167,10 @@ jobs:
       - name: Check Android VPN manifest and packaged native libraries
         run: scripts/ci_android_vpn_static_checks.sh clients/android/app/build/outputs/apk/debug/app-debug.apk
 
+      - name: Verify Android debug APK is installable
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose clients/android/app/build/outputs/apk/debug/app-debug.apk
+
       - name: Upload Android debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -178,7 +182,7 @@ jobs:
       - name: Upload Android release APK
         uses: actions/upload-artifact@v4
         with:
-          name: ci-android-release-apk
+          name: ci-android-unsigned-release-apk
           path: clients/android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 7
