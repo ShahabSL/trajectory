@@ -3,7 +3,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
-use trajectory_cli::runtime::{parse_socket_addr, run_client, ClientConfig};
+use trajectory_cli::runtime::{parse_socket_addr, run_client, ClientConfig, ResolverTransportMode};
 use trajectory_core::auth::ClientAccessKey;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -21,6 +21,7 @@ async fn run() -> Result<()> {
     let mut domain = None::<String>;
     let mut access_key = None::<ClientAccessKey>;
     let mut resolver_socks_proxy = None::<SocketAddr>;
+    let mut resolver_transport = ResolverTransportMode::Auto;
     let mut poll_interval = Duration::from_millis(25);
     let mut dns_max_payload = None::<u16>;
     let mut admission_report = None::<PathBuf>;
@@ -78,6 +79,17 @@ async fn run() -> Result<()> {
             "--resolver-socks-proxy" => {
                 let proxy = args.next().context("missing resolver socks proxy")?;
                 resolver_socks_proxy = Some(parse_socket_addr(&proxy, 1080)?);
+            }
+            "--resolver-transport" => {
+                let value = args.next().context("missing resolver transport")?;
+                resolver_transport = match value.as_str() {
+                    "auto" => ResolverTransportMode::Auto,
+                    "udp" => ResolverTransportMode::Udp,
+                    "tcp" => ResolverTransportMode::Tcp,
+                    _ => anyhow::bail!(
+                        "invalid resolver transport {value:?}; expected auto, udp, or tcp"
+                    ),
+                };
             }
             "--poll-interval-ms" | "--keep-alive-interval" | "-t" => {
                 let ms: u64 = args
@@ -137,7 +149,7 @@ async fn run() -> Result<()> {
         resolvers.push("8.8.8.8:53".parse().unwrap());
     }
     let dns_max_payload = dns_max_payload.unwrap_or_else(|| {
-        if resolver_socks_proxy.is_some() {
+        if resolver_socks_proxy.is_some() || resolver_transport == ResolverTransportMode::Tcp {
             4096
         } else {
             1232
@@ -151,6 +163,7 @@ async fn run() -> Result<()> {
         domain,
         access_key,
         resolver_socks_proxy,
+        resolver_transport,
         poll_interval,
         dns_max_payload,
         admission_report,
@@ -176,10 +189,11 @@ Optional:
   -r, --resolver <HOST:PORT>         Recursive resolver; repeat for multiple
       --resolver-file <PATH>         Read recursive resolvers from a file
       --resolver-socks-proxy <ADDR>  Send DNS-over-TCP through SOCKS5 proxy
+      --resolver-transport <MODE>    Direct resolver mode: auto, udp, or tcp (default: auto)
       --resolver-cohort-size <N>     Active admitted resolver target when admission is used
       --resolver-admission-min <N>   Minimum admitted resolvers required at startup (default: 1)
   -t, --poll-interval-ms <MS>        Delay after resolver failures
-      --dns-max-payload <BYTES>      Advertised response payload budget (default: 1232, or 4096 with --resolver-socks-proxy)
+      --dns-max-payload <BYTES>      Advertised response payload budget (default: 1232, or 4096 with TCP resolver transport)
       --admission-report <PATH>      Write resolver admission JSONL diagnostics
   -h, --help                         Show this help"
     );

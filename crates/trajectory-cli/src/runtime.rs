@@ -83,10 +83,10 @@ const RESOLVER_PROBE_PARALLELISM_TCP: usize = 32;
 const RESOLVER_TARGET_ADMITTED_UDP: usize = 64;
 const RESOLVER_TARGET_ADMITTED_TCP: usize = 32;
 const RESOLVER_ADMISSION_SAMPLE_FACTOR: usize = 1;
-const RESOLVER_ADMISSION_TIMEOUT: Duration = Duration::from_secs(8);
+const RESOLVER_ADMISSION_TIMEOUT: Duration = Duration::from_millis(1_500);
 const RESOLVER_ADMISSION_TIMEOUT_TCP: Duration = Duration::from_secs(20);
 const RESOLVER_ADMISSION_DEADLINE: Duration = Duration::from_secs(60);
-const RESOLVER_ADMISSION_MAX_ELAPSED_UDP: Duration = Duration::from_secs(4);
+const RESOLVER_ADMISSION_MAX_ELAPSED_UDP: Duration = Duration::from_secs(8);
 const RESOLVER_ADMISSION_MAX_ELAPSED_TCP: Duration = Duration::from_secs(14);
 const RESOLVER_ADMISSION_MIN_RESPONSE_BPS_UDP: u64 = 128;
 const RESOLVER_ADMISSION_MIN_RESPONSE_BPS_TCP: u64 = 64;
@@ -115,11 +115,30 @@ pub struct ClientConfig {
     pub domain: String,
     pub access_key: ClientAccessKey,
     pub resolver_socks_proxy: Option<SocketAddr>,
+    pub resolver_transport: ResolverTransportMode,
     pub poll_interval: Duration,
     pub dns_max_payload: u16,
     pub admission_report: Option<PathBuf>,
     pub resolver_cohort_size: Option<usize>,
     pub resolver_admission_min: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResolverTransportMode {
+    Auto,
+    Udp,
+    Tcp,
+}
+
+impl ClientConfig {
+    fn tcp_first_resolver_path(&self) -> bool {
+        self.resolver_socks_proxy.is_some() || self.resolver_transport == ResolverTransportMode::Tcp
+    }
+
+    fn allow_udp_to_tcp_fallback(&self) -> bool {
+        self.resolver_socks_proxy.is_none()
+            && self.resolver_transport == ResolverTransportMode::Auto
+    }
 }
 
 #[derive(Clone)]
@@ -156,12 +175,12 @@ impl ClientRuntime {
         let tcp_pool = config
             .resolver_socks_proxy
             .map(|proxy| Arc::new(ResolverPool::new(Some(proxy))));
-        let initial_timeout = if config.resolver_socks_proxy.is_some() {
+        let initial_timeout = if config.tcp_first_resolver_path() {
             Duration::from_secs(8)
         } else {
             Duration::from_millis(1_500)
         };
-        let initial_response_bytes = if config.resolver_socks_proxy.is_some() {
+        let initial_response_bytes = if config.tcp_first_resolver_path() {
             config.dns_max_payload.max(PATH_MIN_RESPONSE_BYTES)
         } else {
             PATH_INITIAL_RESPONSE_BYTES
@@ -358,6 +377,7 @@ impl ClientRuntime {
             match transport {
                 Some(
                     DnsTransportOutcome::TcpFallbackAfterTruncation
+                    | DnsTransportOutcome::TcpAfterUdpFailure
                     | DnsTransportOutcome::TcpPreferred,
                 ) => {
                     health.prefer_tcp_until = Some(Instant::now() + RESOLVER_TCP_PREFERENCE);
@@ -377,7 +397,7 @@ impl ClientRuntime {
                     .max(PATH_MIN_RESPONSE_BYTES);
             } else {
                 health.cwnd_successes = health.cwnd_successes.saturating_add(1);
-                let growth_threshold = if self.config.resolver_socks_proxy.is_some() {
+                let growth_threshold = if self.config.tcp_first_resolver_path() {
                     health.cwnd.max(1)
                 } else {
                     (health.cwnd / 2).max(4)
@@ -402,7 +422,7 @@ impl ClientRuntime {
         } else {
             health.failures = health.failures.saturating_add(1);
             health.record_loss_sample(true);
-            if self.config.resolver_socks_proxy.is_some()
+            if self.config.tcp_first_resolver_path()
                 || health.failures >= 2
                 || health.loss_ewma_ppm >= PATH_SEVERE_LOSS_PPM
             {
@@ -422,17 +442,23 @@ impl ClientRuntime {
                     .saturating_sub(PATH_MTU_STEP.saturating_mul(4))
                     .max(safe_response_bytes);
             }
-            let tcp_path = self.config.resolver_socks_proxy.is_some();
+            let tcp_path = self.config.tcp_first_resolver_path();
             let failure_limit = if tcp_path { 3 } else { 4 };
             if health.failures >= failure_limit {
                 health.blocked_until = Some(Instant::now() + self.resolver_quarantine());
             }
         }
-        health.update_pacing(self.config.resolver_socks_proxy.is_some());
+        health.update_pacing(self.config.tcp_first_resolver_path());
     }
 
     async fn prefer_tcp_for_resolver(&self, index: usize) -> bool {
         if self.config.resolver_socks_proxy.is_some() {
+            return false;
+        }
+        if self.config.resolver_transport == ResolverTransportMode::Tcp {
+            return true;
+        }
+        if self.config.resolver_transport == ResolverTransportMode::Udp {
             return false;
         }
         let health = self.resolver_health[index].lock().await;
@@ -474,7 +500,7 @@ impl ClientRuntime {
     }
 
     fn path_max_cwnd(&self) -> u32 {
-        if self.config.resolver_socks_proxy.is_some() {
+        if self.config.tcp_first_resolver_path() {
             PATH_MAX_CWND_TCP
         } else {
             PATH_MAX_CWND_UDP
@@ -482,7 +508,7 @@ impl ClientRuntime {
     }
 
     fn initial_rto(&self) -> Duration {
-        if self.config.resolver_socks_proxy.is_some() {
+        if self.config.tcp_first_resolver_path() {
             Duration::from_secs(8)
         } else {
             Duration::from_millis(1_500)
@@ -490,7 +516,7 @@ impl ClientRuntime {
     }
 
     fn rto_min(&self) -> Duration {
-        if self.config.resolver_socks_proxy.is_some() {
+        if self.config.tcp_first_resolver_path() {
             PATH_RTO_MIN_TCP
         } else {
             PATH_RTO_MIN_UDP
@@ -498,7 +524,7 @@ impl ClientRuntime {
     }
 
     fn rto_max(&self) -> Duration {
-        if self.config.resolver_socks_proxy.is_some() {
+        if self.config.tcp_first_resolver_path() {
             PATH_RTO_MAX_TCP
         } else {
             PATH_RTO_MAX_UDP
@@ -506,7 +532,7 @@ impl ClientRuntime {
     }
 
     fn resolver_quarantine(&self) -> Duration {
-        if self.config.resolver_socks_proxy.is_some() {
+        if self.config.tcp_first_resolver_path() {
             RESOLVER_FAILURE_QUARANTINE_TCP
         } else {
             RESOLVER_FAILURE_QUARANTINE
@@ -518,7 +544,7 @@ impl ClientRuntime {
             .prefer_tcp_until
             .map(|until| until > now)
             .unwrap_or(false);
-        if self.config.resolver_socks_proxy.is_some() || direct_tcp_preferred {
+        if self.config.tcp_first_resolver_path() || direct_tcp_preferred {
             health
                 .max_response_bytes
                 .min(self.config.dns_max_payload.max(PATH_MIN_RESPONSE_BYTES))
@@ -1146,8 +1172,7 @@ pub async fn run_client(mut config: ClientConfig) -> Result<()> {
         bail!("at least one resolver is required");
     }
     config.resolvers = dedupe_resolvers(config.resolvers);
-    let tcp_path = config.resolver_socks_proxy.is_some();
-    if should_admit_resolvers(config.resolvers.len(), tcp_path) {
+    if should_admit_resolvers(&config) {
         config.resolvers = admit_resolvers(config.clone()).await?;
     }
 
@@ -1224,7 +1249,7 @@ fn dedupe_resolvers(resolvers: Vec<SocketAddr>) -> Vec<SocketAddr> {
 }
 
 async fn admit_resolvers(config: ClientConfig) -> Result<Vec<SocketAddr>> {
-    let tcp_path = config.resolver_socks_proxy.is_some();
+    let tcp_path = config.tcp_first_resolver_path();
     let requested_min = config.resolver_admission_min.max(1);
     if requested_min > config.resolvers.len() {
         bail!(
@@ -1376,8 +1401,13 @@ fn resolver_target_admitted(tcp_path: bool) -> usize {
     }
 }
 
-fn should_admit_resolvers(resolver_count: usize, tcp_path: bool) -> bool {
-    tcp_path || resolver_count > resolver_target_admitted(tcp_path)
+fn should_admit_resolvers(config: &ClientConfig) -> bool {
+    let tcp_path = config.tcp_first_resolver_path();
+    tcp_path
+        || config.resolver_cohort_size.is_some()
+        || config.resolver_admission_min > 1
+        || config.admission_report.is_some()
+        || config.resolvers.len() > resolver_target_admitted(tcp_path)
 }
 
 fn resolver_probe_parallelism(tcp_path: bool) -> usize {
@@ -1445,7 +1475,7 @@ fn fill_resolver_probe_set<I>(
 
 async fn probe_resolver(runtime: Arc<ClientRuntime>, resolver: SocketAddr) -> AdmissionProbeResult {
     let started = Instant::now();
-    let tcp_path = runtime.config.resolver_socks_proxy.is_some();
+    let tcp_path = runtime.config.tcp_first_resolver_path();
     let mut probe = AdmissionProbe::new(runtime, resolver);
     let mut total_response_bytes = 0usize;
     let mut last_rtt = Duration::ZERO;
@@ -1727,7 +1757,8 @@ fn write_admission_report(
             "event": "admission_summary",
             "candidate_count": config.resolvers.len(),
             "selected_count": selected.len(),
-            "tcp_path": config.resolver_socks_proxy.is_some(),
+            "tcp_path": config.tcp_first_resolver_path(),
+            "resolver_transport": format!("{:?}", config.resolver_transport).to_ascii_lowercase(),
             "domain": config.domain,
         })
     )?;
@@ -1758,6 +1789,7 @@ struct AdmissionProbe {
     resolver: SocketAddr,
     conn_id: u64,
     packet_no: u64,
+    prefer_direct_tcp: bool,
     received_server: PacketHistory,
 }
 
@@ -1768,6 +1800,7 @@ impl AdmissionProbe {
             resolver,
             conn_id: rand::random::<u64>(),
             packet_no: 0,
+            prefer_direct_tcp: false,
             received_server: PacketHistory::default(),
         }
     }
@@ -1801,16 +1834,28 @@ impl AdmissionProbe {
             });
         }
         let started = Instant::now();
-        let response = send_dns_packet(
+        let response = send_dns_packet_inner(
             &self.runtime,
             None,
             self.resolver,
             None,
             &packet,
-            resolver_admission_timeout(self.runtime.config.resolver_socks_proxy.is_some()),
+            resolver_admission_timeout(self.runtime.config.tcp_first_resolver_path()),
+            self.prefer_direct_tcp
+                || self.runtime.config.resolver_transport == ResolverTransportMode::Tcp,
         )
         .await
         .map_err(|error| error.to_string())?;
+        if matches!(
+            response.transport,
+            DnsTransportOutcome::TcpPreferred
+                | DnsTransportOutcome::TcpAfterUdpFailure
+                | DnsTransportOutcome::TcpFallbackAfterTruncation
+        ) {
+            self.prefer_direct_tcp = true;
+        } else if matches!(response.transport, DnsTransportOutcome::Udp) {
+            self.prefer_direct_tcp = false;
+        }
         let rtt = started.elapsed();
         if response.packet.conn_id != self.conn_id
             || self.received_server.is_acked(response.packet.packet_no)
@@ -2767,6 +2812,11 @@ impl ClientTransport {
                                     .tcp_preferred_ok
                                     .fetch_add(1, Ordering::Relaxed);
                             }
+                            Some(DnsTransportOutcome::TcpAfterUdpFailure) => {
+                                resolver_diag
+                                    .tcp_preferred_ok
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
                             Some(DnsTransportOutcome::TcpFallbackAfterTruncation) => {
                                 resolver_diag
                                     .tcp_truncation_ok
@@ -3012,7 +3062,7 @@ impl ClientTransport {
     }
 
     fn upload_chunk(&self) -> usize {
-        if self.runtime.config.resolver_socks_proxy.is_some() {
+        if self.runtime.config.tcp_first_resolver_path() {
             UPLOAD_SEND_CHUNK_CONSTRAINED
         } else {
             UPLOAD_SEND_CHUNK_NORMAL
@@ -3311,6 +3361,27 @@ async fn send_dns_packet(
     packet: &Packet,
     query_timeout: Duration,
 ) -> Result<DnsPacketOutcome> {
+    send_dns_packet_inner(
+        runtime,
+        resolver_index,
+        resolver,
+        class,
+        packet,
+        query_timeout,
+        false,
+    )
+    .await
+}
+
+async fn send_dns_packet_inner(
+    runtime: &ClientRuntime,
+    resolver_index: Option<usize>,
+    resolver: SocketAddr,
+    class: Option<ClientSendClass>,
+    packet: &Packet,
+    query_timeout: Duration,
+    direct_tcp_first: bool,
+) -> Result<DnsPacketOutcome> {
     let config = &runtime.config;
     let envelope = seal_packet(&config.access_key, Direction::ClientToServer, packet)?;
     let qname = envelope_to_qname(&envelope, &config.domain)?;
@@ -3354,10 +3425,11 @@ async fn send_dns_packet(
             }
         }
     }
-    let prefer_tcp = match resolver_index {
-        Some(index) => runtime.prefer_tcp_for_resolver(index).await,
-        None => false,
-    };
+    let prefer_tcp = direct_tcp_first
+        || match resolver_index {
+            Some(index) => runtime.prefer_tcp_for_resolver(index).await,
+            None => false,
+        };
     let (response, transport) = if let Some(pool) = &runtime.tcp_pool {
         (
             pool.query(resolver, &query, query_timeout).await?,
@@ -3378,6 +3450,10 @@ async fn send_dns_packet(
                 });
             }
             Err(tcp_error) => {
+                if config.resolver_transport == ResolverTransportMode::Tcp {
+                    runtime.tcp_fallback_pool.remove_sender(resolver).await;
+                    return Err(tcp_error.context("DNS-over-TCP resolver query failed"));
+                }
                 eprintln!("resolver {resolver} preferred TCP failed ({tcp_error:#}); retrying UDP");
                 runtime.tcp_fallback_pool.remove_sender(resolver).await;
                 (
@@ -3397,7 +3473,33 @@ async fn send_dns_packet(
         {
             Ok(response) => response,
             Err(udp_error) => {
-                return Err(udp_error.context("UDP DNS response failed"));
+                if !config.allow_udp_to_tcp_fallback() {
+                    return Err(udp_error.context("UDP DNS response failed"));
+                }
+                if let Some(diag) = &runtime.diag {
+                    diag.tcp_fallbacks.fetch_add(1, Ordering::Relaxed);
+                }
+                eprintln!("resolver {resolver} UDP failed ({udp_error:#}); retrying over TCP");
+                match runtime
+                    .tcp_fallback_pool
+                    .query(resolver, &query, query_timeout.max(PATH_RTO_MIN_TCP))
+                    .await
+                {
+                    Ok(tcp_response) => {
+                        return Ok(DnsPacketOutcome {
+                            packet: open_dns_response(&config.access_key, &tcp_response)?,
+                            response_wire_bytes: tcp_response.len(),
+                            truncated: false,
+                            transport: DnsTransportOutcome::TcpAfterUdpFailure,
+                        });
+                    }
+                    Err(tcp_error) => {
+                        runtime.tcp_fallback_pool.remove_sender(resolver).await;
+                        return Err(tcp_error.context(format!(
+                            "UDP DNS response failed ({udp_error:#}); DNS-over-TCP fallback failed"
+                        )));
+                    }
+                }
             }
         };
         match open_dns_response(&config.access_key, &response) {
@@ -3439,10 +3541,11 @@ async fn send_dns_packet(
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DnsTransportOutcome {
     Udp,
     TcpPreferred,
+    TcpAfterUdpFailure,
     TcpFallbackAfterTruncation,
     UdpAfterPreferredTcpError,
     TcpProxy,
@@ -5529,6 +5632,11 @@ mod tests {
             domain: "t.example.test".to_string(),
             access_key: ClientAccessKey::generate(),
             resolver_socks_proxy: tcp_path.then(|| "127.0.0.1:11092".parse().unwrap()),
+            resolver_transport: if tcp_path {
+                ResolverTransportMode::Tcp
+            } else {
+                ResolverTransportMode::Auto
+            },
             poll_interval: Duration::from_millis(5),
             dns_max_payload,
             admission_report: None,
@@ -5539,12 +5647,14 @@ mod tests {
 
     #[test]
     fn tcp_proxy_path_always_uses_signed_admission() {
-        assert!(should_admit_resolvers(1, true));
-        assert!(should_admit_resolvers(RESOLVER_TARGET_ADMITTED_TCP, true));
-        assert!(should_admit_resolvers(
-            RESOLVER_TARGET_ADMITTED_TCP + 1,
-            true
-        ));
+        let mut config = test_client_config(true, 1232);
+        assert!(should_admit_resolvers(&config));
+
+        config.resolvers = vec!["192.0.2.1:53".parse().unwrap(); RESOLVER_TARGET_ADMITTED_TCP];
+        assert!(should_admit_resolvers(&config));
+
+        config.resolvers = vec!["192.0.2.1:53".parse().unwrap(); RESOLVER_TARGET_ADMITTED_TCP + 1];
+        assert!(should_admit_resolvers(&config));
     }
 
     #[test]
@@ -5585,13 +5695,27 @@ mod tests {
     }
 
     #[test]
-    fn direct_path_admits_only_when_above_target() {
-        assert!(!should_admit_resolvers(1, false));
-        assert!(!should_admit_resolvers(RESOLVER_TARGET_ADMITTED_UDP, false));
-        assert!(should_admit_resolvers(
-            RESOLVER_TARGET_ADMITTED_UDP + 1,
-            false
-        ));
+    fn direct_path_admits_when_requested_or_above_target() {
+        let mut config = test_client_config(false, 1232);
+        assert!(!should_admit_resolvers(&config));
+
+        config.resolver_cohort_size = Some(1);
+        assert!(should_admit_resolvers(&config));
+
+        config.resolver_cohort_size = None;
+        config.resolver_admission_min = 2;
+        assert!(should_admit_resolvers(&config));
+
+        config.resolver_admission_min = 1;
+        config.admission_report = Some(PathBuf::from("admission.jsonl"));
+        assert!(should_admit_resolvers(&config));
+
+        config.admission_report = None;
+        config.resolvers = vec!["192.0.2.1:53".parse().unwrap(); RESOLVER_TARGET_ADMITTED_UDP];
+        assert!(!should_admit_resolvers(&config));
+
+        config.resolvers = vec!["192.0.2.1:53".parse().unwrap(); RESOLVER_TARGET_ADMITTED_UDP + 1];
+        assert!(should_admit_resolvers(&config));
     }
 
     #[test]
@@ -5663,6 +5787,128 @@ mod tests {
             runtime.response_bytes_for_health(&health, Instant::now()),
             4096
         );
+    }
+
+    #[tokio::test]
+    async fn direct_udp_timeout_falls_back_to_tcp_and_prefers_tcp_after_success() {
+        let udp_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let resolver = udp_socket.local_addr().unwrap();
+        let tcp_listener = TcpListener::bind(resolver).await.unwrap();
+        let key = ClientAccessKey::generate();
+        let server_key = key.clone();
+        let domain = "t.example.test".to_string();
+        let server_domain = domain.clone();
+        let tcp_server = tokio::spawn(async move {
+            let (mut stream, _) = tcp_listener.accept().await.unwrap();
+            let query_bytes = read_dns_tcp_message(&mut stream).await.unwrap();
+            let query = parse_query(&query_bytes).unwrap();
+            let request_envelope = qname_to_envelope(&query.qname, &server_domain).unwrap();
+            let request =
+                open_packet_with_key(&server_key, Direction::ClientToServer, &request_envelope)
+                    .unwrap();
+            let mut response = Packet::new(request.conn_id, request.packet_no);
+            response.ack_ranges.push(AckRange {
+                first: request.packet_no,
+                last: request.packet_no,
+            });
+            response.frames.push(Frame::PathResponse {
+                nonce: 0,
+                bytes: vec![1, 2, 3, 4],
+            });
+            let response_envelope =
+                seal_packet(&server_key, Direction::ServerToClient, &response).unwrap();
+            let response_bytes = build_txt_response(&query, &response_envelope, 0).unwrap();
+            write_dns_tcp_message(&mut stream, &response_bytes)
+                .await
+                .unwrap();
+        });
+
+        let mut config = test_client_config(false, 1232);
+        config.resolvers = vec![resolver];
+        config.domain = domain;
+        config.access_key = key;
+        let runtime = ClientRuntime::new(config);
+        let mut packet = Packet::new(99, 7);
+        packet.max_response_bytes = 1232;
+        packet.frames.push(Frame::PathChallenge {
+            nonce: 0,
+            response_bytes: 0,
+        });
+
+        let outcome = send_dns_packet(
+            &runtime,
+            Some(0),
+            resolver,
+            Some(ClientSendClass::Control),
+            &packet,
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.transport, DnsTransportOutcome::TcpAfterUdpFailure);
+        runtime
+            .record_resolver_result(
+                0,
+                true,
+                Duration::from_millis(60),
+                outcome.truncated,
+                0,
+                Some(outcome.transport),
+            )
+            .await;
+        assert!(runtime.prefer_tcp_for_resolver(0).await);
+        tcp_server.await.unwrap();
+        drop(udp_socket);
+    }
+
+    #[tokio::test]
+    async fn explicit_direct_tcp_transport_does_not_probe_udp_first() {
+        let tcp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let resolver = tcp_listener.local_addr().unwrap();
+        let key = ClientAccessKey::generate();
+        let server_key = key.clone();
+        let domain = "t.example.test".to_string();
+        let server_domain = domain.clone();
+        let tcp_server = tokio::spawn(async move {
+            let (mut stream, _) = tcp_listener.accept().await.unwrap();
+            let query_bytes = read_dns_tcp_message(&mut stream).await.unwrap();
+            let query = parse_query(&query_bytes).unwrap();
+            let request_envelope = qname_to_envelope(&query.qname, &server_domain).unwrap();
+            let request =
+                open_packet_with_key(&server_key, Direction::ClientToServer, &request_envelope)
+                    .unwrap();
+            let response = Packet::new(request.conn_id, request.packet_no);
+            let response_envelope =
+                seal_packet(&server_key, Direction::ServerToClient, &response).unwrap();
+            let response_bytes = build_txt_response(&query, &response_envelope, 0).unwrap();
+            write_dns_tcp_message(&mut stream, &response_bytes)
+                .await
+                .unwrap();
+        });
+
+        let mut config = test_client_config(false, 4096);
+        config.resolvers = vec![resolver];
+        config.domain = domain;
+        config.access_key = key;
+        config.resolver_transport = ResolverTransportMode::Tcp;
+        let runtime = ClientRuntime::new(config);
+        let mut packet = Packet::new(11, 1);
+        packet.max_response_bytes = 4096;
+
+        let outcome = send_dns_packet(
+            &runtime,
+            Some(0),
+            resolver,
+            Some(ClientSendClass::Control),
+            &packet,
+            Duration::from_millis(250),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.transport, DnsTransportOutcome::TcpPreferred);
+        tcp_server.await.unwrap();
     }
 
     #[tokio::test]

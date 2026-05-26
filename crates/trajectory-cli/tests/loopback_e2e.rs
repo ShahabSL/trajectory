@@ -9,7 +9,7 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout, Instant};
 use trajectory_cli::runtime::{
-    run_client, run_server, ClientConfig, ServerConfig, ServerTargetMode,
+    run_client, run_server, ClientConfig, ResolverTransportMode, ServerConfig, ServerTargetMode,
 };
 use trajectory_core::auth::ClientAccessKey;
 use trajectory_core::codec::{
@@ -372,6 +372,7 @@ async fn raw_tcp_stream_roundtrips_through_dns_udp() {
         domain,
         access_key: key,
         resolver_socks_proxy: None,
+        resolver_transport: ResolverTransportMode::Auto,
         poll_interval: Duration::from_millis(5),
         dns_max_payload: 1232,
         admission_report: None,
@@ -460,6 +461,7 @@ async fn socks_handshake_survives_dns_chunking() {
         domain,
         access_key: key,
         resolver_socks_proxy: None,
+        resolver_transport: ResolverTransportMode::Auto,
         poll_interval: Duration::from_millis(5),
         dns_max_payload: 1232,
         admission_report: None,
@@ -533,6 +535,7 @@ async fn server_direct_socks5_mode_connects_without_external_proxy() {
         domain,
         access_key: key,
         resolver_socks_proxy: None,
+        resolver_transport: ResolverTransportMode::Auto,
         poll_interval: Duration::from_millis(5),
         dns_max_payload: 1232,
         admission_report: None,
@@ -607,6 +610,7 @@ async fn http_connect_proxy_mode_uses_server_socks5_egress() {
         domain,
         access_key: key,
         resolver_socks_proxy: None,
+        resolver_transport: ResolverTransportMode::Auto,
         poll_interval: Duration::from_millis(5),
         dns_max_payload: 1232,
         admission_report: None,
@@ -677,6 +681,7 @@ async fn dns_tcp_over_socks_reuses_persistent_connection() {
         domain,
         access_key: key,
         resolver_socks_proxy: Some(proxy_addr),
+        resolver_transport: ResolverTransportMode::Tcp,
         poll_interval: Duration::from_millis(5),
         dns_max_payload: 1232,
         admission_report: None,
@@ -753,6 +758,7 @@ async fn regression_closed_streams_do_not_starve_followup_stream() {
         domain,
         access_key: key,
         resolver_socks_proxy: None,
+        resolver_transport: ResolverTransportMode::Auto,
         poll_interval: Duration::from_millis(5),
         dns_max_payload: 512,
         admission_report: None,
@@ -812,6 +818,7 @@ async fn acceptance_concurrent_streams_share_one_transport_conn_id() {
         domain,
         access_key: key,
         resolver_socks_proxy: None,
+        resolver_transport: ResolverTransportMode::Auto,
         poll_interval: Duration::from_millis(5),
         dns_max_payload: 1232,
         admission_report: None,
