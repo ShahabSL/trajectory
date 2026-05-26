@@ -30,7 +30,20 @@ grep -Fq "Trajectory" "$artifact_dir/main.xml"
 grep -Fq "Tunnel" "$artifact_dir/main.xml"
 grep -Fq "Resolvers" "$artifact_dir/main.xml"
 
-adb shell input swipe 540 2140 540 620 600
+screen_size="$(adb shell wm size | tr -d '\r' | awk '/Physical size/ {print $3; exit}')"
+if [[ "$screen_size" =~ ^[0-9]+x[0-9]+$ ]]; then
+  screen_width="${screen_size%x*}"
+  screen_height="${screen_size#*x}"
+else
+  screen_width=1080
+  screen_height=1920
+fi
+
+swipe_x=$((screen_width / 2))
+swipe_start_y=$((screen_height * 78 / 100))
+swipe_end_y=$((screen_height * 28 / 100))
+
+adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
 sleep 1
 adb exec-out uiautomator dump /dev/tty > "$artifact_dir/bottom.xml"
 adb exec-out screencap -p > "$artifact_dir/bottom.png"
