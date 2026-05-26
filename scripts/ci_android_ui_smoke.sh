@@ -43,17 +43,16 @@ swipe_x=$((screen_width / 2))
 swipe_start_y=$((screen_height * 78 / 100))
 swipe_end_y=$((screen_height * 28 / 100))
 
-adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
-sleep 1
-adb exec-out uiautomator dump /dev/tty > "$artifact_dir/middle.xml"
-adb exec-out screencap -p > "$artifact_dir/middle.png"
+xml_files=("$artifact_dir/main.xml")
+for step in middle bottom final; do
+  adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
+  sleep 1
+  adb exec-out uiautomator dump /dev/tty > "$artifact_dir/$step.xml"
+  adb exec-out screencap -p > "$artifact_dir/$step.png"
+  xml_files+=("$artifact_dir/$step.xml")
+done
 
-adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
-sleep 1
-adb exec-out uiautomator dump /dev/tty > "$artifact_dir/bottom.xml"
-adb exec-out screencap -p > "$artifact_dir/bottom.png"
-
-cat "$artifact_dir/main.xml" "$artifact_dir/middle.xml" "$artifact_dir/bottom.xml" > "$artifact_dir/all.xml"
+cat "${xml_files[@]}" > "$artifact_dir/all.xml"
 grep -Fq "Controls" "$artifact_dir/all.xml"
 grep -Fq "Start VPN" "$artifact_dir/all.xml"
 grep -Fq "Stop Trajectory" "$artifact_dir/all.xml"
