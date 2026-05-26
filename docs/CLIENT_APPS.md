@@ -97,6 +97,8 @@ VPN clients:
 - Android JVM tests for profile validation and sidecar command construction
 - Android manifest/static checks for `VpnService`, foreground-service type,
   native bridge packaging, and consent flow
+- Android emulator UI smoke tests that install the APK, launch the main screen,
+  assert the UI tree, and upload screenshots
 - platform-specific simulator/device tests
 - permission/entitlement validation
 - route table tests

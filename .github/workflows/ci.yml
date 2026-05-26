@@ -171,6 +171,32 @@ jobs:
         run: |
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose clients/android/app/build/outputs/apk/debug/app-debug.apk
 
+      - name: Enable Android emulator KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Smoke-test Android UI
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
+          script: scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/android-ui"
+
+      - name: Upload Android UI smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-android-ui-smoke
+          path: ${{ runner.temp }}/android-ui
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Upload Android debug APK
         uses: actions/upload-artifact@v4
         with:

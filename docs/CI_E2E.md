@@ -98,10 +98,13 @@ SOCKS5-capable egress target.
 
 Normal CI also builds the Android APK, runs JVM unit tests, and checks that the
 APK contains both `arm64-v8a` and `x86_64` native libraries for
-`trajectory-client` and `trajectory_vpn_bridge`.
+`trajectory-client` and `trajectory_vpn_bridge`. CI now also installs the APK
+on an Android emulator, launches the main activity, asserts the UI tree contains
+the expected product/configuration controls, captures screenshots, and uploads
+the UI smoke artifacts.
 
-GitHub-hosted runners can prove build packaging and static Android VPN wiring.
-They cannot prove user consent, OEM background behavior, always-on lockdown,
-DNS leaks, sleep/wake, or arbitrary app capture without an emulator/device lab.
-Those tests must run on trusted device runners with secrets scoped to a protected
-environment.
+GitHub-hosted runners can prove build packaging, static Android VPN wiring, APK
+installability, and basic launch/render behavior. They cannot prove user
+consent, OEM background behavior, always-on lockdown, DNS leaks, sleep/wake, or
+arbitrary app capture without a real device lab. Those tests must run on trusted
+device runners with secrets scoped to a protected environment.
