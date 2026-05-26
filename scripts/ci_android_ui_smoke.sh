@@ -45,12 +45,18 @@ swipe_end_y=$((screen_height * 28 / 100))
 
 adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
 sleep 1
+adb exec-out uiautomator dump /dev/tty > "$artifact_dir/middle.xml"
+adb exec-out screencap -p > "$artifact_dir/middle.png"
+
+adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
+sleep 1
 adb exec-out uiautomator dump /dev/tty > "$artifact_dir/bottom.xml"
 adb exec-out screencap -p > "$artifact_dir/bottom.png"
 
-grep -Fq "Controls" "$artifact_dir/bottom.xml"
-grep -Fq "Start VPN" "$artifact_dir/bottom.xml"
-grep -Fq "Stop Trajectory" "$artifact_dir/bottom.xml"
+cat "$artifact_dir/main.xml" "$artifact_dir/middle.xml" "$artifact_dir/bottom.xml" > "$artifact_dir/all.xml"
+grep -Fq "Controls" "$artifact_dir/all.xml"
+grep -Fq "Start VPN" "$artifact_dir/all.xml"
+grep -Fq "Stop Trajectory" "$artifact_dir/all.xml"
 
 adb logcat -d > "$artifact_dir/logcat.txt"
 if grep -E "FATAL EXCEPTION|E AndroidRuntime" "$artifact_dir/logcat.txt"; then
