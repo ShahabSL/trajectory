@@ -12,7 +12,10 @@ use tokio::task::JoinSet;
 use tokio::time::timeout;
 use trajectory_core::auth::ClientAccessKey;
 use trajectory_core::codec::{
-    open_packet_with_key, open_packet_with_registry, seal_packet, sealed_packet_len,
+    encoded_packet_len_frontier, frontier_short_conn_alias, frontier_short_sealed_alias,
+    open_packet_frontier_short, open_packet_with_key, open_packet_with_registry, seal_packet,
+    seal_packet_frontier, seal_packet_frontier_short, sealed_packet_len,
+    sealed_packet_len_frontier, sealed_packet_len_frontier_short,
     sealed_packet_len_with_extra_frame, AckRange, Direction, Frame, Packet, StreamRange,
 };
 use trajectory_core::dns::{
@@ -113,6 +116,8 @@ const CLIENT_ACTIVE_POLL_DATA_BUDGET: usize = 96;
 const CLIENT_TRANSPORT_IDLE_DELAY: Duration = Duration::from_millis(2);
 const CLIENT_TRANSPORT_BULK_IDLE_DELAY: Duration = Duration::from_micros(250);
 const CLIENT_CONN_ID_MASK: u64 = 0x0000_0007_ffff_ffff;
+const FRONTIER_CLIENT_CONN_ID_MASK: u64 = 0x0000_0000_0fff_ffff;
+const FRONTIER_SHORT_ALIAS_READY_NONCE: u64 = u64::MAX;
 const CLIENT_RESET_CLOSE_DELAY: Duration = Duration::from_millis(500);
 const CLIENT_POLL_PROXY_HEADROOM: u32 = 4;
 const CLIENT_POLL_RESOLVER_HEADROOM: u32 = 1;
@@ -578,14 +583,9 @@ impl ClientRuntime {
             match sample.transport {
                 Some(DnsTransportOutcome::TcpFallbackAfterTruncation) => {
                     health.prefer_tcp_until = Some(Instant::now() + RESOLVER_TCP_PREFERENCE);
-                    health.prefer_tcp_data_until = Some(Instant::now() + RESOLVER_TCP_PREFERENCE);
                 }
                 Some(DnsTransportOutcome::TcpPreferred) => {
                     health.prefer_tcp_until = Some(Instant::now() + RESOLVER_TCP_PREFERENCE);
-                    if matches!(sample.class, Some(ClientSendClass::Data)) {
-                        health.prefer_tcp_data_until =
-                            Some(Instant::now() + RESOLVER_TCP_PREFERENCE);
-                    }
                 }
                 Some(DnsTransportOutcome::TcpAfterUdpFailure) => {
                     let preference = if self.config.resolver_transport == ResolverTransportMode::Tcp
@@ -596,11 +596,18 @@ impl ClientRuntime {
                     };
                     let until = Instant::now() + preference;
                     health.prefer_tcp_until = Some(until);
-                    health.prefer_tcp_data_until = Some(until);
+                    if matches!(sample.class, Some(ClientSendClass::Data)) {
+                        health.prefer_tcp_data_until = Some(until);
+                    }
                 }
                 Some(DnsTransportOutcome::Udp | DnsTransportOutcome::UdpAfterPreferredTcpError) => {
                     health.prefer_tcp_until = None;
-                    if matches!(sample.class, Some(ClientSendClass::Data)) {
+                    if matches!(
+                        sample.class,
+                        Some(ClientSendClass::Data)
+                            | Some(ClientSendClass::Control)
+                            | Some(ClientSendClass::Poll)
+                    ) {
                         health.prefer_tcp_data_until = None;
                     }
                 }
@@ -1225,6 +1232,7 @@ struct ClientTransport {
     last_ping_sent_at: Instant,
     active_poll_until: Instant,
     data_since_poll: usize,
+    frontier_short_header_ready: bool,
     diag_started: Instant,
     next_diag_at: Instant,
 }
@@ -1587,8 +1595,19 @@ fn dedupe_resolvers(resolvers: Vec<SocketAddr>) -> Vec<SocketAddr> {
         .collect()
 }
 
-fn fresh_client_conn_id() -> u64 {
-    (rand::random::<u64>() & CLIENT_CONN_ID_MASK).max(1)
+fn fresh_client_conn_id(mode: ClientMode) -> u64 {
+    (rand::random::<u64>() & client_conn_id_mask(mode)).max(1)
+}
+
+fn client_conn_id_mask(mode: ClientMode) -> u64 {
+    match mode {
+        ClientMode::Frontier => FRONTIER_CLIENT_CONN_ID_MASK,
+        ClientMode::Secure | ClientMode::Velocity | ClientMode::Resilient => CLIENT_CONN_ID_MASK,
+    }
+}
+
+fn frontier_short_alias_signal(conn_id: u64) -> Vec<u8> {
+    frontier_short_conn_alias(conn_id).to_be_bytes().to_vec()
 }
 
 async fn admit_resolvers(config: ClientConfig) -> Result<Vec<SocketAddr>> {
@@ -2176,10 +2195,11 @@ struct AdmissionProbe {
 
 impl AdmissionProbe {
     fn new(runtime: Arc<ClientRuntime>, resolver: SocketAddr) -> Self {
+        let mode = runtime.config.mode;
         Self {
             runtime,
             resolver,
-            conn_id: fresh_client_conn_id(),
+            conn_id: fresh_client_conn_id(mode),
             packet_no: 0,
             prefer_direct_tcp: false,
             received_server: PacketHistory::default(),
@@ -2224,6 +2244,7 @@ impl AdmissionProbe {
             resolver_admission_timeout(self.runtime.config.tcp_first_resolver_path()),
             self.prefer_direct_tcp
                 || self.runtime.config.resolver_transport == ResolverTransportMode::Tcp,
+            false,
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -2823,7 +2844,7 @@ async fn run_client_transport(
 ) -> Result<()> {
     let (response_tx, response_rx) = mpsc::channel::<ClientDnsResult>(CLIENT_RESPONSE_CHANNEL);
     let now = Instant::now();
-    let conn_id = fresh_client_conn_id();
+    let conn_id = fresh_client_conn_id(runtime.config.mode);
     let mut transport = ClientTransport {
         runtime,
         conn_id,
@@ -2839,6 +2860,7 @@ async fn run_client_transport(
         last_ping_sent_at: now.checked_sub(Duration::from_secs(1)).unwrap_or(now),
         active_poll_until: now,
         data_since_poll: 0,
+        frontier_short_header_ready: false,
         diag_started: now,
         next_diag_at: now + Duration::from_secs(1),
     };
@@ -3061,6 +3083,7 @@ impl ClientTransport {
             "streams": pending_streams,
             "outstanding": self.outstanding.len(),
             "outbound_window": outbound_window,
+            "frontier_short_header_ready": self.frontier_short_header_ready,
             "upload_bulk_mode": self.bulk_upload_mode(),
             "upload_pending_bytes": upload_pending_bytes,
             "downlink_pending": downlink_pending,
@@ -3161,6 +3184,7 @@ impl ClientTransport {
                 &self.runtime.config,
                 &mut request,
                 sent.kind,
+                self.frontier_short_header_ready,
             )?;
             match &sent.kind {
                 MuxSentKind::Open {
@@ -3243,6 +3267,7 @@ impl ClientTransport {
             self.outstanding.insert(sent_packet_no, sent);
             let runtime_for_query = Arc::clone(&self.runtime);
             let response_tx = self.response_tx.clone();
+            let use_frontier_short_header = self.frontier_short_header_ready;
             tokio::spawn(async move {
                 let _ping_slot = ping_slot;
                 let started = Instant::now();
@@ -3254,6 +3279,7 @@ impl ClientTransport {
                     Some(class),
                     &request,
                     path.timeout,
+                    use_frontier_short_header,
                 )
                 .await;
                 let elapsed = started.elapsed();
@@ -3841,10 +3867,16 @@ impl ClientTransport {
                     );
                 }
             }
-            Frame::Open { .. }
-            | Frame::Ping { .. }
-            | Frame::PathChallenge { .. }
-            | Frame::PathResponse { .. } => {}
+            Frame::Open { .. } | Frame::Ping { .. } | Frame::PathChallenge { .. } => {}
+            Frame::PathResponse { nonce, bytes }
+                if nonce == FRONTIER_SHORT_ALIAS_READY_NONCE
+                    && bytes == frontier_short_alias_signal(self.conn_id) =>
+            {
+                if self.runtime.config.mode == ClientMode::Frontier {
+                    self.frontier_short_header_ready = true;
+                }
+            }
+            Frame::PathResponse { .. } => {}
         }
         Ok(())
     }
@@ -3915,6 +3947,7 @@ async fn send_dns_packet(
     class: Option<ClientSendClass>,
     packet: &Packet,
     query_timeout: Duration,
+    use_frontier_short_header: bool,
 ) -> Result<DnsPacketOutcome> {
     send_dns_packet_inner(
         runtime,
@@ -3924,6 +3957,7 @@ async fn send_dns_packet(
         packet,
         query_timeout,
         false,
+        use_frontier_short_header,
     )
     .await
 }
@@ -3936,9 +3970,10 @@ async fn send_dns_packet_inner(
     packet: &Packet,
     query_timeout: Duration,
     direct_tcp_first: bool,
+    use_frontier_short_header: bool,
 ) -> Result<DnsPacketOutcome> {
     let config = &runtime.config;
-    let envelope = seal_packet(&config.access_key, Direction::ClientToServer, packet)?;
+    let envelope = seal_client_packet(config, packet, use_frontier_short_header)?;
     let qname = if config.mode == ClientMode::Frontier {
         envelope_to_compact_qname(&envelope, &config.domain)?
     } else {
@@ -3950,8 +3985,10 @@ async fn send_dns_packet_inner(
         diag.queries_sent.fetch_add(1, Ordering::Relaxed);
         diag.query_wire_bytes
             .fetch_add(query.len() as u64, Ordering::Relaxed);
-        diag.request_packet_body_bytes
-            .fetch_add(packet.encoded_len() as u64, Ordering::Relaxed);
+        diag.request_packet_body_bytes.fetch_add(
+            encoded_client_packet_len(config, packet) as u64,
+            Ordering::Relaxed,
+        );
         diag.request_envelope_bytes
             .fetch_add(envelope.len() as u64, Ordering::Relaxed);
         diag.request_qname_chars
@@ -4098,6 +4135,28 @@ async fn send_dns_packet_inner(
         truncated: false,
         transport,
     })
+}
+
+fn seal_client_packet(
+    config: &ClientConfig,
+    packet: &Packet,
+    use_frontier_short_header: bool,
+) -> Result<Vec<u8>> {
+    if config.mode == ClientMode::Frontier && use_frontier_short_header {
+        seal_packet_frontier_short(&config.access_key, Direction::ClientToServer, packet)
+    } else if config.mode == ClientMode::Frontier {
+        seal_packet_frontier(&config.access_key, Direction::ClientToServer, packet)
+    } else {
+        seal_packet(&config.access_key, Direction::ClientToServer, packet)
+    }
+}
+
+fn encoded_client_packet_len(config: &ClientConfig, packet: &Packet) -> usize {
+    if config.mode == ClientMode::Frontier {
+        encoded_packet_len_frontier(packet).unwrap_or(usize::MAX)
+    } else {
+        packet.encoded_len()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4653,6 +4712,7 @@ struct ServerState {
     config: ServerConfig,
     sessions: Mutex<HashMap<SessionKey, Arc<SessionHandle>>>,
     connections: Mutex<HashMap<ConnectionKey, Arc<ServerConnection>>>,
+    frontier_aliases: Mutex<HashMap<u32, FrontierShortAlias>>,
     next_cleanup_at: StdMutex<Instant>,
 }
 
@@ -4662,6 +4722,7 @@ impl ServerState {
             config,
             sessions: Mutex::new(HashMap::new()),
             connections: Mutex::new(HashMap::new()),
+            frontier_aliases: Mutex::new(HashMap::new()),
             next_cleanup_at: StdMutex::new(Instant::now() + SERVER_STATE_CLEANUP_INTERVAL),
         }
     }
@@ -4677,6 +4738,40 @@ impl ServerState {
         };
         connection.touch();
         connection
+    }
+
+    async fn register_frontier_alias(&self, client_id: u32, conn_id: u64) -> bool {
+        let alias = frontier_short_conn_alias(conn_id);
+        let mut aliases = self.frontier_aliases.lock().await;
+        match aliases.get_mut(&alias) {
+            Some(existing) if existing.client_id == client_id && existing.conn_id == conn_id => {
+                existing.last_activity = Instant::now();
+                true
+            }
+            Some(_) => false,
+            None => {
+                aliases.insert(
+                    alias,
+                    FrontierShortAlias {
+                        client_id,
+                        conn_id,
+                        last_activity: Instant::now(),
+                    },
+                );
+                true
+            }
+        }
+    }
+
+    async fn frontier_alias_connection(&self, alias: u32) -> Option<(ClientAccessKey, u64)> {
+        let (client_id, conn_id) = {
+            let mut aliases = self.frontier_aliases.lock().await;
+            let entry = aliases.get_mut(&alias)?;
+            entry.last_activity = Instant::now();
+            (entry.client_id, entry.conn_id)
+        };
+        let key = self.config.authorized_clients.get(&client_id)?.clone();
+        Some((key, conn_id))
     }
 
     async fn session(&self, key: SessionKey) -> Option<Arc<SessionHandle>> {
@@ -4833,11 +4928,21 @@ impl ServerState {
             .lock()
             .await
             .retain(|_, connection| connection.last_activity() > cutoff);
+        self.frontier_aliases
+            .lock()
+            .await
+            .retain(|_, alias| alias.last_activity > cutoff);
     }
 }
 
 type ConnectionKey = (u32, u64);
 type SessionKey = (u32, u64, u64);
+
+struct FrontierShortAlias {
+    client_id: u32,
+    conn_id: u64,
+    last_activity: Instant,
+}
 
 struct ServerConnection {
     seen_client: Mutex<PacketHistory>,
@@ -5440,6 +5545,27 @@ async fn run_tcp_dns_connection(state: Arc<ServerState>, stream: TcpStream) -> R
     }
 }
 
+async fn open_client_packet(
+    state: &ServerState,
+    envelope: &[u8],
+) -> Result<(ClientAccessKey, Packet, bool)> {
+    if let Ok(Some(alias)) = frontier_short_sealed_alias(envelope) {
+        if let Some((key, conn_id)) = state.frontier_alias_connection(alias).await {
+            if let Ok(packet) =
+                open_packet_frontier_short(&key, conn_id, Direction::ClientToServer, envelope)
+            {
+                return Ok((key, packet, true));
+            }
+        }
+    }
+    let (key, packet) = open_packet_with_registry(
+        &state.config.authorized_clients,
+        Direction::ClientToServer,
+        envelope,
+    )?;
+    Ok((key, packet, false))
+}
+
 async fn handle_dns_query(state: Arc<ServerState>, query_bytes: &[u8]) -> Result<Vec<u8>> {
     let query = parse_query(query_bytes)?;
     if query.qclass == CLASS_IN && is_in_domain(&query.qname, &state.config.domain) {
@@ -5458,14 +5584,15 @@ async fn handle_dns_query(state: Arc<ServerState>, query_bytes: &[u8]) -> Result
         Ok(envelope) => envelope,
         Err(_) => return build_empty_response(&query, 0),
     };
-    let (key, packet) = match open_packet_with_registry(
-        &state.config.authorized_clients,
-        Direction::ClientToServer,
-        &envelope,
-    ) {
-        Ok(opened) => opened,
-        Err(_) => return build_empty_response(&query, 0),
-    };
+    let (key, packet, used_frontier_short_header) =
+        match open_client_packet(&state, &envelope).await {
+            Ok(opened) => opened,
+            Err(_) => return build_empty_response(&query, 0),
+        };
+    let frontier_alias_ready = !used_frontier_short_header
+        && state
+            .register_frontier_alias(key.client_id, packet.conn_id)
+            .await;
 
     state.cleanup_idle(Instant::now()).await;
     let connection = state.connection(key.client_id, packet.conn_id).await;
@@ -5588,6 +5715,16 @@ async fn handle_dns_query(state: Arc<ServerState>, query_bytes: &[u8]) -> Result
             }
             Frame::Ping { .. } => {}
             Frame::PathResponse { .. } => {}
+        }
+    }
+
+    if frontier_alias_ready {
+        let alias_frame = Frame::PathResponse {
+            nonce: FRONTIER_SHORT_ALIAS_READY_NONCE,
+            bytes: frontier_short_alias_signal(packet.conn_id),
+        };
+        if response_frame_fits(&query, &key, &response, &alias_frame)? {
+            response.frames.push(alias_frame);
         }
     }
 
@@ -6017,8 +6154,9 @@ fn fit_mux_client_request_to_dns_budget(
     config: &ClientConfig,
     request: &mut Packet,
     mut kind: MuxSentKind,
+    use_frontier_short_header: bool,
 ) -> Result<MuxSentKind> {
-    while !client_request_fits(config, request) {
+    while !client_request_fits(config, request, use_frontier_short_header) {
         if shrink_packet_ack_ranges(request) {
             continue;
         }
@@ -6028,7 +6166,7 @@ fn fit_mux_client_request_to_dns_budget(
         if remove_stream_ack_frame(request) {
             continue;
         }
-        if shrink_mux_data_frame(config, request, &mut kind) {
+        if shrink_mux_data_frame(config, request, &mut kind, use_frontier_short_header) {
             continue;
         }
         if drop_mux_open_first_data(request, &mut kind) {
@@ -6040,7 +6178,7 @@ fn fit_mux_client_request_to_dns_budget(
         break;
     }
 
-    if !client_request_fits(config, request)
+    if !client_request_fits(config, request, use_frontier_short_header)
         && matches!(kind, MuxSentKind::Data { .. } | MuxSentKind::Ping)
     {
         request.frames.clear();
@@ -6056,20 +6194,20 @@ fn fit_mux_client_request_to_dns_budget(
             stream_id,
             target,
             first_data: Some(_),
-        } if !client_request_fits(config, request) => {
+        } if !client_request_fits(config, request, use_frontier_short_header) => {
             remove_last_data_frame(request);
             let kind = MuxSentKind::Open {
                 stream_id,
                 target,
                 first_data: None,
             };
-            if client_request_fits(config, request) {
+            if client_request_fits(config, request, use_frontier_short_header) {
                 Ok(kind)
             } else {
                 bail!("client DNS request cannot fit query name after reducing open packet")
             }
         }
-        other if client_request_fits(config, request) => Ok(other),
+        other if client_request_fits(config, request, use_frontier_short_header) => Ok(other),
         _ => bail!("client DNS request cannot fit query name after reductions"),
     }
 }
@@ -6090,6 +6228,7 @@ fn shrink_mux_data_frame(
     config: &ClientConfig,
     request: &mut Packet,
     kind: &mut MuxSentKind,
+    use_frontier_short_header: bool,
 ) -> bool {
     let current_len = mux_data_len(kind);
     if current_len <= 1 {
@@ -6105,7 +6244,7 @@ fn shrink_mux_data_frame(
     while low <= high {
         let mid = low + (high - low) / 2;
         truncate_mux_data_frame(request, kind, &original_bytes, mid);
-        if client_request_fits(config, request) {
+        if client_request_fits(config, request, use_frontier_short_header) {
             best = Some(mid);
             low = mid + 1;
         } else {
@@ -6232,8 +6371,12 @@ fn shrink_packet_ack_ranges(request: &mut Packet) -> bool {
     request.ack_ranges.pop().is_some()
 }
 
-fn client_request_fits(config: &ClientConfig, request: &Packet) -> bool {
-    sealed_packet_len(request)
+fn client_request_fits(
+    config: &ClientConfig,
+    request: &Packet,
+    use_frontier_short_header: bool,
+) -> bool {
+    sealed_client_packet_len(config, request, use_frontier_short_header)
         .and_then(|envelope_len| {
             if config.mode == ClientMode::Frontier {
                 compact_envelope_qname_len(envelope_len, &config.domain)
@@ -6243,6 +6386,20 @@ fn client_request_fits(config: &ClientConfig, request: &Packet) -> bool {
         })
         .map(|qname_len| qname_len <= 253)
         .unwrap_or(false)
+}
+
+fn sealed_client_packet_len(
+    config: &ClientConfig,
+    request: &Packet,
+    use_frontier_short_header: bool,
+) -> Result<usize> {
+    if config.mode == ClientMode::Frontier && use_frontier_short_header {
+        sealed_packet_len_frontier_short(request)
+    } else if config.mode == ClientMode::Frontier {
+        sealed_packet_len_frontier(request)
+    } else {
+        sealed_packet_len(request)
+    }
 }
 
 fn is_in_domain(qname: &str, domain: &str) -> bool {
@@ -6473,6 +6630,7 @@ mod tests {
             Some(ClientSendClass::Control),
             &packet,
             Duration::from_millis(50),
+            false,
         )
         .await
         .unwrap();
@@ -6497,6 +6655,25 @@ mod tests {
                 .prefer_tcp_for_resolver(0, Some(ClientSendClass::Control))
                 .await
         );
+        assert!(
+            !runtime
+                .prefer_tcp_for_resolver(0, Some(ClientSendClass::Data))
+                .await
+        );
+        runtime
+            .record_resolver_result(
+                0,
+                ResolverResultSample {
+                    ok: true,
+                    elapsed: Duration::from_millis(60),
+                    truncated: false,
+                    useful_bytes: 0,
+                    request_upload_bytes: 64,
+                    class: Some(ClientSendClass::Data),
+                    transport: Some(DnsTransportOutcome::TcpAfterUdpFailure),
+                },
+            )
+            .await;
         assert!(
             runtime
                 .prefer_tcp_for_resolver(0, Some(ClientSendClass::Data))
@@ -6547,6 +6724,7 @@ mod tests {
             Some(ClientSendClass::Control),
             &packet,
             Duration::from_millis(250),
+            false,
         )
         .await
         .unwrap();
@@ -6627,5 +6805,55 @@ mod tests {
             txt_response_wire_len(&query, sealed_packet_len(&packet).unwrap()),
             response.len()
         );
+    }
+
+    #[tokio::test]
+    async fn server_opens_frontier_short_packet_after_alias_registration() {
+        let key = ClientAccessKey::generate();
+        let state = ServerState::new(ServerConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            domain: "t.example.test".to_string(),
+            target: "127.0.0.1:1".parse().unwrap(),
+            target_mode: ServerTargetMode::Tcp,
+            authorized_clients: Arc::new(HashMap::from([(key.client_id, key.clone())])),
+        });
+        let mut full_packet = Packet::new(0x123456, 0);
+        full_packet.frames.push(Frame::Ping { nonce: 0 });
+        let full = seal_packet_frontier(&key, Direction::ClientToServer, &full_packet).unwrap();
+
+        let (opened_key, opened, used_short) = open_client_packet(&state, &full).await.unwrap();
+        assert_eq!(opened_key.client_id, key.client_id);
+        assert_eq!(opened, full_packet);
+        assert!(!used_short);
+        assert!(
+            state
+                .register_frontier_alias(key.client_id, full_packet.conn_id)
+                .await
+        );
+
+        let mut short_packet = Packet::new(full_packet.conn_id, 1);
+        short_packet.frames.push(Frame::Data {
+            stream_id: 0,
+            offset: 0,
+            fin: false,
+            bytes: vec![1; 64],
+        });
+        let short =
+            seal_packet_frontier_short(&key, Direction::ClientToServer, &short_packet).unwrap();
+        let (_, opened, used_short) = open_client_packet(&state, &short).await.unwrap();
+        assert_eq!(opened, short_packet);
+        assert!(used_short);
+    }
+
+    #[test]
+    fn frontier_uses_shorter_connection_aliases() {
+        assert!(
+            client_conn_id_mask(ClientMode::Frontier) < client_conn_id_mask(ClientMode::Velocity)
+        );
+        for _ in 0..1024 {
+            let conn_id = fresh_client_conn_id(ClientMode::Frontier);
+            assert!(conn_id > 0);
+            assert!(conn_id <= FRONTIER_CLIENT_CONN_ID_MASK);
+        }
     }
 }
