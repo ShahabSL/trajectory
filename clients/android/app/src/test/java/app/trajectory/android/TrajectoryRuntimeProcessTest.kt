@@ -10,10 +10,14 @@ class TrajectoryRuntimeProcessTest {
         val args = TrajectoryRuntimeProcess.buildArgs("/app/lib/libtrajectory_client.so", profile())
 
         assertEquals("/app/lib/libtrajectory_client.so", args.first())
-        assertTrue(args.containsAll(listOf("--listen", "127.0.0.1:7000")))
+        assertTrue(args.containsAll(listOf("--listen", "127.0.0.1:0")))
+        assertTrue(args.containsAll(listOf("--socks-listen", "127.0.0.1:7000")))
         assertTrue(args.containsAll(listOf("--http-listen", "127.0.0.1:7001")))
         assertTrue(args.containsAll(listOf("--resolver", "1.1.1.1:53")))
         assertTrue(args.containsAll(listOf("--resolver-socks-proxy", "127.0.0.1:11092")))
+        assertTrue(args.containsAll(listOf("--resolver-transport", "tcp")))
+        assertTrue(args.containsAll(listOf("--mode", "secure")))
+        assertTrue(args.containsAll(listOf("--resolver-cohort-size", "8")))
         assertTrue("access key must only be passed through env", args.none { it.contains("traj1_") })
     }
 
@@ -24,6 +28,8 @@ class TrajectoryRuntimeProcessTest {
         accessKeySaved = true,
         resolvers = listOf("1.1.1.1:53"),
         resolverSocksProxy = "127.0.0.1:11092",
+        resolverTransport = "tcp",
+        resolverCohortSize = 8,
         socksPort = 7000,
         httpPort = 7001,
         dnsMaxPayload = 1232,

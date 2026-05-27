@@ -2,7 +2,7 @@ use crate::codec::{AckRange, Frame, StreamRange};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
-const REPAIR_AFTER_NEW_SLICES: usize = 16;
+const REPAIR_AFTER_NEW_SLICES: usize = 64;
 const REPAIR_WINDOW_BYTES: u64 = 32 * 1024;
 const PACKET_HISTORY_LIMIT: usize = 4096;
 

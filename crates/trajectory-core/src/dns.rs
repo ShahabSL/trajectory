@@ -1,5 +1,4 @@
 use anyhow::{bail, Context, Result};
-use data_encoding::BASE32_NOPAD;
 
 pub const TYPE_TXT: u16 = 16;
 pub const TYPE_A: u16 = 1;
@@ -8,6 +7,15 @@ pub const TYPE_NS: u16 = 2;
 pub const TYPE_SOA: u16 = 6;
 pub const CLASS_IN: u16 = 1;
 pub const TYPE_OPT: u16 = 41;
+const BASE36_BLOCK_BYTES: usize = 31;
+const BASE36_FULL_BLOCK_CHARS: usize = 48;
+const BASE36_FIRST_LABEL_CHARS: usize = 61;
+const BASE36_COMPACT_FIRST_LABEL_CHARS: usize = 62;
+const BASE36_NEXT_LABEL_CHARS: usize = 63;
+const BASE36_WIDTHS: [usize; BASE36_BLOCK_BYTES + 1] = [
+    0, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16, 18, 19, 21, 22, 24, 25, 27, 28, 30, 31, 33, 35, 36, 38,
+    39, 41, 42, 44, 45, 47, 48,
+];
 
 #[derive(Clone, Debug)]
 pub struct DnsQuery {
@@ -28,19 +36,66 @@ pub fn txt_response_wire_len(query: &DnsQuery, envelope_len: usize) -> usize {
     12 + query.question.len() + 12 + rdata_len
 }
 
+pub fn envelope_qname_len(envelope_len: usize, domain: &str) -> Result<usize> {
+    envelope_qname_len_with_first_label(envelope_len, domain, BASE36_FIRST_LABEL_CHARS, 2)
+}
+
+pub fn compact_envelope_qname_len(envelope_len: usize, domain: &str) -> Result<usize> {
+    envelope_qname_len_with_first_label(envelope_len, domain, BASE36_COMPACT_FIRST_LABEL_CHARS, 1)
+}
+
+fn envelope_qname_len_with_first_label(
+    envelope_len: usize,
+    domain: &str,
+    first_label_payload_chars: usize,
+    prefix_chars: usize,
+) -> Result<usize> {
+    let encoded_len = base36_encoded_len(envelope_len)?;
+    let label_count = 1 + encoded_len
+        .saturating_sub(first_label_payload_chars)
+        .div_ceil(BASE36_NEXT_LABEL_CHARS);
+    let qname_len = encoded_len
+        .checked_add(prefix_chars)
+        .and_then(|len| len.checked_add(label_count))
+        .and_then(|len| len.checked_add(normalize_domain(domain).len()))
+        .context("encoded DNS query name length overflow")?;
+    Ok(qname_len)
+}
+
 pub fn envelope_to_qname(envelope: &[u8], domain: &str) -> Result<String> {
-    let encoded = BASE32_NOPAD.encode(envelope).to_ascii_lowercase();
+    envelope_to_qname_with_prefix(envelope, domain, 't', true)
+}
+
+pub fn envelope_to_compact_qname(envelope: &[u8], domain: &str) -> Result<String> {
+    envelope_to_qname_with_prefix(envelope, domain, 'u', false)
+}
+
+fn envelope_to_qname_with_prefix(
+    envelope: &[u8],
+    domain: &str,
+    prefix: char,
+    include_remainder: bool,
+) -> Result<String> {
+    let encoded = base36_encode_envelope(envelope)?;
     let mut labels = Vec::new();
-    let mut pos = 0;
+    let mut first = String::with_capacity(63);
+    first.push(prefix);
+    if include_remainder {
+        let remainder = base36_remainder_len(envelope.len());
+        first.push(base36_digit(remainder as u8));
+    }
+    let first_label_payload_chars = if include_remainder {
+        BASE36_FIRST_LABEL_CHARS
+    } else {
+        BASE36_COMPACT_FIRST_LABEL_CHARS
+    };
+    let mut pos = encoded.len().min(first_label_payload_chars);
+    first.push_str(&encoded[..pos]);
+    labels.push(first);
     while pos < encoded.len() {
-        let chunk_len = if pos == 0 { 62 } else { 63 };
-        let end = (pos + chunk_len).min(encoded.len());
+        let end = (pos + BASE36_NEXT_LABEL_CHARS).min(encoded.len());
         let chunk = &encoded[pos..end];
-        if pos == 0 {
-            labels.push(format!("t{chunk}"));
-        } else {
-            labels.push(chunk.to_string());
-        }
+        labels.push(chunk.to_string());
         pos = end;
     }
     labels.push(normalize_domain(domain));
@@ -60,26 +115,189 @@ pub fn qname_to_envelope(qname: &str, domain: &str) -> Result<Vec<u8>> {
         .or_else(|| (qname == domain).then_some(""))
         .context("query name is outside tunnel domain")?;
     let mut encoded = String::new();
-    for (index, label) in left
+    let mut labels = left
         .split('.')
         .filter(|label| !label.is_empty())
-        .enumerate()
+        .enumerate();
+    let Some((_, first_label)) = labels.next() else {
+        bail!("empty tunnel payload");
+    };
+    let explicit_remainder = if let Some(first_payload) = first_label.strip_prefix('t') {
+        let mut first_chars = first_payload.chars();
+        let remainder_char = first_chars
+            .next()
+            .context("tunnel label missing block remainder")?;
+        let remainder =
+            base36_value(remainder_char).context("invalid tunnel block remainder")? as usize;
+        encoded.extend(first_chars);
+        Some(remainder)
+    } else if let Some(first_payload) = first_label.strip_prefix('u') {
+        encoded.extend(first_payload.chars());
+        None
+    } else {
+        bail!("tunnel label missing known prefix");
+    };
+    for (_, label) in labels {
+        encoded.push_str(label);
+    }
+    let remainder = match explicit_remainder {
+        Some(0) if !encoded.is_empty() => bail!("invalid explicit tunnel block remainder"),
+        Some(remainder) => remainder,
+        None => infer_base36_remainder(encoded.len())?,
+    };
+    base36_decode_envelope(&encoded, remainder)
+}
+
+fn base36_remainder_len(envelope_len: usize) -> usize {
+    match envelope_len % BASE36_BLOCK_BYTES {
+        0 if envelope_len > 0 => BASE36_BLOCK_BYTES,
+        remainder => remainder,
+    }
+}
+
+fn base36_encoded_len(envelope_len: usize) -> Result<usize> {
+    if envelope_len == 0 {
+        return Ok(0);
+    }
+    let full_blocks = envelope_len / BASE36_BLOCK_BYTES;
+    let remainder = envelope_len % BASE36_BLOCK_BYTES;
+    let full_len = full_blocks
+        .checked_mul(BASE36_FULL_BLOCK_CHARS)
+        .context("encoded DNS query name length overflow")?;
+    if remainder == 0 {
+        Ok(full_len)
+    } else {
+        full_len
+            .checked_add(BASE36_WIDTHS[remainder])
+            .context("encoded DNS query name length overflow")
+    }
+}
+
+fn infer_base36_remainder(encoded_len: usize) -> Result<usize> {
+    if encoded_len == 0 {
+        return Ok(0);
+    }
+    let final_width = encoded_len % BASE36_FULL_BLOCK_CHARS;
+    if final_width == 0 {
+        return Ok(BASE36_BLOCK_BYTES);
+    }
+    BASE36_WIDTHS
+        .iter()
+        .position(|width| *width == final_width)
+        .filter(|remainder| *remainder > 0)
+        .context("invalid compact base36 tunnel payload length")
+}
+
+fn base36_encode_envelope(envelope: &[u8]) -> Result<String> {
+    let mut encoded = String::with_capacity(base36_encoded_len(envelope.len())?);
+    for chunk in envelope.chunks(BASE36_BLOCK_BYTES) {
+        base36_encode_block(chunk, &mut encoded)?;
+    }
+    Ok(encoded)
+}
+
+fn base36_encode_block(block: &[u8], out: &mut String) -> Result<()> {
+    let width = *BASE36_WIDTHS
+        .get(block.len())
+        .context("invalid base36 block length")?;
+    if block.is_empty() {
+        return Ok(());
+    }
+    let mut work = block.to_vec();
+    let mut digits = Vec::new();
+    while work.iter().any(|byte| *byte != 0) {
+        let mut carry = 0u16;
+        for byte in &mut work {
+            let value = (carry << 8) | u16::from(*byte);
+            *byte = (value / 36) as u8;
+            carry = value % 36;
+        }
+        digits.push(base36_digit(carry as u8));
+    }
+    if digits.len() > width {
+        bail!("base36 block exceeded fixed width");
+    }
+    for _ in digits.len()..width {
+        out.push('0');
+    }
+    for digit in digits.iter().rev() {
+        out.push(*digit);
+    }
+    Ok(())
+}
+
+fn base36_decode_envelope(encoded: &str, remainder: usize) -> Result<Vec<u8>> {
+    if remainder == 0 {
+        if encoded.is_empty() {
+            return Ok(Vec::new());
+        }
+        bail!("empty tunnel remainder with non-empty payload");
+    }
+    if remainder > BASE36_BLOCK_BYTES {
+        bail!("invalid tunnel block remainder");
+    }
+    let last_width = BASE36_WIDTHS[remainder];
+    if encoded.len() < last_width {
+        bail!("truncated base36 tunnel payload");
+    }
+    let full_width = encoded.len() - last_width;
+    if !full_width.is_multiple_of(BASE36_FULL_BLOCK_CHARS) {
+        bail!("invalid base36 tunnel payload length");
+    }
+    let mut out =
+        Vec::with_capacity((full_width / BASE36_FULL_BLOCK_CHARS) * BASE36_BLOCK_BYTES + remainder);
+    let mut pos = 0;
+    while pos < full_width {
+        let block = base36_decode_block(
+            &encoded[pos..pos + BASE36_FULL_BLOCK_CHARS],
+            BASE36_BLOCK_BYTES,
+        )?;
+        out.extend_from_slice(&block);
+        pos += BASE36_FULL_BLOCK_CHARS;
+    }
+    let block = base36_decode_block(&encoded[pos..], remainder)?;
+    out.extend_from_slice(&block);
+    Ok(out)
+}
+
+fn base36_decode_block(digits: &str, byte_len: usize) -> Result<Vec<u8>> {
+    if digits.len()
+        != *BASE36_WIDTHS
+            .get(byte_len)
+            .context("invalid base36 block length")?
     {
-        if index == 0 {
-            let stripped = label
-                .strip_prefix('t')
-                .context("tunnel label missing t prefix")?;
-            encoded.push_str(stripped);
-        } else {
-            encoded.push_str(label);
+        bail!("invalid base36 block width");
+    }
+    let mut out = vec![0u8; byte_len];
+    for ch in digits.chars() {
+        let mut carry = u16::from(base36_value(ch).context("invalid base36 tunnel payload")?);
+        for byte in out.iter_mut().rev() {
+            let value = u16::from(*byte) * 36 + carry;
+            *byte = (value & 0xff) as u8;
+            carry = value >> 8;
+        }
+        if carry != 0 {
+            bail!("base36 tunnel payload overflows block");
         }
     }
-    if encoded.is_empty() {
-        bail!("empty tunnel payload");
+    Ok(out)
+}
+
+fn base36_digit(value: u8) -> char {
+    match value {
+        0..=9 => (b'0' + value) as char,
+        10..=35 => (b'a' + (value - 10)) as char,
+        _ => unreachable!("base36 digit out of range"),
     }
-    BASE32_NOPAD
-        .decode(encoded.to_ascii_uppercase().as_bytes())
-        .map_err(|_| anyhow::anyhow!("invalid base32 tunnel payload"))
+}
+
+fn base36_value(value: char) -> Option<u8> {
+    match value {
+        '0'..='9' => Some(value as u8 - b'0'),
+        'a'..='z' => Some(value as u8 - b'a' + 10),
+        'A'..='Z' => Some(value as u8 - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub fn build_query(id: u16, qname: &str, udp_payload_size: u16) -> Result<Vec<u8>> {
@@ -395,6 +613,85 @@ mod tests {
     }
 
     #[test]
+    fn qname_envelope_roundtrip_preserves_leading_zeroes() {
+        for len in [0usize, 1, 2, 30, 31, 32, 62, 96, 128, 144] {
+            let mut payload = vec![0u8; len];
+            for (index, byte) in payload.iter_mut().enumerate().skip(len / 3) {
+                *byte = (index as u8).wrapping_mul(17).wrapping_add(3);
+            }
+            let qname = envelope_to_qname(&payload, "tun.example.com").unwrap();
+            assert!(qname.split('.').all(|label| label.len() <= 63));
+            assert_eq!(
+                envelope_qname_len(payload.len(), "tun.example.com").unwrap(),
+                qname.len()
+            );
+            assert_eq!(
+                qname_to_envelope(&qname, "tun.example.com").unwrap(),
+                payload
+            );
+        }
+    }
+
+    #[test]
+    fn compact_qname_envelope_roundtrip_infers_remainder() {
+        let domain = "t.7-b.cc";
+        for len in [0usize, 1, 2, 30, 31, 32, 62, 96, 128, 144, 154] {
+            let payload = (0..len)
+                .map(|index| (index as u8).wrapping_mul(31).wrapping_add(7))
+                .collect::<Vec<_>>();
+            let qname = envelope_to_compact_qname(&payload, domain).unwrap();
+            assert!(qname.starts_with('u'));
+            assert!(qname.split('.').all(|label| label.len() <= 63));
+            assert_eq!(
+                compact_envelope_qname_len(payload.len(), domain).unwrap(),
+                qname.len()
+            );
+            assert_eq!(qname_to_envelope(&qname, domain).unwrap(), payload);
+        }
+    }
+
+    #[test]
+    fn compact_qname_exhaustive_roundtrip_and_boundaries() {
+        let domain = "t.7-b.cc";
+        for len in 0usize..=155 {
+            let zeroes = vec![0u8; len];
+            let qname = envelope_to_compact_qname(&zeroes, domain).unwrap();
+            assert_eq!(qname_to_envelope(&qname, domain).unwrap(), zeroes);
+
+            let ones = vec![0xffu8; len];
+            let qname = envelope_to_compact_qname(&ones, domain).unwrap();
+            assert_eq!(qname_to_envelope(&qname, domain).unwrap(), ones);
+        }
+
+        envelope_to_compact_qname(&vec![0u8; 155], domain).unwrap();
+        assert!(envelope_to_compact_qname(&vec![0u8; 156], domain).is_err());
+        envelope_to_compact_qname(&vec![0u8; 150], "tun.example.com").unwrap();
+        assert!(envelope_to_compact_qname(&vec![0u8; 151], "tun.example.com").is_err());
+    }
+
+    #[test]
+    fn qname_parser_rejects_noncanonical_lengths() {
+        assert!(qname_to_envelope("u0.t.7-b.cc", "t.7-b.cc").is_err());
+        assert!(qname_to_envelope("t0abc.t.7-b.cc", "t.7-b.cc").is_err());
+        assert_eq!(
+            qname_to_envelope("t0.t.7-b.cc", "t.7-b.cc").unwrap(),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn base36_fixed_width_handles_max_blocks() {
+        for len in 1..=BASE36_BLOCK_BYTES {
+            let payload = vec![0xff; len];
+            let qname = envelope_to_qname(&payload, "tun.example.com").unwrap();
+            assert_eq!(
+                qname_to_envelope(&qname, "tun.example.com").unwrap(),
+                payload
+            );
+        }
+    }
+
+    #[test]
     fn dns_txt_roundtrip() {
         let query_bytes = build_query(7, "t-aa.example.com", 1232).unwrap();
         let parsed = parse_query(&query_bytes).unwrap();
@@ -416,6 +713,18 @@ mod tests {
             qname_to_envelope(&qname, "tun.example.com").unwrap(),
             payload
         );
+    }
+
+    #[test]
+    fn envelope_qname_len_matches_encoded_name() {
+        for len in [1usize, 2, 38, 39, 96, 128, 144] {
+            let payload = vec![7u8; len];
+            let qname = envelope_to_qname(&payload, "tun.example.com").unwrap();
+            assert_eq!(
+                envelope_qname_len(payload.len(), "tun.example.com").unwrap(),
+                qname.len()
+            );
+        }
     }
 
     #[test]

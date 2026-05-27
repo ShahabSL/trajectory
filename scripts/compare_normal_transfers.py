@@ -185,7 +185,20 @@ def parse_args() -> argparse.Namespace:
         help="Repeat to choose a subset. Defaults to all.",
     )
     parser.add_argument("--trajectory-dns-max-payload", type=int, default=None)
+    parser.add_argument(
+        "--trajectory-mode",
+        choices=("secure", "velocity", "resilient", "frontier"),
+        default=None,
+    )
     parser.add_argument("--trajectory-resolver-socks-proxy", default=None)
+    parser.add_argument(
+        "--trajectory-resolver-transport",
+        choices=("auto", "udp", "tcp"),
+        default=None,
+    )
+    parser.add_argument("--trajectory-resolver-cohort-size", type=int, default=None)
+    parser.add_argument("--trajectory-resolver-admission-min", type=int, default=None)
+    parser.add_argument("--trajectory-admission-report", default=None)
     parser.add_argument("--slipstream-dir", type=pathlib.Path, default=DEFAULT_SLIPSTREAM_DIR)
     parser.add_argument("--native-cert-dir", type=pathlib.Path, default=DEFAULT_NATIVE_CERT_DIR)
     parser.add_argument("--report", type=pathlib.Path, default=None)
@@ -225,7 +238,12 @@ def main() -> int:
                 size_bytes=args.size_bytes,
                 timeout_seconds=args.timeout_seconds,
                 trajectory_dns_max_payload=args.trajectory_dns_max_payload,
+                trajectory_mode=args.trajectory_mode,
                 trajectory_resolver_socks_proxy=args.trajectory_resolver_socks_proxy,
+                trajectory_resolver_transport=args.trajectory_resolver_transport,
+                trajectory_resolver_cohort_size=args.trajectory_resolver_cohort_size,
+                trajectory_resolver_admission_min=args.trajectory_resolver_admission_min,
+                trajectory_admission_report=args.trajectory_admission_report,
             )
             results.append(result)
             append_jsonl(report, {"event": "implementation_result", **result_to_json(result)})
@@ -375,7 +393,7 @@ def install_transfer_servers(
             [Service]
             Type=simple
             WorkingDirectory={TRANSFER_STAGE_DIR}
-            ExecStart={TRANSFER_STAGE_DIR}/trajectory-server --dns-listen-port 53 --target-address {REMOTE_SOCKS_TARGET} --domain {domain} --client-db {TRANSFER_STAGE_DIR}/trajectory-transfer-clients.json
+            ExecStart={TRANSFER_STAGE_DIR}/trajectory-server --dns-listen-port 53 --target-address socks5-direct --domain {domain} --client-db {TRANSFER_STAGE_DIR}/trajectory-transfer-clients.json
             Restart=no
             RuntimeMaxSec={runtime_max_seconds}
 
@@ -452,7 +470,12 @@ def run_implementation(
     size_bytes: int,
     timeout_seconds: int,
     trajectory_dns_max_payload: int | None,
+    trajectory_mode: str | None,
     trajectory_resolver_socks_proxy: str | None,
+    trajectory_resolver_transport: str | None,
+    trajectory_resolver_cohort_size: int | None,
+    trajectory_resolver_admission_min: int | None,
+    trajectory_admission_report: str | None,
 ) -> ImplementationResult:
     resolved_active = remote_is_active(ssh, "systemd-resolved")
     client: subprocess.Popen[str] | None = None
@@ -474,7 +497,12 @@ def run_implementation(
             resolvers=resolvers,
             assets=assets,
             trajectory_dns_max_payload=trajectory_dns_max_payload,
+            trajectory_mode=trajectory_mode,
             trajectory_resolver_socks_proxy=trajectory_resolver_socks_proxy,
+            trajectory_resolver_transport=trajectory_resolver_transport,
+            trajectory_resolver_cohort_size=trajectory_resolver_cohort_size,
+            trajectory_resolver_admission_min=trajectory_resolver_admission_min,
+            trajectory_admission_report=trajectory_admission_report,
         )
         ssh.remote(f"systemctl start {service}", check=True)
         ensure_remote_service_active(ssh, service, timeout_seconds=10)
@@ -542,7 +570,12 @@ def client_command_and_service(
     resolvers: list[str],
     assets: dict[str, object],
     trajectory_dns_max_payload: int | None,
+    trajectory_mode: str | None,
     trajectory_resolver_socks_proxy: str | None,
+    trajectory_resolver_transport: str | None,
+    trajectory_resolver_cohort_size: int | None,
+    trajectory_resolver_admission_min: int | None,
+    trajectory_admission_report: str | None,
 ) -> tuple[list[str], pathlib.Path, str]:
     if implementation == "trajectory":
         trajectory_paths = assets["trajectory_paths"]
@@ -551,6 +584,8 @@ def client_command_and_service(
         cmd = [
             str(trajectory_paths["client"]),
             "--listen",
+            "127.0.0.1:0",
+            "--socks-listen",
             f"127.0.0.1:{listen_port}",
             "--domain",
             domain,
@@ -559,8 +594,18 @@ def client_command_and_service(
         ]
         if trajectory_dns_max_payload is not None:
             cmd.extend(["--dns-max-payload", str(trajectory_dns_max_payload)])
+        if trajectory_mode is not None:
+            cmd.extend(["--mode", trajectory_mode])
         if trajectory_resolver_socks_proxy is not None:
             cmd.extend(["--resolver-socks-proxy", trajectory_resolver_socks_proxy])
+        if trajectory_resolver_transport is not None:
+            cmd.extend(["--resolver-transport", trajectory_resolver_transport])
+        if trajectory_resolver_cohort_size is not None:
+            cmd.extend(["--resolver-cohort-size", str(trajectory_resolver_cohort_size)])
+        if trajectory_resolver_admission_min is not None:
+            cmd.extend(["--resolver-admission-min", str(trajectory_resolver_admission_min)])
+        if trajectory_admission_report is not None:
+            cmd.extend(["--admission-report", trajectory_admission_report])
         for resolver in resolvers:
             cmd.extend(["--resolver", resolver])
         return cmd, REPO_ROOT, TRANSFER_TRAJECTORY_SERVICE

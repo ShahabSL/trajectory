@@ -10,7 +10,7 @@ environment, and exposes local SOCKS5 and HTTP proxy endpoints.
 - Windows, macOS, and Linux desktop shell build path
 - profile editing for domain, access key, resolvers, resolver file, resolver
   SOCKS gate, DNS payload, and admission controls
-- local SOCKS-compatible listener through `--listen`
+- local optimized SOCKS5 listener through `--socks-listen`
 - local HTTP proxy listener through `--http-listen`
 - connect/disconnect lifecycle for `trajectory-client`
 - access keys stored by the Rust backend in the OS credential store
@@ -69,13 +69,14 @@ start `trajectory-client` or access the OS credential store.
 
 ## Direct CLI Equivalent
 
-The SOCKS-compatible listener is currently required because the CLI always owns
-one `--listen` socket. The HTTP listener is optional. The desktop app ultimately
-launches this shape of command:
+The desktop app launches the optimized SOCKS listener and keeps the raw TCP
+listener on an ephemeral loopback port. The HTTP listener is optional. The
+desktop app ultimately launches this shape of command:
 
 ```sh
 TRAJECTORY_ACCESS_KEY="$ACCESS_KEY" target/release/trajectory-client \
-  --listen 127.0.0.1:7000 \
+  --listen 127.0.0.1:0 \
+  --socks-listen 127.0.0.1:7000 \
   --http-listen 127.0.0.1:7001 \
   --domain "$DOMAIN" \
   --resolver 1.1.1.1:53 \

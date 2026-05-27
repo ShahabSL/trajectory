@@ -11,50 +11,111 @@ import android.os.IBinder
 import java.util.concurrent.Executors
 
 class TrajectoryProxyService : Service() {
-    private val executor = Executors.newSingleThreadExecutor()
+    private val logExecutor = Executors.newSingleThreadExecutor()
+    private val controlExecutor = Executors.newSingleThreadExecutor()
     private lateinit var runtime: TrajectoryRuntimeProcess
+    @Volatile private var requestedStop = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (!::runtime.isInitialized) {
-            runtime = TrajectoryRuntimeProcess(this, executor, "TrajectoryProxy") {
+            runtime = TrajectoryRuntimeProcess(
+                this,
+                logExecutor,
+                "TrajectoryProxy",
+                onOutputLine = { line ->
+                    RuntimeStatusCenter.observeRuntimeLine(
+                        RuntimeMode.PROXY,
+                        ProfileStore.load(this),
+                        line,
+                    )
+                },
+            ) {
+                if (!requestedStop) {
+                    RuntimeStatusCenter.markFailed(
+                        RuntimeMode.PROXY,
+                        "sidecar",
+                        "trajectory-client exited",
+                    )
+                }
                 stopSelf()
             }
         }
         when (intent?.action) {
-            ACTION_STOP -> stopRuntime()
-            else -> startRuntime()
+            ACTION_STOP -> controlExecutor.execute { stopRuntime(resetStatus = true) }
+            else -> {
+                RuntimeStatusCenter.starting(
+                    RuntimeMode.PROXY,
+                    "Launching trajectory-client and resolver admission.",
+                )
+                startForeground(NOTIFICATION_ID, notification("Starting Trajectory proxy"))
+                controlExecutor.execute { startRuntime() }
+            }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
-        stopRuntime()
-        executor.shutdownNow()
+        stopRuntime(resetStatus = false)
+        controlExecutor.shutdownNow()
+        logExecutor.shutdownNow()
         super.onDestroy()
     }
 
     private fun startRuntime() {
-        startForeground(NOTIFICATION_ID, notification("Starting Trajectory proxy"))
         val profile = ProfileStore.load(this)
-        if (!runtime.start(profile)) {
+        requestedStop = false
+        RuntimeStatusCenter.validating(RuntimeMode.PROXY)
+        val errors = profile.validate()
+        if (errors.isNotEmpty()) {
+            RuntimeStatusCenter.markFailed(RuntimeMode.PROXY, "profile", errors.joinToString("; "))
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
         }
-        startForeground(
-            NOTIFICATION_ID,
-            notification("SOCKS 127.0.0.1:${profile.socksPort}, HTTP 127.0.0.1:${profile.httpPort}"),
-        )
+        if (!runtime.start(profile)) {
+            RuntimeStatusCenter.markFailed(RuntimeMode.PROXY, "sidecar", "failed to start trajectory-client")
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
+        if (!waitForPort(profile.socksPort, 10_000)) {
+            RuntimeStatusCenter.markFailed(RuntimeMode.PROXY, "SOCKS listener", "port ${profile.socksPort} did not open")
+            stopRuntime(resetStatus = false)
+            return
+        }
+        if (!waitForPort(profile.httpPort, 10_000)) {
+            RuntimeStatusCenter.markFailed(RuntimeMode.PROXY, "HTTP listener", "port ${profile.httpPort} did not open")
+            stopRuntime(resetStatus = false)
+            return
+        }
+        RuntimeStatusCenter.markListenersReady(RuntimeMode.PROXY, profile)
+        startForeground(NOTIFICATION_ID, notification("Proxy connected on 127.0.0.1:${profile.socksPort}/${profile.httpPort}"))
     }
 
-    private fun stopRuntime() {
+    private fun stopRuntime(resetStatus: Boolean) {
+        if (resetStatus) {
+            RuntimeStatusCenter.markStopping(RuntimeMode.PROXY)
+        }
+        requestedStop = true
         if (::runtime.isInitialized) {
             runtime.stop()
         }
         stopForeground(STOP_FOREGROUND_REMOVE)
+        if (resetStatus) {
+            RuntimeStatusCenter.reset()
+        }
         stopSelf()
+    }
+
+    private fun waitForPort(port: Int, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (RuntimeStatusCenter.isPortOpen(port)) return true
+            Thread.sleep(100)
+        }
+        return false
     }
 
     private fun notification(text: String): Notification {

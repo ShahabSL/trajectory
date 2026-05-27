@@ -7,6 +7,8 @@ data class ClientProfile(
     val accessKeySaved: Boolean,
     val resolvers: List<String>,
     val resolverSocksProxy: String,
+    val resolverTransport: String,
+    val resolverCohortSize: Int?,
     val socksPort: Int,
     val httpPort: Int,
     val dnsMaxPayload: Int,
@@ -17,12 +19,22 @@ data class ClientProfile(
     val vpnMaxSessions: Int,
     val vpnIpv6Enabled: Boolean,
     val vpnAllowBypass: Boolean,
+    val transportMode: String = "secure",
 ) {
     fun validate(): List<String> {
         val errors = mutableListOf<String>()
         if (domain.isBlank()) errors += "Domain is required"
         if (accessKey.isBlank() && !accessKeySaved) errors += "Access key is required"
         if (resolvers.isEmpty()) errors += "At least one resolver is required"
+        if (resolverTransport !in setOf("auto", "udp", "tcp")) {
+            errors += "Resolver transport must be auto, udp, or tcp"
+        }
+        if (transportMode !in setOf("secure", "velocity", "resilient", "frontier")) {
+            errors += "Transport mode must be secure, velocity, resilient, or frontier"
+        }
+        if (resolverCohortSize != null && resolverCohortSize !in 1..10000) {
+            errors += "Resolver cohort size must be 1-10000"
+        }
         if (socksPort !in 1..65535) errors += "SOCKS port is invalid"
         if (httpPort !in 1..65535) errors += "HTTP port is invalid"
         if (dnsMaxPayload !in 512..4096) errors += "DNS payload must be 512-4096"

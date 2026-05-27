@@ -93,7 +93,8 @@ read -rsp 'Trajectory access key: ' TRAJECTORY_ACCESS_KEY; echo
 export TRAJECTORY_ACCESS_KEY
 
 ./trajectory-client \
-  --listen 127.0.0.1:7000 \
+  --listen 127.0.0.1:0 \
+  --socks-listen 127.0.0.1:7000 \
   --http-listen 127.0.0.1:7001 \
   --domain your.domain.example \
   --resolver 1.1.1.1:53 \
@@ -113,6 +114,11 @@ Use the HTTP proxy listener for browsers or tools that expect `http://host:port`
 proxy settings. It supports HTTPS `CONNECT` and absolute-form `http://...`
 requests, and it requires the server egress target to be `socks5-direct` or a
 SOCKS5 upstream.
+
+`--socks-listen` is the optimized browser/client path. It parses the local
+SOCKS5 CONNECT target and carries `host:port` in the tunnel open frame, instead
+of spending DNS round trips on an inner SOCKS handshake. `--listen` is still the
+raw TCP tunnel; use `127.0.0.1:0` when you do not need raw mode.
 
 The SOCKS and HTTP curl checks apply to `socks5-direct` or SOCKS5-upstream
 server installs. If you configured a raw `HOST:PORT` server target, validate
@@ -146,7 +152,8 @@ Write admission diagnostics when testing large files:
 
 ```bash
 ./trajectory-client \
-  --listen 127.0.0.1:7000 \
+  --listen 127.0.0.1:0 \
+  --socks-listen 127.0.0.1:7000 \
   --domain your.domain.example \
   --resolver-file resolvers.txt \
   --admission-report admission.jsonl
@@ -158,7 +165,8 @@ For DNS-over-TCP through a local SOCKS gate:
 
 ```bash
 ./trajectory-client \
-  --listen 127.0.0.1:7000 \
+  --listen 127.0.0.1:0 \
+  --socks-listen 127.0.0.1:7000 \
   --domain your.domain.example \
   --resolver-file resolvers.txt \
   --resolver-socks-proxy 127.0.0.1:11092 \

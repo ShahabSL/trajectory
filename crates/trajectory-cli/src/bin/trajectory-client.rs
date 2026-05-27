@@ -3,7 +3,9 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
-use trajectory_cli::runtime::{parse_socket_addr, run_client, ClientConfig, ResolverTransportMode};
+use trajectory_cli::runtime::{
+    parse_socket_addr, run_client, ClientConfig, ClientMode, ResolverTransportMode,
+};
 use trajectory_core::auth::ClientAccessKey;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -16,12 +18,14 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let mut listen = "127.0.0.1:5201".parse::<SocketAddr>().unwrap();
+    let mut socks_listen = None::<SocketAddr>;
     let mut http_listen = None::<SocketAddr>;
     let mut resolvers = Vec::new();
     let mut domain = None::<String>;
     let mut access_key = None::<ClientAccessKey>;
     let mut resolver_socks_proxy = None::<SocketAddr>;
     let mut resolver_transport = ResolverTransportMode::Auto;
+    let mut mode = ClientMode::Secure;
     let mut poll_interval = Duration::from_millis(25);
     let mut dns_max_payload = None::<u16>;
     let mut admission_report = None::<PathBuf>;
@@ -52,6 +56,14 @@ async fn run() -> Result<()> {
                         .context("missing HTTP proxy listen address")?
                         .parse()
                         .context("invalid HTTP proxy listen address")?,
+                );
+            }
+            "--socks-listen" => {
+                socks_listen = Some(
+                    args.next()
+                        .context("missing SOCKS proxy listen address")?
+                        .parse()
+                        .context("invalid SOCKS proxy listen address")?,
                 );
             }
             "--resolver" | "-r" => {
@@ -90,6 +102,10 @@ async fn run() -> Result<()> {
                         "invalid resolver transport {value:?}; expected auto, udp, or tcp"
                     ),
                 };
+            }
+            "--mode" | "--client-mode" | "--transport-mode" => {
+                let value = args.next().context("missing client mode")?;
+                mode = ClientMode::parse(&value)?;
             }
             "--poll-interval-ms" | "--keep-alive-interval" | "-t" => {
                 let ms: u64 = args
@@ -158,6 +174,7 @@ async fn run() -> Result<()> {
 
     run_client(ClientConfig {
         listen,
+        socks_listen,
         http_listen,
         resolvers,
         domain,
@@ -169,6 +186,7 @@ async fn run() -> Result<()> {
         admission_report,
         resolver_cohort_size,
         resolver_admission_min,
+        mode,
     })
     .await
 }
@@ -185,11 +203,13 @@ Required:
 Optional:
   -l, --tcp-listen-port <PORT>       Local raw TCP listen port (default: 5201)
       --listen <HOST:PORT>           Full local listen address
+      --socks-listen <HOST:PORT>     Local SOCKS5 proxy listener with direct tunnel opens
       --http-listen <HOST:PORT>      Local HTTP proxy listener for CONNECT and http:// requests
   -r, --resolver <HOST:PORT>         Recursive resolver; repeat for multiple
       --resolver-file <PATH>         Read recursive resolvers from a file
       --resolver-socks-proxy <ADDR>  Send DNS-over-TCP through SOCKS5 proxy
       --resolver-transport <MODE>    Direct resolver mode: auto, udp, or tcp (default: auto)
+      --mode <MODE>                  Client transport profile: secure, velocity, resilient, or frontier (default: secure)
       --resolver-cohort-size <N>     Active admitted resolver target when admission is used
       --resolver-admission-min <N>   Minimum admitted resolvers required at startup (default: 1)
   -t, --poll-interval-ms <MS>        Delay after resolver failures

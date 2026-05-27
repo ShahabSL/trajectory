@@ -10,6 +10,7 @@ class TrajectoryRuntimeProcess(
     private val context: Context,
     private val executor: ExecutorService,
     private val logTag: String,
+    private val onOutputLine: (String) -> Unit = {},
     private val onExit: () -> Unit = {},
 ) {
     private var process: Process? = null
@@ -27,7 +28,9 @@ class TrajectoryRuntimeProcess(
         executor.execute {
             process?.inputStream?.use { stream ->
                 BufferedReader(InputStreamReader(stream)).forEachLine { line ->
-                    android.util.Log.i(logTag, redact(line))
+                    val safeLine = redact(line)
+                    android.util.Log.i(logTag, safeLine)
+                    onOutputLine(safeLine)
                 }
             }
             process = null
@@ -46,6 +49,8 @@ class TrajectoryRuntimeProcess(
             val args = mutableListOf(
                 binaryPath,
                 "--listen",
+                "127.0.0.1:0",
+                "--socks-listen",
                 "127.0.0.1:${profile.socksPort}",
                 "--http-listen",
                 "127.0.0.1:${profile.httpPort}",
@@ -57,6 +62,10 @@ class TrajectoryRuntimeProcess(
                 profile.resolverAdmissionMin.toString(),
                 "--poll-interval-ms",
                 profile.pollIntervalMs.toString(),
+                "--resolver-transport",
+                profile.resolverTransport,
+                "--mode",
+                profile.transportMode,
             )
             profile.resolvers.forEach { resolver ->
                 args += "--resolver"
@@ -65,6 +74,10 @@ class TrajectoryRuntimeProcess(
             if (profile.resolverSocksProxy.isNotBlank()) {
                 args += "--resolver-socks-proxy"
                 args += profile.resolverSocksProxy
+            }
+            profile.resolverCohortSize?.let { size ->
+                args += "--resolver-cohort-size"
+                args += size.toString()
             }
             return args
         }

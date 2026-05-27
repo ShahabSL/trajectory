@@ -33,6 +33,8 @@ export interface TrajectoryProfile {
   resolvers: string[];
   resolverFile?: string;
   resolverSocksProxy?: string;
+  resolverTransport: "auto" | "udp" | "tcp";
+  transportMode: "secure" | "velocity" | "resilient" | "frontier";
   socks: ProxyEndpoint;
   http: ProxyEndpoint;
   dnsMaxPayload: number;
@@ -52,6 +54,7 @@ export interface RuntimeSnapshot {
   socksEndpoint?: string;
   httpEndpoint?: string;
   binaryPath?: string;
+  statusDetail?: string;
   lastError?: string;
   logLines: string[];
   capabilities: PlatformCapabilities;

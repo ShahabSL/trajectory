@@ -8,7 +8,9 @@ vpn_service="$repo_root/clients/android/app/src/main/java/app/trajectory/android
 vpn_bridge="$repo_root/clients/android/app/src/main/java/app/trajectory/android/TrajectoryVpnBridge.kt"
 
 grep -q 'android.permission.BIND_VPN_SERVICE' "$manifest"
-grep -q 'android:foregroundServiceType="systemExempted"' "$manifest"
+grep -q 'android.permission.FOREGROUND_SERVICE_SPECIAL_USE' "$manifest"
+grep -q 'android:foregroundServiceType="specialUse"' "$manifest"
+grep -q 'android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE' "$manifest"
 grep -q 'android.net.VpnService.SUPPORTS_ALWAYS_ON' "$manifest"
 grep -q 'android:value="false"' "$manifest"
 grep -q 'VpnService.prepare' "$main_activity"

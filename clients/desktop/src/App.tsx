@@ -213,7 +213,7 @@ export default function App() {
   };
 
   const profileWarnings = validateProfile(draft);
-  const connected = snapshot.phase === "connected" || snapshot.phase === "starting";
+  const running = snapshot.phase === "connected" || snapshot.phase === "starting";
 
   return (
     <main className="app-shell">
@@ -276,7 +276,7 @@ export default function App() {
                 </option>
               ))}
             </select>
-            {connected ? (
+            {running ? (
               <button className="button danger" onClick={disconnect}>
                 <CircleStop size={17} />
                 Disconnect
@@ -380,10 +380,7 @@ function StatusView({
         <div className="hero-copy">
           <StatusPill phase={snapshot.phase} />
           <h2>{phaseLabels[snapshot.phase]}</h2>
-          <p>
-            The desktop client supervises `trajectory-client`, exposes local SOCKS and HTTP proxy
-            listeners, and keeps access keys out of the command line.
-          </p>
+          <p>{snapshot.statusDetail ?? "Waiting for runtime status."}</p>
         </div>
         <div className="metric-grid">
           <Metric label="SOCKS" value={snapshot.socksEndpoint ?? socks} copy onCopy={onCopy} />
@@ -426,6 +423,10 @@ function StatusView({
           <dd>{profile.resolvers.length}</dd>
           <dt>Resolver gate</dt>
           <dd>{profile.resolverSocksProxy || "direct DNS"}</dd>
+          <dt>Resolver transport</dt>
+          <dd>{profile.resolverTransport}</dd>
+          <dt>Mode</dt>
+          <dd>{profile.transportMode}</dd>
           <dt>DNS payload</dt>
           <dd>{profile.dnsMaxPayload} bytes</dd>
         </dl>
@@ -730,6 +731,37 @@ function SettingsView({
         <SectionHeader icon={SlidersHorizontal} title="Transport Knobs" />
         <div className="form-grid">
           <label>
+            Client mode
+            <select
+              value={draft.transportMode}
+              onChange={(event) =>
+                updateDraft({
+                  transportMode: event.target.value as TrajectoryProfile["transportMode"],
+                })
+              }
+            >
+              <option value="secure">Secure</option>
+              <option value="velocity">Velocity</option>
+              <option value="resilient">Resilient</option>
+              <option value="frontier">Frontier</option>
+            </select>
+          </label>
+          <label>
+            Resolver transport
+            <select
+              value={draft.resolverTransport}
+              onChange={(event) =>
+                updateDraft({
+                  resolverTransport: event.target.value as TrajectoryProfile["resolverTransport"],
+                })
+              }
+            >
+              <option value="auto">Auto</option>
+              <option value="udp">UDP only</option>
+              <option value="tcp">TCP only</option>
+            </select>
+          </label>
+          <label>
             DNS max payload
             <input
               type="number"
@@ -888,6 +920,12 @@ function validateProfile(profile: TrajectoryProfile) {
   }
   if (!profile.resolverFile && profile.resolvers.length === 0) {
     warnings.push("Add resolvers or a resolver file.");
+  }
+  if (!["secure", "velocity", "resilient", "frontier"].includes(profile.transportMode)) {
+    warnings.push("Choose a valid client mode.");
+  }
+  if (!["auto", "udp", "tcp"].includes(profile.resolverTransport)) {
+    warnings.push("Choose a valid resolver transport.");
   }
   for (const endpoint of [profile.socks, profile.http]) {
     if (endpoint.enabled && endpoint.host !== "127.0.0.1" && !profile.allowLanWithoutAuth) {

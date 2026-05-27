@@ -66,14 +66,15 @@ The server loads the client registry at startup, so restart after adding, disabl
 
 ```bash
 TRAJECTORY_ACCESS_KEY='traj1_...' trajectory-client \
-  --listen 127.0.0.1:7000 \
+  --listen 127.0.0.1:0 \
+  --socks-listen 127.0.0.1:7000 \
   --http-listen 127.0.0.1:7001 \
   --domain your.domain.example \
   --resolver 1.1.1.1:53 \
   --resolver 8.8.8.8:53
 ```
 
-The `--listen` port is the raw/SOCKS-compatible tunnel. It behaves like a SOCKS5 proxy when the server target is `socks5-direct` or another SOCKS5 upstream. The optional `--http-listen` port is an HTTP proxy listener for browsers and tools that use HTTP CONNECT.
+Use `--socks-listen` for browsers and SOCKS5-capable apps. It parses the local SOCKS target and sends it in the tunnel open frame, which avoids extra SOCKS handshake round trips over DNS. The `--listen` port remains the raw TCP tunnel; `127.0.0.1:0` keeps it on an unused ephemeral port when you only need proxy mode. The optional `--http-listen` port is an HTTP proxy listener for browsers and tools that use HTTP CONNECT.
 
 Desktop GUI:
 

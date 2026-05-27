@@ -21,6 +21,7 @@ async function invokeCommand<T>(command: string, args?: Record<string, unknown>)
 
 const mockSnapshot: RuntimeSnapshot = {
   phase: "disconnected",
+  statusDetail: "Browser preview does not control a real trajectory-client process.",
   logLines: [
     "browser preview mode: open this app with Tauri to start trajectory-client",
   ],
@@ -76,7 +77,8 @@ const mockApi: DesktopApi = {
     const profile = profiles.find((item) => item.id === profileId) ?? profiles[0];
     return {
       ...mockSnapshot,
-      phase: "connected",
+      phase: "starting",
+      statusDetail: "Browser preview simulated a start request; no real listeners are running.",
       activeProfileId: profile.id,
       activeProfileName: profile.name,
       socksEndpoint: profile.socks.enabled

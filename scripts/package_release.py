@@ -105,8 +105,9 @@ Quick start:
 1. Install the server with deploy/install_server.sh.
 2. Create client access keys with trajectory-admin.
 3. Run trajectory-client locally. If the server target is socks5-direct or a
-   SOCKS5 upstream, point SOCKS5-capable applications at --listen and
-   HTTP-proxy applications at --http-listen.
+   SOCKS5 upstream, point SOCKS5-capable applications at --socks-listen and
+   HTTP-proxy applications at --http-listen. Use --listen 127.0.0.1:0 when you
+   do not need the raw TCP tunnel.
 
 See the repository README for the full tunnel and deployment flow.
 """

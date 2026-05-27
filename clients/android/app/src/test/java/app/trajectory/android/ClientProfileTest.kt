@@ -16,10 +16,16 @@ class ClientProfileTest {
             vpnMtu = 128,
             vpnDnsServer = "999.1.1.1",
             vpnMaxSessions = 4,
+            resolverTransport = "bogus",
+            transportMode = "reckless",
+            resolverCohortSize = 0,
         ).validate()
 
         assertEquals(
             listOf(
+                "Resolver transport must be auto, udp, or tcp",
+                "Transport mode must be secure, velocity, resilient, or frontier",
+                "Resolver cohort size must be 1-10000",
                 "VPN MTU must be 576-9000",
                 "VPN max sessions must be 16-20000",
                 "VPN DNS server must be an IPv4 address",
@@ -32,6 +38,9 @@ class ClientProfileTest {
         vpnMtu: Int = 1500,
         vpnDnsServer: String = "1.1.1.1",
         vpnMaxSessions: Int = 2048,
+        resolverTransport: String = "auto",
+        transportMode: String = "secure",
+        resolverCohortSize: Int? = null,
     ): ClientProfile = ClientProfile(
         name = "Test",
         domain = "t.example.com",
@@ -39,6 +48,8 @@ class ClientProfileTest {
         accessKeySaved = true,
         resolvers = listOf("1.1.1.1:53"),
         resolverSocksProxy = "",
+        resolverTransport = resolverTransport,
+        resolverCohortSize = resolverCohortSize,
         socksPort = 7000,
         httpPort = 7001,
         dnsMaxPayload = 1232,
@@ -49,6 +60,6 @@ class ClientProfileTest {
         vpnMaxSessions = vpnMaxSessions,
         vpnIpv6Enabled = false,
         vpnAllowBypass = false,
+        transportMode = transportMode,
     )
 }
-

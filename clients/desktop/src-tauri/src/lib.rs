@@ -3,11 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::State;
 
 const LOG_LIMIT: usize = 400;
@@ -46,6 +47,7 @@ struct RuntimeSnapshot {
     socks_endpoint: Option<String>,
     http_endpoint: Option<String>,
     binary_path: Option<String>,
+    status_detail: Option<String>,
     last_error: Option<String>,
     log_lines: Vec<String>,
     capabilities: PlatformCapabilities,
@@ -82,6 +84,10 @@ struct TrajectoryProfile {
     resolvers: Vec<String>,
     resolver_file: Option<String>,
     resolver_socks_proxy: Option<String>,
+    #[serde(default = "default_resolver_transport")]
+    resolver_transport: String,
+    #[serde(default = "default_transport_mode")]
+    transport_mode: String,
     socks: ProxyEndpoint,
     http: ProxyEndpoint,
     dns_max_payload: u16,
@@ -101,6 +107,10 @@ struct StoredProfile {
     resolvers: Vec<String>,
     resolver_file: Option<String>,
     resolver_socks_proxy: Option<String>,
+    #[serde(default = "default_resolver_transport")]
+    resolver_transport: String,
+    #[serde(default = "default_transport_mode")]
+    transport_mode: String,
     socks: ProxyEndpoint,
     http: ProxyEndpoint,
     dns_max_payload: u16,
@@ -226,6 +236,8 @@ fn connect_profile(
     let mut command = Command::new(&binary);
     command
         .arg("--listen")
+        .arg("127.0.0.1:0")
+        .arg("--socks-listen")
         .arg(endpoint_arg(&profile.socks))
         .arg("--domain")
         .arg(profile.domain.clone())
@@ -235,6 +247,10 @@ fn connect_profile(
         .arg(profile.resolver_admission_min.to_string())
         .arg("--poll-interval-ms")
         .arg(profile.poll_interval_ms.max(1).to_string())
+        .arg("--resolver-transport")
+        .arg(profile.resolver_transport.clone())
+        .arg("--mode")
+        .arg(profile.transport_mode.clone())
         .env("TRAJECTORY_ACCESS_KEY", &profile.access_key)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -309,6 +325,8 @@ fn connect_profile(
     runtime.snapshot.socks_endpoint = profile.socks.enabled.then(|| endpoint_arg(&profile.socks));
     runtime.snapshot.http_endpoint = profile.http.enabled.then(|| endpoint_arg(&profile.http));
     runtime.snapshot.binary_path = Some(binary.display().to_string());
+    runtime.snapshot.status_detail =
+        Some("trajectory-client spawned; waiting for listener readiness.".to_string());
     runtime.snapshot.last_error = None;
     runtime.snapshot.log_lines = collect_logs(&state.logs);
     Ok(runtime.snapshot.clone())
@@ -327,12 +345,12 @@ fn enable_system_proxy(
 ) -> Result<RuntimeSnapshot, String> {
     let snapshot = refresh_snapshot(&state)?;
     if snapshot.active_profile_id.as_deref() != Some(profile_id.as_str())
-        || !matches!(
-            snapshot.phase,
-            ConnectionPhase::Starting | ConnectionPhase::Connected
-        )
+        || !matches!(snapshot.phase, ConnectionPhase::Connected)
     {
-        return Err("connect this profile before applying system proxy settings".to_string());
+        return Err(
+            "wait until the profile is fully connected before applying system proxy settings"
+                .to_string(),
+        );
     }
     let profile = load_profile_metadata(&state.data_dir, &profile_id)?;
     validate_profile_for_system_proxy(&profile)?;
@@ -389,6 +407,8 @@ impl StoredProfile {
             resolvers: profile.resolvers.clone(),
             resolver_file: profile.resolver_file.clone(),
             resolver_socks_proxy: profile.resolver_socks_proxy.clone(),
+            resolver_transport: profile.resolver_transport.clone(),
+            transport_mode: profile.transport_mode.clone(),
             socks: profile.socks.clone(),
             http: profile.http.clone(),
             dns_max_payload: profile.dns_max_payload,
@@ -410,6 +430,8 @@ impl StoredProfile {
             resolvers: self.resolvers.clone(),
             resolver_file: self.resolver_file.clone(),
             resolver_socks_proxy: self.resolver_socks_proxy.clone(),
+            resolver_transport: self.resolver_transport.clone(),
+            transport_mode: self.transport_mode.clone(),
             socks: self.socks.clone(),
             http: self.http.clone(),
             dns_max_payload: self.dns_max_payload,
@@ -432,6 +454,7 @@ fn initial_snapshot() -> RuntimeSnapshot {
         socks_endpoint: None,
         http_endpoint: None,
         binary_path: None,
+        status_detail: Some("No trajectory-client process is running.".to_string()),
         last_error: None,
         log_lines: Vec::new(),
         capabilities: platform_capabilities(),
@@ -479,16 +502,70 @@ fn refresh_snapshot(state: &State<'_, AppState>) -> Result<RuntimeSnapshot, Stri
         runtime.snapshot.phase = ConnectionPhase::Failed;
         runtime.snapshot.pid = None;
         runtime.snapshot.last_error = Some(format!("trajectory-client exited with {status}"));
+        runtime.snapshot.status_detail =
+            Some("trajectory-client exited before readiness could be proven.".to_string());
         push_log(
             &state.logs,
             format!("trajectory-client exited with {status}"),
         );
     } else if runtime.child.is_some() {
-        runtime.snapshot.phase = ConnectionPhase::Connected;
+        let logs = collect_logs(&state.logs);
+        if endpoints_ready(&runtime.snapshot) {
+            runtime.snapshot.phase = ConnectionPhase::Connected;
+            runtime.snapshot.status_detail =
+                Some("Local SOCKS/HTTP listeners are accepting connections.".to_string());
+        } else {
+            runtime.snapshot.phase = ConnectionPhase::Starting;
+            runtime.snapshot.status_detail = Some(startup_detail_from_logs(&logs));
+        }
     }
 
     runtime.snapshot.log_lines = collect_logs(&state.logs);
     Ok(runtime.snapshot.clone())
+}
+
+fn endpoints_ready(snapshot: &RuntimeSnapshot) -> bool {
+    let socks_ready = snapshot
+        .socks_endpoint
+        .as_deref()
+        .map(endpoint_ready)
+        .unwrap_or(false);
+    let http_ready = snapshot
+        .http_endpoint
+        .as_deref()
+        .map(endpoint_ready)
+        .unwrap_or(true);
+    socks_ready && http_ready
+}
+
+fn endpoint_ready(endpoint: &str) -> bool {
+    let Ok(mut addrs) = endpoint.to_socket_addrs() else {
+        return false;
+    };
+    addrs.any(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(180)).is_ok())
+}
+
+fn startup_detail_from_logs(logs: &[String]) -> String {
+    for line in logs.iter().rev() {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("probing ") && lower.contains(" resolver") {
+            return "Checking resolver admission before exposing local listeners.".to_string();
+        }
+        if lower.contains("using ") && lower.contains(" admitted resolver") {
+            return "Resolver admission passed; waiting for local listeners.".to_string();
+        }
+        if lower.contains("trajectory http proxy listening") {
+            return "HTTP listener announced; verifying loopback readiness.".to_string();
+        }
+        if lower.contains("trajectory socks proxy listening") {
+            return "SOCKS listener announced; waiting for HTTP readiness.".to_string();
+        }
+        if lower.contains("failed") || lower.contains("timed out") {
+            return "Resolver path errors observed while starting; still waiting for readiness."
+                .to_string();
+        }
+    }
+    "Process started; waiting for local proxy listeners.".to_string()
 }
 
 fn stop_child(state: &State<'_, AppState>) -> Result<(), String> {
@@ -523,6 +600,8 @@ fn default_profile() -> StoredProfile {
         ],
         resolver_file: None,
         resolver_socks_proxy: None,
+        resolver_transport: default_resolver_transport(),
+        transport_mode: default_transport_mode(),
         socks: ProxyEndpoint {
             host: "127.0.0.1".to_string(),
             port: 7000,
@@ -540,6 +619,14 @@ fn default_profile() -> StoredProfile {
         allow_lan_without_auth: false,
         admission_report: true,
     }
+}
+
+fn default_transport_mode() -> String {
+    "secure".to_string()
+}
+
+fn default_resolver_transport() -> String {
+    "auto".to_string()
 }
 
 fn profile_store_snapshot(mut store: ProfileStore) -> Result<ProfileStoreSnapshot, String> {
@@ -706,6 +793,20 @@ fn validate_profile_common(profile: &TrajectoryProfile) -> Result<(), String> {
             .is_empty()
     {
         return Err("add resolvers or a resolver file".to_string());
+    }
+    if !matches!(
+        profile.transport_mode.as_str(),
+        "secure" | "velocity" | "resilient" | "frontier"
+    ) {
+        return Err(
+            "transport mode must be secure, velocity, resilient, or frontier".to_string(),
+        );
+    }
+    if !matches!(
+        profile.resolver_transport.as_str(),
+        "auto" | "udp" | "tcp"
+    ) {
+        return Err("resolver transport must be auto, udp, or tcp".to_string());
     }
     for endpoint in [&profile.socks, &profile.http] {
         if endpoint.enabled

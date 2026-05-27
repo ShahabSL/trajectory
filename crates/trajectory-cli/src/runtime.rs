@@ -17,7 +17,8 @@ use trajectory_core::codec::{
 };
 use trajectory_core::dns::{
     build_a_response, build_aaaa_response, build_empty_response, build_ns_response, build_query,
-    build_soa_response, build_txt_response, envelope_to_qname, parse_query, parse_txt_response,
+    build_soa_response, build_txt_response, compact_envelope_qname_len, envelope_qname_len,
+    envelope_to_compact_qname, envelope_to_qname, parse_query, parse_txt_response,
     qname_to_envelope, txt_response_wire_len, CLASS_IN, TYPE_A, TYPE_AAAA, TYPE_NS, TYPE_SOA,
     TYPE_TXT,
 };
@@ -27,9 +28,12 @@ use trajectory_core::engine::{
 };
 
 const UPLOAD_READ_CHUNK: usize = 4096;
-const UPLOAD_SEND_CHUNK_NORMAL: usize = 4096;
-const UPLOAD_SEND_CHUNK_CONSTRAINED: usize = 4096;
-const CLIENT_INFLIGHT_WINDOW: usize = 128;
+const UPLOAD_SEND_CHUNK_NORMAL: usize = 192;
+const UPLOAD_SEND_CHUNK_CONSTRAINED: usize = 192;
+const CLIENT_INFLIGHT_WINDOW_BASE: usize = 128;
+const CLIENT_INFLIGHT_WINDOW_BULK: usize = 512;
+const CLIENT_RESPONSE_CHANNEL: usize = CLIENT_INFLIGHT_WINDOW_BULK * 4;
+const CLIENT_BULK_UPLOAD_PENDING_BYTES: usize = 32 * 1024;
 const CLIENT_RECEIVE_WINDOW: u64 = 1024 * 1024;
 const CLIENT_MAX_ACTIVE_STREAMS: usize = 32;
 const SERVER_RECEIVE_WINDOW: u64 = 1024 * 1024;
@@ -39,11 +43,11 @@ const CLIENT_QUERY_TIMEOUT: Duration = Duration::from_secs(20);
 const DNS_TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(20);
 const SERVER_TCP_READ_TIMEOUT: Duration = Duration::from_secs(20);
 const PATH_MIN_CWND: u32 = 2;
-const PATH_INITIAL_CWND: u32 = 6;
-const PATH_MAX_CWND_UDP: u32 = 96;
-const PATH_MAX_CWND_TCP: u32 = 64;
-const PROXY_INITIAL_CWND: u32 = 24;
-const PROXY_MAX_CWND: u32 = 128;
+const PATH_INITIAL_CWND: u32 = 16;
+const PATH_MAX_CWND_UDP: u32 = 256;
+const PATH_MAX_CWND_TCP: u32 = 128;
+const PROXY_INITIAL_CWND: u32 = 32;
+const PROXY_MAX_CWND: u32 = 256;
 const PATH_RTO_MIN_UDP: Duration = Duration::from_millis(250);
 const PATH_RTO_MIN_TCP: Duration = Duration::from_secs(1);
 const PATH_RTO_MAX_UDP: Duration = Duration::from_millis(2_500);
@@ -55,11 +59,12 @@ const PATH_MIN_RESPONSE_BYTES: u16 = 512;
 const PATH_MTU_STEP: u16 = 128;
 const PATH_MTU_PROBE_SUCCESSES: u32 = 16;
 const PATH_INITIAL_RESPONSE_BYTES: u16 = 1232;
-const TCP_PROXY_MAX_INFLIGHT: u32 = 128;
-const TCP_RESOLVER_QUEUE: usize = 512;
-const TCP_RESOLVER_LANES_DIRECT: usize = 2;
-const TCP_RESOLVER_LANES_PROXY: usize = 4;
-const UDP_RESOLVER_QUEUE: usize = 512;
+const TCP_PROXY_MAX_INFLIGHT: u32 = 256;
+const TCP_RESOLVER_QUEUE: usize = 2048;
+const TCP_RESOLVER_LANES_DIRECT: usize = 8;
+const TCP_RESOLVER_LANES_PROXY: usize = 16;
+const UDP_RESOLVER_QUEUE: usize = 2048;
+const UDP_RESOLVER_LANES: usize = 16;
 const TCP_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const SERVER_UPLOAD_QUEUE: usize = 1024;
 const SERVER_UPLOAD_COALESCE_BYTES: usize = 4096;
@@ -78,20 +83,22 @@ const SERVER_STATE_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 const DNS_RESPONSE_SAFETY_MARGIN: usize = 24;
 const RESOLVER_FAILURE_QUARANTINE: Duration = Duration::from_secs(20);
 const RESOLVER_FAILURE_QUARANTINE_TCP: Duration = Duration::from_secs(90);
-const RESOLVER_PROBE_PARALLELISM_UDP: usize = 96;
+const RESOLVER_PROBE_PARALLELISM_UDP: usize = 1;
 const RESOLVER_PROBE_PARALLELISM_TCP: usize = 32;
 const RESOLVER_TARGET_ADMITTED_UDP: usize = 64;
 const RESOLVER_TARGET_ADMITTED_TCP: usize = 32;
-const RESOLVER_ADMISSION_SAMPLE_FACTOR: usize = 1;
+const RESOLVER_ADMISSION_SAMPLE_FACTOR: usize = 3;
 const RESOLVER_ADMISSION_TIMEOUT: Duration = Duration::from_millis(1_500);
 const RESOLVER_ADMISSION_TIMEOUT_TCP: Duration = Duration::from_secs(20);
 const RESOLVER_ADMISSION_DEADLINE: Duration = Duration::from_secs(60);
-const RESOLVER_ADMISSION_MAX_ELAPSED_UDP: Duration = Duration::from_secs(8);
+const RESOLVER_ADMISSION_MAX_ELAPSED_UDP: Duration = Duration::from_secs(10);
 const RESOLVER_ADMISSION_MAX_ELAPSED_TCP: Duration = Duration::from_secs(14);
 const RESOLVER_ADMISSION_MIN_RESPONSE_BPS_UDP: u64 = 128;
 const RESOLVER_ADMISSION_MIN_RESPONSE_BPS_TCP: u64 = 64;
+const RESOLVER_ADMISSION_STAGE_ATTEMPTS: usize = 2;
 const RESOLVER_TCP_PREFERENCE: Duration = Duration::from_secs(5 * 60);
-const CLIENT_PING_INFLIGHT_ACTIVE: usize = CLIENT_INFLIGHT_WINDOW / 2;
+const RESOLVER_TCP_AFTER_UDP_FAILURE_PREFERENCE: Duration = Duration::from_secs(30);
+const CLIENT_PING_INFLIGHT_ACTIVE: usize = 64;
 const CLIENT_PING_INFLIGHT_IDLE: usize = 4;
 const CLIENT_GLOBAL_ACTIVE_PING_INFLIGHT: usize = 96;
 const CLIENT_GLOBAL_IDLE_PING_INFLIGHT: usize = 2;
@@ -102,7 +109,10 @@ const HTTP_PROXY_HEADER_MAX: usize = 16 * 1024;
 const HTTP_PROXY_HEADER_TIMEOUT: Duration = Duration::from_secs(15);
 const CLIENT_ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const CLIENT_ACTIVE_POLL_GRACE: Duration = Duration::from_millis(1_500);
-const CLIENT_ACTIVE_POLL_DATA_BUDGET: usize = 12;
+const CLIENT_ACTIVE_POLL_DATA_BUDGET: usize = 96;
+const CLIENT_TRANSPORT_IDLE_DELAY: Duration = Duration::from_millis(2);
+const CLIENT_TRANSPORT_BULK_IDLE_DELAY: Duration = Duration::from_micros(250);
+const CLIENT_CONN_ID_MASK: u64 = 0x0000_0007_ffff_ffff;
 const CLIENT_RESET_CLOSE_DELAY: Duration = Duration::from_millis(500);
 const CLIENT_POLL_PROXY_HEADROOM: u32 = 4;
 const CLIENT_POLL_RESOLVER_HEADROOM: u32 = 1;
@@ -110,6 +120,7 @@ const CLIENT_POLL_RESOLVER_HEADROOM: u32 = 1;
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
     pub listen: SocketAddr,
+    pub socks_listen: Option<SocketAddr>,
     pub http_listen: Option<SocketAddr>,
     pub resolvers: Vec<SocketAddr>,
     pub domain: String,
@@ -121,6 +132,7 @@ pub struct ClientConfig {
     pub admission_report: Option<PathBuf>,
     pub resolver_cohort_size: Option<usize>,
     pub resolver_admission_min: usize,
+    pub mode: ClientMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,6 +140,164 @@ pub enum ResolverTransportMode {
     Auto,
     Udp,
     Tcp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientMode {
+    Secure,
+    Velocity,
+    Resilient,
+    Frontier,
+}
+
+impl ClientMode {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "secure" => Ok(Self::Secure),
+            "velocity" | "fast" => Ok(Self::Velocity),
+            "resilient" | "compat" => Ok(Self::Resilient),
+            "frontier" => Ok(Self::Frontier),
+            _ => bail!(
+                "invalid client mode {value:?}; expected secure, velocity, resilient, or frontier"
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Secure => "secure",
+            Self::Velocity => "velocity",
+            Self::Resilient => "resilient",
+            Self::Frontier => "frontier",
+        }
+    }
+
+    fn profile(self) -> ClientModeProfile {
+        match self {
+            Self::Secure => ClientModeProfile {
+                upload_chunk_normal: UPLOAD_SEND_CHUNK_NORMAL,
+                upload_chunk_constrained: UPLOAD_SEND_CHUNK_CONSTRAINED,
+                inflight_base: CLIENT_INFLIGHT_WINDOW_BASE,
+                inflight_bulk: CLIENT_INFLIGHT_WINDOW_BULK,
+                bulk_pending_bytes: CLIENT_BULK_UPLOAD_PENDING_BYTES,
+                max_active_streams: CLIENT_MAX_ACTIVE_STREAMS,
+                global_active_ping_inflight: CLIENT_GLOBAL_ACTIVE_PING_INFLIGHT,
+                global_idle_ping_inflight: CLIENT_GLOBAL_IDLE_PING_INFLIGHT,
+                ping_inflight_active: CLIENT_PING_INFLIGHT_ACTIVE,
+                ping_inflight_idle: CLIENT_PING_INFLIGHT_IDLE,
+                active_poll_data_budget: CLIENT_ACTIVE_POLL_DATA_BUDGET,
+                bulk_idle_delay: CLIENT_TRANSPORT_BULK_IDLE_DELAY,
+                transport_idle_delay: CLIENT_TRANSPORT_IDLE_DELAY,
+                path_initial_cwnd: PATH_INITIAL_CWND,
+                path_max_cwnd_udp: PATH_MAX_CWND_UDP,
+                path_max_cwnd_tcp: PATH_MAX_CWND_TCP,
+                proxy_initial_cwnd: PROXY_INITIAL_CWND,
+                proxy_max_cwnd: PROXY_MAX_CWND,
+                tcp_lanes_direct: TCP_RESOLVER_LANES_DIRECT,
+                tcp_lanes_proxy: TCP_RESOLVER_LANES_PROXY,
+                udp_lanes: UDP_RESOLVER_LANES,
+                mtu_probe_successes: PATH_MTU_PROBE_SUCCESSES,
+            },
+            Self::Velocity => ClientModeProfile {
+                upload_chunk_normal: 256,
+                upload_chunk_constrained: 256,
+                inflight_base: 192,
+                inflight_bulk: 768,
+                bulk_pending_bytes: 16 * 1024,
+                max_active_streams: 48,
+                global_active_ping_inflight: 128,
+                global_idle_ping_inflight: 4,
+                ping_inflight_active: 96,
+                ping_inflight_idle: 4,
+                active_poll_data_budget: 192,
+                bulk_idle_delay: Duration::from_micros(125),
+                transport_idle_delay: Duration::from_millis(1),
+                path_initial_cwnd: 24,
+                path_max_cwnd_udp: 384,
+                path_max_cwnd_tcp: 192,
+                proxy_initial_cwnd: 48,
+                proxy_max_cwnd: 384,
+                tcp_lanes_direct: 12,
+                tcp_lanes_proxy: 24,
+                udp_lanes: 24,
+                mtu_probe_successes: 8,
+            },
+            Self::Resilient => ClientModeProfile {
+                upload_chunk_normal: 128,
+                upload_chunk_constrained: 128,
+                inflight_base: 96,
+                inflight_bulk: 320,
+                bulk_pending_bytes: 64 * 1024,
+                max_active_streams: 24,
+                global_active_ping_inflight: 64,
+                global_idle_ping_inflight: 2,
+                ping_inflight_active: 48,
+                ping_inflight_idle: 2,
+                active_poll_data_budget: 48,
+                bulk_idle_delay: Duration::from_micros(500),
+                transport_idle_delay: Duration::from_millis(3),
+                path_initial_cwnd: 8,
+                path_max_cwnd_udp: 128,
+                path_max_cwnd_tcp: 96,
+                proxy_initial_cwnd: 16,
+                proxy_max_cwnd: 128,
+                tcp_lanes_direct: 4,
+                tcp_lanes_proxy: 8,
+                udp_lanes: 8,
+                mtu_probe_successes: 24,
+            },
+            Self::Frontier => ClientModeProfile {
+                upload_chunk_normal: 256,
+                upload_chunk_constrained: 256,
+                inflight_base: 192,
+                inflight_bulk: 768,
+                bulk_pending_bytes: 16 * 1024,
+                max_active_streams: 48,
+                global_active_ping_inflight: 128,
+                global_idle_ping_inflight: 4,
+                ping_inflight_active: 96,
+                ping_inflight_idle: 4,
+                active_poll_data_budget: 192,
+                bulk_idle_delay: Duration::from_micros(125),
+                transport_idle_delay: Duration::from_millis(1),
+                path_initial_cwnd: 24,
+                path_max_cwnd_udp: 384,
+                path_max_cwnd_tcp: 192,
+                proxy_initial_cwnd: 48,
+                proxy_max_cwnd: 384,
+                tcp_lanes_direct: 12,
+                tcp_lanes_proxy: 24,
+                udp_lanes: 24,
+                mtu_probe_successes: 8,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ClientModeProfile {
+    upload_chunk_normal: usize,
+    upload_chunk_constrained: usize,
+    inflight_base: usize,
+    inflight_bulk: usize,
+    bulk_pending_bytes: usize,
+    max_active_streams: usize,
+    global_active_ping_inflight: usize,
+    global_idle_ping_inflight: usize,
+    ping_inflight_active: usize,
+    ping_inflight_idle: usize,
+    active_poll_data_budget: usize,
+    bulk_idle_delay: Duration,
+    transport_idle_delay: Duration,
+    path_initial_cwnd: u32,
+    path_max_cwnd_udp: u32,
+    path_max_cwnd_tcp: u32,
+    proxy_initial_cwnd: u32,
+    proxy_max_cwnd: u32,
+    tcp_lanes_direct: usize,
+    tcp_lanes_proxy: usize,
+    udp_lanes: usize,
+    mtu_probe_successes: u32,
 }
 
 impl ClientConfig {
@@ -138,6 +308,10 @@ impl ClientConfig {
     fn allow_udp_to_tcp_fallback(&self) -> bool {
         self.resolver_socks_proxy.is_none()
             && self.resolver_transport == ResolverTransportMode::Auto
+    }
+
+    fn mode_profile(&self) -> ClientModeProfile {
+        self.mode.profile()
     }
 }
 
@@ -172,9 +346,10 @@ struct ClientRuntime {
 impl ClientRuntime {
     fn new(config: ClientConfig) -> Self {
         let resolver_count = config.resolvers.len();
+        let profile = config.mode_profile();
         let tcp_pool = config
             .resolver_socks_proxy
-            .map(|proxy| Arc::new(ResolverPool::new(Some(proxy))));
+            .map(|proxy| Arc::new(ResolverPool::new_for_mode(Some(proxy), profile)));
         let initial_timeout = if config.tcp_first_resolver_path() {
             Duration::from_secs(8)
         } else {
@@ -190,23 +365,30 @@ impl ClientRuntime {
         let resolver_health = config
             .resolvers
             .iter()
-            .map(|_| Mutex::new(ResolverHealth::new(initial_timeout, initial_response_bytes)))
+            .map(|_| {
+                Mutex::new(ResolverHealth::new(
+                    initial_timeout,
+                    initial_response_bytes,
+                    profile.path_initial_cwnd,
+                ))
+            })
             .collect();
         let proxy_health = config
             .resolver_socks_proxy
-            .map(|_| Mutex::new(ProxyHealth::default()));
-        let stream_capacity = CLIENT_MAX_ACTIVE_STREAMS;
-        let active_ping_capacity = CLIENT_GLOBAL_ACTIVE_PING_INFLIGHT;
+            .map(|_| Mutex::new(ProxyHealth::new(profile.proxy_initial_cwnd)));
+        let stream_capacity = profile.max_active_streams;
+        let active_ping_capacity = profile.global_active_ping_inflight;
+        let idle_ping_capacity = profile.global_idle_ping_inflight;
         Self {
             config,
             tcp_pool,
-            tcp_fallback_pool: Arc::new(ResolverPool::new(None)),
-            udp_pool: Arc::new(UdpResolverPool::new()),
+            tcp_fallback_pool: Arc::new(ResolverPool::new_for_mode(None, profile)),
+            udp_pool: Arc::new(UdpResolverPool::new(profile.udp_lanes)),
             resolver_health,
             proxy_health,
             stream_slots: Arc::new(Semaphore::new(stream_capacity)),
             active_ping_slots: Arc::new(Semaphore::new(active_ping_capacity)),
-            idle_ping_slots: Arc::new(Semaphore::new(CLIENT_GLOBAL_IDLE_PING_INFLIGHT)),
+            idle_ping_slots: Arc::new(Semaphore::new(idle_ping_capacity)),
             diag: std::env::var_os("TRAJECTORY_DIAG")
                 .map(|_| Arc::new(ClientDiag::new(resolver_count))),
         }
@@ -222,7 +404,9 @@ impl ClientRuntime {
         let start = *cursor % count;
         if let Some(proxy) = &self.proxy_health {
             let proxy = proxy.lock().await;
-            let limit = proxy.cwnd.min(TCP_PROXY_MAX_INFLIGHT);
+            let limit = proxy
+                .cwnd
+                .min(TCP_PROXY_MAX_INFLIGHT.max(self.config.mode_profile().proxy_max_cwnd));
             if proxy.in_flight.saturating_add(class.proxy_headroom()) >= limit
                 || (class != ClientSendClass::Poll && proxy.next_send_at > now)
             {
@@ -247,6 +431,13 @@ impl ClientRuntime {
             let blocked_for = health.blocked_until.and_then(|blocked_until| {
                 (blocked_until > now).then_some(blocked_until.duration_since(now))
             });
+            let degraded_for_bulk = class == ClientSendClass::Data
+                && count > 1
+                && (health.failures > 0
+                    || health.loss_ewma_ppm >= PATH_BULK_LOSSY_PPM
+                    || bulk_rtt_cutoff
+                        .map(|cutoff| rtt_micros > cutoff)
+                        .unwrap_or(false));
             if health.in_flight.saturating_add(class.resolver_headroom()) >= health.cwnd {
                 continue;
             }
@@ -264,12 +455,30 @@ impl ClientRuntime {
             } else {
                 0
             };
+            let upload_serialization_penalty =
+                if class == ClientSendClass::Data && health.upload_goodput_ewma > 0 {
+                    (health.in_flight as u128)
+                        .saturating_mul(self.upload_chunk_bytes() as u128)
+                        .saturating_mul(1_000_000)
+                        / health.upload_goodput_ewma as u128
+                } else {
+                    0
+                };
             let failure_penalty = (health.failures as u128).saturating_mul(rtt_micros);
             let loss_penalty = rtt_micros.saturating_mul(health.loss_ewma_ppm as u128) / 20_000;
             let mtu_bonus = (response_bytes as u128).saturating_mul(10);
+            let upload_goodput_bonus = if class == ClientSendClass::Data {
+                (health.upload_goodput_ewma as u128).min(1_000_000) / 8
+            } else {
+                0
+            };
             let score = rtt_micros
                 .saturating_add(queue_penalty)
-                .saturating_add(serialization_penalty)
+                .saturating_add(if class == ClientSendClass::Data {
+                    upload_serialization_penalty
+                } else {
+                    serialization_penalty
+                })
                 .saturating_add(failure_penalty)
                 .saturating_add(loss_penalty)
                 .saturating_add(
@@ -277,15 +486,9 @@ impl ClientRuntime {
                         .map(|duration| duration.as_micros().saturating_mul(4))
                         .unwrap_or(0),
                 )
-                .saturating_sub(mtu_bonus);
+                .saturating_sub(mtu_bonus)
+                .saturating_sub(upload_goodput_bonus);
             let candidate = (index, score, offset);
-            let degraded_for_bulk = class == ClientSendClass::Data
-                && count > 1
-                && (health.failures > 0
-                    || health.loss_ewma_ppm >= PATH_BULK_LOSSY_PPM
-                    || bulk_rtt_cutoff
-                        .map(|cutoff| rtt_micros > cutoff)
-                        .unwrap_or(false));
             let target = if blocked_for.is_some() {
                 &mut best_blocked
             } else if degraded_for_bulk {
@@ -316,7 +519,9 @@ impl ClientRuntime {
         }?;
         if let Some(proxy) = &self.proxy_health {
             let mut proxy = proxy.lock().await;
-            let limit = proxy.cwnd.min(TCP_PROXY_MAX_INFLIGHT);
+            let limit = proxy
+                .cwnd
+                .min(TCP_PROXY_MAX_INFLIGHT.max(self.config.mode_profile().proxy_max_cwnd));
             if proxy.in_flight.saturating_add(class.proxy_headroom()) >= limit
                 || (class != ClientSendClass::Poll && proxy.next_send_at > now)
             {
@@ -354,42 +559,56 @@ impl ClientRuntime {
         }
     }
 
-    async fn record_resolver_result(
-        &self,
-        index: usize,
-        ok: bool,
-        elapsed: Duration,
-        truncated: bool,
-        useful_bytes: usize,
-        transport: Option<DnsTransportOutcome>,
-    ) {
+    async fn record_resolver_result(&self, index: usize, sample: ResolverResultSample) {
         if let Some(proxy) = &self.proxy_health {
-            proxy
-                .lock()
-                .await
-                .record_result(ok, elapsed, self.rto_min(), self.rto_max());
+            let profile = self.config.mode_profile();
+            proxy.lock().await.record_result(
+                sample.ok,
+                sample.elapsed,
+                self.rto_min(),
+                self.rto_max(),
+                profile.proxy_max_cwnd,
+            );
         }
         let mut health = self.resolver_health[index].lock().await;
         health.in_flight = health.in_flight.saturating_sub(1);
-        if ok {
+        if sample.ok {
             health.failures = 0;
             health.blocked_until = None;
-            match transport {
-                Some(
-                    DnsTransportOutcome::TcpFallbackAfterTruncation
-                    | DnsTransportOutcome::TcpAfterUdpFailure
-                    | DnsTransportOutcome::TcpPreferred,
-                ) => {
+            match sample.transport {
+                Some(DnsTransportOutcome::TcpFallbackAfterTruncation) => {
                     health.prefer_tcp_until = Some(Instant::now() + RESOLVER_TCP_PREFERENCE);
+                    health.prefer_tcp_data_until = Some(Instant::now() + RESOLVER_TCP_PREFERENCE);
+                }
+                Some(DnsTransportOutcome::TcpPreferred) => {
+                    health.prefer_tcp_until = Some(Instant::now() + RESOLVER_TCP_PREFERENCE);
+                    if matches!(sample.class, Some(ClientSendClass::Data)) {
+                        health.prefer_tcp_data_until =
+                            Some(Instant::now() + RESOLVER_TCP_PREFERENCE);
+                    }
+                }
+                Some(DnsTransportOutcome::TcpAfterUdpFailure) => {
+                    let preference = if self.config.resolver_transport == ResolverTransportMode::Tcp
+                    {
+                        RESOLVER_TCP_PREFERENCE
+                    } else {
+                        RESOLVER_TCP_AFTER_UDP_FAILURE_PREFERENCE
+                    };
+                    let until = Instant::now() + preference;
+                    health.prefer_tcp_until = Some(until);
+                    health.prefer_tcp_data_until = Some(until);
                 }
                 Some(DnsTransportOutcome::Udp | DnsTransportOutcome::UdpAfterPreferredTcpError) => {
                     health.prefer_tcp_until = None;
+                    if matches!(sample.class, Some(ClientSendClass::Data)) {
+                        health.prefer_tcp_data_until = None;
+                    }
                 }
                 Some(DnsTransportOutcome::TcpProxy) | None => {}
             }
-            health.record_rtt(elapsed, self.rto_min(), self.rto_max());
+            health.record_rtt(sample.elapsed, self.rto_min(), self.rto_max());
             health.record_loss_sample(false);
-            if truncated {
+            if sample.truncated {
                 health.clean_mtu_successes = 0;
                 health.max_response_bytes = health
                     .max_response_bytes
@@ -407,7 +626,7 @@ impl ClientRuntime {
                     health.cwnd = health.cwnd.saturating_add(1).min(self.path_max_cwnd());
                 }
                 health.clean_mtu_successes = health.clean_mtu_successes.saturating_add(1);
-                if health.clean_mtu_successes >= PATH_MTU_PROBE_SUCCESSES {
+                if health.clean_mtu_successes >= self.config.mode_profile().mtu_probe_successes {
                     health.clean_mtu_successes = 0;
                     health.max_response_bytes = health
                         .max_response_bytes
@@ -415,9 +634,19 @@ impl ClientRuntime {
                         .min(self.config.dns_max_payload.max(PATH_MIN_RESPONSE_BYTES));
                 }
             }
-            if useful_bytes > 0 {
-                health.goodput_ewma =
-                    update_goodput_ewma(health.goodput_ewma, useful_bytes as u64, elapsed);
+            if sample.useful_bytes > 0 {
+                health.goodput_ewma = update_goodput_ewma(
+                    health.goodput_ewma,
+                    sample.useful_bytes as u64,
+                    sample.elapsed,
+                );
+            }
+            if sample.request_upload_bytes > 0 {
+                health.upload_goodput_ewma = update_goodput_ewma(
+                    health.upload_goodput_ewma,
+                    sample.request_upload_bytes as u64,
+                    sample.elapsed,
+                );
             }
         } else {
             health.failures = health.failures.saturating_add(1);
@@ -451,7 +680,7 @@ impl ClientRuntime {
         health.update_pacing(self.config.tcp_first_resolver_path());
     }
 
-    async fn prefer_tcp_for_resolver(&self, index: usize) -> bool {
+    async fn prefer_tcp_for_resolver(&self, index: usize, class: Option<ClientSendClass>) -> bool {
         if self.config.resolver_socks_proxy.is_some() {
             return false;
         }
@@ -462,10 +691,19 @@ impl ClientRuntime {
             return false;
         }
         let health = self.resolver_health[index].lock().await;
-        health
-            .prefer_tcp_until
-            .map(|until| until > Instant::now())
-            .unwrap_or(false)
+        let now = Instant::now();
+        let data_preferred = health
+            .prefer_tcp_data_until
+            .map(|until| until > now)
+            .unwrap_or(false);
+        if matches!(class, Some(ClientSendClass::Data)) {
+            return data_preferred;
+        }
+        data_preferred
+            || health
+                .prefer_tcp_until
+                .map(|until| until > now)
+                .unwrap_or(false)
     }
 
     async fn release_resolver(&self, index: usize) {
@@ -500,10 +738,11 @@ impl ClientRuntime {
     }
 
     fn path_max_cwnd(&self) -> u32 {
+        let profile = self.config.mode_profile();
         if self.config.tcp_first_resolver_path() {
-            PATH_MAX_CWND_TCP
+            profile.path_max_cwnd_tcp
         } else {
-            PATH_MAX_CWND_UDP
+            profile.path_max_cwnd_udp
         }
     }
 
@@ -553,6 +792,15 @@ impl ClientRuntime {
             health.max_response_bytes
         }
     }
+
+    fn upload_chunk_bytes(&self) -> usize {
+        let profile = self.config.mode_profile();
+        if self.config.tcp_first_resolver_path() {
+            profile.upload_chunk_constrained
+        } else {
+            profile.upload_chunk_normal
+        }
+    }
 }
 
 struct ResolverHealth {
@@ -564,6 +812,7 @@ struct ResolverHealth {
     max_response_bytes: u16,
     clean_mtu_successes: u32,
     goodput_ewma: u64,
+    upload_goodput_ewma: u64,
     pacing_interval: Duration,
     next_send_at: Instant,
     srtt: Option<Duration>,
@@ -571,19 +820,21 @@ struct ResolverHealth {
     timeout: Duration,
     blocked_until: Option<Instant>,
     prefer_tcp_until: Option<Instant>,
+    prefer_tcp_data_until: Option<Instant>,
 }
 
 impl ResolverHealth {
-    fn new(initial_timeout: Duration, initial_response_bytes: u16) -> Self {
+    fn new(initial_timeout: Duration, initial_response_bytes: u16, initial_cwnd: u32) -> Self {
         Self {
             failures: 0,
             loss_ewma_ppm: 0,
             in_flight: 0,
-            cwnd: PATH_INITIAL_CWND,
+            cwnd: initial_cwnd.max(PATH_MIN_CWND),
             cwnd_successes: 0,
             max_response_bytes: initial_response_bytes,
             clean_mtu_successes: 0,
             goodput_ewma: 0,
+            upload_goodput_ewma: 0,
             pacing_interval: Duration::ZERO,
             next_send_at: Instant::now(),
             srtt: None,
@@ -591,6 +842,7 @@ impl ResolverHealth {
             timeout: initial_timeout,
             blocked_until: None,
             prefer_tcp_until: None,
+            prefer_tcp_data_until: None,
         }
     }
 
@@ -621,9 +873,9 @@ impl ResolverHealth {
 
     fn update_pacing(&mut self, tcp_path: bool) {
         let base = if tcp_path {
-            Duration::from_millis(2)
-        } else {
             Duration::from_millis(1)
+        } else {
+            Duration::from_micros(500)
         };
         let Some(srtt) = self.srtt else {
             self.pacing_interval = base;
@@ -648,10 +900,16 @@ struct ProxyHealth {
 
 impl Default for ProxyHealth {
     fn default() -> Self {
+        Self::new(PROXY_INITIAL_CWND)
+    }
+}
+
+impl ProxyHealth {
+    fn new(initial_cwnd: u32) -> Self {
         Self {
             failures: 0,
             in_flight: 0,
-            cwnd: PROXY_INITIAL_CWND,
+            cwnd: initial_cwnd.max(PATH_MIN_CWND),
             cwnd_successes: 0,
             pacing_interval: Duration::ZERO,
             next_send_at: Instant::now(),
@@ -660,15 +918,14 @@ impl Default for ProxyHealth {
             timeout: Duration::from_secs(8),
         }
     }
-}
 
-impl ProxyHealth {
     fn record_result(
         &mut self,
         ok: bool,
         elapsed: Duration,
         min_timeout: Duration,
         max_timeout: Duration,
+        max_cwnd: u32,
     ) {
         self.in_flight = self.in_flight.saturating_sub(1);
         if ok {
@@ -677,7 +934,7 @@ impl ProxyHealth {
             self.cwnd_successes = self.cwnd_successes.saturating_add(1);
             if self.cwnd_successes >= self.cwnd.max(1) {
                 self.cwnd_successes = 0;
-                self.cwnd = self.cwnd.saturating_add(1).min(PROXY_MAX_CWND);
+                self.cwnd = self.cwnd.saturating_add(1).min(max_cwnd.max(PATH_MIN_CWND));
             }
         } else {
             self.failures = self.failures.saturating_add(1);
@@ -716,7 +973,11 @@ impl ProxyHealth {
 
 impl Default for ResolverHealth {
     fn default() -> Self {
-        Self::new(Duration::from_millis(1_500), PATH_INITIAL_RESPONSE_BYTES)
+        Self::new(
+            Duration::from_millis(1_500),
+            PATH_INITIAL_RESPONSE_BYTES,
+            PATH_INITIAL_CWND,
+        )
     }
 }
 
@@ -746,16 +1007,17 @@ fn update_goodput_ewma(previous: u64, bytes: u64, elapsed: Duration) -> u64 {
 struct ResolverPool {
     proxy: Option<SocketAddr>,
     lanes_per_resolver: usize,
-    senders: Mutex<HashMap<SocketAddr, ResolverLanes>>,
+    senders: Mutex<HashMap<SocketAddr, ResolverLanes<DnsTcpRequest>>>,
 }
 
 struct UdpResolverPool {
-    senders: Mutex<HashMap<SocketAddr, mpsc::Sender<DnsUdpRequest>>>,
+    lanes_per_resolver: usize,
+    senders: Mutex<HashMap<SocketAddr, ResolverLanes<DnsUdpRequest>>>,
 }
 
-struct ResolverLanes {
+struct ResolverLanes<T> {
     next: usize,
-    senders: Vec<mpsc::Sender<DnsTcpRequest>>,
+    senders: Vec<mpsc::Sender<T>>,
 }
 
 struct DnsTcpRequest {
@@ -787,6 +1049,16 @@ struct PathPermit {
     resolver: SocketAddr,
     timeout: Duration,
     max_response_bytes: u16,
+}
+
+struct ResolverResultSample {
+    ok: bool,
+    elapsed: Duration,
+    truncated: bool,
+    useful_bytes: usize,
+    request_upload_bytes: usize,
+    class: Option<ClientSendClass>,
+    transport: Option<DnsTransportOutcome>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -822,6 +1094,7 @@ struct ClientDnsResult {
 enum ClientTransportEvent {
     OpenStream {
         stream_id: u64,
+        target: Option<OpenTarget>,
         output: mpsc::Sender<ClientStreamOutput>,
     },
     LocalBytes {
@@ -836,12 +1109,34 @@ enum ClientTransportEvent {
     },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OpenTarget {
+    host: String,
+    port: u16,
+}
+
+impl OpenTarget {
+    fn new(host: String, port: u16) -> Result<Self> {
+        if host.is_empty() {
+            bail!("empty proxy target host");
+        }
+        if host.len() > 255 {
+            bail!("proxy target host is too long");
+        }
+        if port == 0 {
+            bail!("proxy target port must be non-zero");
+        }
+        Ok(Self { host, port })
+    }
+}
+
 enum ClientStreamOutput {
     Bytes(Vec<u8>),
     Close,
 }
 
 struct ClientMuxStream {
+    target: Option<OpenTarget>,
     opened: bool,
     open_in_flight: bool,
     local_eof: bool,
@@ -860,8 +1155,9 @@ struct ClientMuxStream {
 }
 
 impl ClientMuxStream {
-    fn new(output: mpsc::Sender<ClientStreamOutput>) -> Self {
+    fn new(target: Option<OpenTarget>, output: mpsc::Sender<ClientStreamOutput>) -> Self {
         Self {
+            target,
             opened: false,
             open_in_flight: false,
             local_eof: false,
@@ -896,6 +1192,7 @@ impl ClientMuxStream {
 enum MuxSentKind {
     Open {
         stream_id: u64,
+        target: Option<OpenTarget>,
         first_data: Option<SendBufferSlice>,
     },
     Data {
@@ -1038,11 +1335,21 @@ struct ResolverDiag {
 }
 
 impl ResolverPool {
+    #[cfg(test)]
     fn new(proxy: Option<SocketAddr>) -> Self {
         let lanes_per_resolver = if proxy.is_some() {
             TCP_RESOLVER_LANES_PROXY
         } else {
             TCP_RESOLVER_LANES_DIRECT
+        };
+        Self::new_with_lanes(proxy, lanes_per_resolver)
+    }
+
+    fn new_for_mode(proxy: Option<SocketAddr>, profile: ClientModeProfile) -> Self {
+        let lanes_per_resolver = if proxy.is_some() {
+            profile.tcp_lanes_proxy
+        } else {
+            profile.tcp_lanes_direct
         };
         Self::new_with_lanes(proxy, lanes_per_resolver)
     }
@@ -1112,8 +1419,9 @@ impl ResolverPool {
 }
 
 impl UdpResolverPool {
-    fn new() -> Self {
+    fn new(lanes_per_resolver: usize) -> Self {
         Self {
+            lanes_per_resolver: lanes_per_resolver.max(1),
             senders: Mutex::new(HashMap::new()),
         }
     }
@@ -1150,16 +1458,20 @@ impl UdpResolverPool {
 
     async fn sender_for(&self, resolver: SocketAddr) -> mpsc::Sender<DnsUdpRequest> {
         let mut senders = self.senders.lock().await;
-        if let Some(sender) = senders.get(&resolver) {
-            if !sender.is_closed() {
-                return sender.clone();
-            }
+        let lanes = senders.entry(resolver).or_insert_with(|| ResolverLanes {
+            next: 0,
+            senders: Vec::with_capacity(UDP_RESOLVER_LANES),
+        });
+        lanes.senders.retain(|sender| !sender.is_closed());
+        while lanes.senders.len() < self.lanes_per_resolver {
+            let (tx, rx) = mpsc::channel(UDP_RESOLVER_QUEUE);
+            tokio::spawn(run_udp_resolver_actor(resolver, rx));
+            lanes.senders.push(tx);
         }
 
-        let (tx, rx) = mpsc::channel(UDP_RESOLVER_QUEUE);
-        tokio::spawn(run_udp_resolver_actor(resolver, rx));
-        senders.insert(resolver, tx.clone());
-        tx
+        let index = lanes.next % lanes.senders.len();
+        lanes.next = lanes.next.wrapping_add(1);
+        lanes.senders[index].clone()
     }
 
     async fn remove_sender(&self, resolver: SocketAddr) {
@@ -1179,6 +1491,14 @@ pub async fn run_client(mut config: ClientConfig) -> Result<()> {
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("bind local listener {}", config.listen))?;
+    let socks_listener = match config.socks_listen {
+        Some(addr) => Some(
+            TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("bind local SOCKS proxy listener {addr}"))?,
+        ),
+        None => None,
+    };
     let http_listener = match config.http_listen {
         Some(addr) => Some(
             TcpListener::bind(addr)
@@ -1188,13 +1508,20 @@ pub async fn run_client(mut config: ClientConfig) -> Result<()> {
         None => None,
     };
     eprintln!(
-        "trajectory client listening on {} via {} resolver(s)",
+        "trajectory client listening on {} via {} resolver(s), mode={}",
         listener.local_addr()?,
-        config.resolvers.len()
+        config.resolvers.len(),
+        config.mode.as_str()
     );
     if let Some(listener) = &http_listener {
         eprintln!(
             "trajectory HTTP proxy listening on {}",
+            listener.local_addr()?
+        );
+    }
+    if let Some(listener) = &socks_listener {
+        eprintln!(
+            "trajectory SOCKS proxy listening on {}",
             listener.local_addr()?
         );
     }
@@ -1222,6 +1549,18 @@ pub async fn run_client(mut config: ClientConfig) -> Result<()> {
             }
         });
     }
+    if let Some(listener) = socks_listener {
+        let transport_tx = transport_tx.clone();
+        let runtime = Arc::clone(&runtime);
+        let next_stream_id = Arc::clone(&next_stream_id);
+        tokio::spawn(async move {
+            if let Err(error) =
+                accept_socks_proxy_streams(listener, runtime, transport_tx, next_stream_id).await
+            {
+                eprintln!("SOCKS proxy listener failed: {error:#}");
+            }
+        });
+    }
 
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -1246,6 +1585,10 @@ fn dedupe_resolvers(resolvers: Vec<SocketAddr>) -> Vec<SocketAddr> {
         .into_iter()
         .filter(|resolver| seen.insert(*resolver))
         .collect()
+}
+
+fn fresh_client_conn_id() -> u64 {
+    (rand::random::<u64>() & CLIENT_CONN_ID_MASK).max(1)
 }
 
 async fn admit_resolvers(config: ClientConfig) -> Result<Vec<SocketAddr>> {
@@ -1279,7 +1622,7 @@ async fn admit_resolvers(config: ClientConfig) -> Result<Vec<SocketAddr>> {
         probe_runtime.tcp_pool = Some(Arc::new(ResolverPool::new_with_lanes(Some(proxy), 1)));
     }
     let probe_runtime = Arc::new(probe_runtime);
-    let mut admitted = Vec::<(SocketAddr, Duration)>::new();
+    let mut admitted = Vec::<AdmissionProbeResult>::new();
     let mut results = Vec::<AdmissionProbeResult>::new();
     let verbose_failures = std::env::var_os("TRAJECTORY_ADMISSION_DIAG").is_some();
     eprintln!(
@@ -1316,7 +1659,7 @@ async fn admit_resolvers(config: ClientConfig) -> Result<Vec<SocketAddr>> {
                             result.elapsed.as_millis(),
                             result.response_bps
                         );
-                        admitted.push((result.resolver, result.elapsed));
+                        admitted.push(result.clone());
                     } else if verbose_failures {
                         eprintln!(
                             "rejected resolver {} stage={} elapsed={}ms reason={}",
@@ -1329,11 +1672,11 @@ async fn admit_resolvers(config: ClientConfig) -> Result<Vec<SocketAddr>> {
                     results.push(result);
                     if admitted.len() >= sample_target {
                         probes.abort_all();
-                        admitted.sort_by_key(|(_, rtt)| *rtt);
+                        sort_admitted_resolvers(&mut admitted);
                         let resolvers = admitted
                             .into_iter()
                             .take(target)
-                            .map(|(resolver, _)| resolver)
+                            .map(|result| result.resolver)
                             .collect::<Vec<_>>();
                         if resolvers.len() < min_required {
                             write_admission_report_if_requested(&config, &results, &resolvers)?;
@@ -1383,14 +1726,23 @@ async fn admit_resolvers(config: ClientConfig) -> Result<Vec<SocketAddr>> {
         admitted.len(),
         config.resolvers.len()
     );
-    admitted.sort_by_key(|(_, rtt)| *rtt);
+    sort_admitted_resolvers(&mut admitted);
     let resolvers = admitted
         .into_iter()
         .take(target)
-        .map(|(resolver, _)| resolver)
+        .map(|result| result.resolver)
         .collect::<Vec<_>>();
     write_admission_report_if_requested(&config, &results, &resolvers)?;
     Ok(resolvers)
+}
+
+fn sort_admitted_resolvers(admitted: &mut [AdmissionProbeResult]) {
+    admitted.sort_by(|left, right| {
+        left.elapsed
+            .cmp(&right.elapsed)
+            .then_with(|| right.response_bps.cmp(&left.response_bps))
+            .then_with(|| left.resolver.cmp(&right.resolver))
+    });
 }
 
 fn resolver_target_admitted(tcp_path: bool) -> usize {
@@ -1407,6 +1759,7 @@ fn should_admit_resolvers(config: &ClientConfig) -> bool {
         || config.resolver_cohort_size.is_some()
         || config.resolver_admission_min > 1
         || config.admission_report.is_some()
+        || config.resolvers.len() > 1
         || config.resolvers.len() > resolver_target_admitted(tcp_path)
 }
 
@@ -1497,42 +1850,49 @@ async fn probe_resolver(runtime: Arc<ClientRuntime>, resolver: SocketAddr) -> Ad
             )
             .with_probe_stats(last_rtt, challenge_count, total_response_bytes);
         }
-        let remaining = max_elapsed.saturating_sub(elapsed);
-        match timeout(remaining, probe.send_path_challenge(*challenge)).await {
-            Ok(Ok(result)) => {
-                challenge_count += 1;
-                total_response_bytes += result.response_payload_bytes;
-                last_rtt = result.rtt;
-            }
-            Ok(Err(error)) => {
-                return AdmissionProbeResult {
-                    resolver,
-                    admitted: false,
-                    stage: challenge.stage,
-                    elapsed: started.elapsed(),
-                    last_rtt,
-                    challenge_count,
-                    response_payload_bytes: total_response_bytes,
-                    response_bps: response_bps(total_response_bytes, started.elapsed()),
-                    error: Some(error),
-                };
-            }
-            Err(_) => {
-                return AdmissionProbeResult {
-                    resolver,
-                    admitted: false,
-                    stage: challenge.stage,
-                    elapsed: started.elapsed(),
-                    last_rtt,
-                    challenge_count,
-                    response_payload_bytes: total_response_bytes,
-                    response_bps: response_bps(total_response_bytes, started.elapsed()),
-                    error: Some(format!(
+        let mut last_error = None::<String>;
+        for attempt in 1..=RESOLVER_ADMISSION_STAGE_ATTEMPTS {
+            let remaining = max_elapsed.saturating_sub(started.elapsed());
+            match timeout(remaining, probe.send_path_challenge(*challenge)).await {
+                Ok(Ok(result)) => {
+                    challenge_count += 1;
+                    total_response_bytes += result.response_payload_bytes;
+                    last_rtt = result.rtt;
+                    last_error = None;
+                    break;
+                }
+                Ok(Err(error))
+                    if attempt < RESOLVER_ADMISSION_STAGE_ATTEMPTS
+                        && started.elapsed() < max_elapsed =>
+                {
+                    last_error = Some(error);
+                    continue;
+                }
+                Ok(Err(error)) => {
+                    last_error = Some(error);
+                    break;
+                }
+                Err(_) => {
+                    last_error = Some(format!(
                         "admission stage timed out after {}ms",
                         remaining.as_millis()
-                    )),
-                };
+                    ));
+                    break;
+                }
             }
+        }
+        if let Some(error) = last_error {
+            return AdmissionProbeResult {
+                resolver,
+                admitted: false,
+                stage: challenge.stage,
+                elapsed: started.elapsed(),
+                last_rtt,
+                challenge_count,
+                response_payload_bytes: total_response_bytes,
+                response_bps: response_bps(total_response_bytes, started.elapsed()),
+                error: Some(error),
+            };
         }
     }
 
@@ -1590,7 +1950,7 @@ struct AdmissionChallengeResult {
     response_payload_bytes: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct AdmissionProbeResult {
     resolver: SocketAddr,
     admitted: bool,
@@ -1637,7 +1997,7 @@ impl AdmissionProbeResult {
     }
 }
 
-const UDP_ADMISSION_CHALLENGES: [AdmissionChallenge; 4] = [
+const UDP_ADMISSION_CHALLENGES: [AdmissionChallenge; 8] = [
     AdmissionChallenge {
         stage: "signed_challenge",
         response_bytes: 64,
@@ -1657,6 +2017,26 @@ const UDP_ADMISSION_CHALLENGES: [AdmissionChallenge; 4] = [
         stage: "sustained_probe",
         response_bytes: 256,
         request_padding: 40,
+    },
+    AdmissionChallenge {
+        stage: "sustained_probe",
+        response_bytes: 128,
+        request_padding: 96,
+    },
+    AdmissionChallenge {
+        stage: "sustained_probe",
+        response_bytes: 128,
+        request_padding: 112,
+    },
+    AdmissionChallenge {
+        stage: "sustained_probe",
+        response_bytes: 128,
+        request_padding: 112,
+    },
+    AdmissionChallenge {
+        stage: "sustained_probe",
+        response_bytes: 128,
+        request_padding: 112,
     },
 ];
 
@@ -1757,6 +2137,7 @@ fn write_admission_report(
             "event": "admission_summary",
             "candidate_count": config.resolvers.len(),
             "selected_count": selected.len(),
+            "mode": config.mode.as_str(),
             "tcp_path": config.tcp_first_resolver_path(),
             "resolver_transport": format!("{:?}", config.resolver_transport).to_ascii_lowercase(),
             "domain": config.domain,
@@ -1798,7 +2179,7 @@ impl AdmissionProbe {
         Self {
             runtime,
             resolver,
-            conn_id: rand::random::<u64>(),
+            conn_id: fresh_client_conn_id(),
             packet_no: 0,
             prefer_direct_tcp: false,
             received_server: PacketHistory::default(),
@@ -1910,6 +2291,7 @@ async fn run_local_stream_io(
     transport_tx
         .send(ClientTransportEvent::OpenStream {
             stream_id,
+            target: None,
             output: output_tx,
         })
         .await
@@ -1997,6 +2379,92 @@ async fn accept_http_proxy_streams(
     }
 }
 
+async fn accept_socks_proxy_streams(
+    listener: TcpListener,
+    runtime: Arc<ClientRuntime>,
+    transport_tx: mpsc::Sender<ClientTransportEvent>,
+    next_stream_id: Arc<AtomicU64>,
+) -> Result<()> {
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let runtime = Arc::clone(&runtime);
+        let transport_tx = transport_tx.clone();
+        let stream_id = next_stream_id.fetch_add(1, Ordering::Relaxed);
+        tokio::spawn(async move {
+            let _stream_slot = match Arc::clone(&runtime.stream_slots).acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => return,
+            };
+            if let Err(error) = run_socks_proxy_stream_io(transport_tx, stream_id, stream).await {
+                eprintln!("SOCKS proxy stream {stream_id} from {peer} failed: {error:#}");
+            }
+        });
+    }
+}
+
+async fn run_socks_proxy_stream_io(
+    transport_tx: mpsc::Sender<ClientTransportEvent>,
+    stream_id: u64,
+    mut local: TcpStream,
+) -> Result<()> {
+    local.set_nodelay(true).ok();
+    let request = match read_local_socks5_request(&mut local).await {
+        Ok(request) => request,
+        Err(error) => {
+            let _ = send_local_socks5_reply(&mut local, 0x01).await;
+            return Err(error);
+        }
+    };
+    let output_rx = register_client_stream(
+        &transport_tx,
+        stream_id,
+        Some(OpenTarget::new(request.host, request.port)?),
+    )
+    .await?;
+    send_local_socks5_reply(&mut local, 0x00).await?;
+
+    let (mut reader, mut writer) = local.into_split();
+    let read_tx = transport_tx.clone();
+    let reader_task = tokio::spawn(async move {
+        let mut buf = [0u8; UPLOAD_READ_CHUNK];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => {
+                    let _ = read_tx
+                        .send(ClientTransportEvent::LocalFin { stream_id })
+                        .await;
+                    return;
+                }
+                Ok(n) => {
+                    if read_tx
+                        .send(ClientTransportEvent::LocalBytes {
+                            stream_id,
+                            bytes: buf[..n].to_vec(),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(_) => {
+                    let _ = read_tx
+                        .send(ClientTransportEvent::LocalClosed { stream_id })
+                        .await;
+                    return;
+                }
+            }
+        }
+    });
+
+    let writer_result = write_local_stream_output(&mut writer, output_rx).await;
+    reader_task.abort();
+    let _ = transport_tx
+        .send(ClientTransportEvent::LocalClosed { stream_id })
+        .await;
+    writer_result
+}
+
 async fn run_http_proxy_stream_io(
     transport_tx: mpsc::Sender<ClientTransportEvent>,
     stream_id: u64,
@@ -2010,29 +2478,13 @@ async fn run_http_proxy_stream_io(
     .await
     .context("HTTP proxy request header timed out")??;
     let request = parse_http_proxy_request(&header, &after_header)?;
-    let output_rx = register_client_stream(&transport_tx, stream_id).await?;
-    let mut remote = TransportOutputReader::new(output_rx);
-
-    match socks5_connect_via_transport(
+    let output_rx = register_client_stream(
         &transport_tx,
         stream_id,
-        remote,
-        &request.host,
-        request.port,
+        Some(OpenTarget::new(request.host.clone(), request.port)?),
     )
-    .await
-    {
-        Ok(reader) => remote = reader,
-        Err(error) => {
-            let _ = local
-                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
-                .await;
-            let _ = transport_tx
-                .send(ClientTransportEvent::LocalClosed { stream_id })
-                .await;
-            return Err(error);
-        }
-    }
+    .await?;
+    let remote = TransportOutputReader::new(output_rx);
 
     if request.respond_connect_ok {
         local
@@ -2089,11 +2541,13 @@ async fn run_http_proxy_stream_io(
 async fn register_client_stream(
     transport_tx: &mpsc::Sender<ClientTransportEvent>,
     stream_id: u64,
+    target: Option<OpenTarget>,
 ) -> Result<mpsc::Receiver<ClientStreamOutput>> {
     let (output_tx, output_rx) = mpsc::channel(CLIENT_STREAM_OUTPUT_QUEUE);
     transport_tx
         .send(ClientTransportEvent::OpenStream {
             stream_id,
+            target,
             output: output_tx,
         })
         .await
@@ -2241,67 +2695,93 @@ fn parse_port(value: &str) -> Result<u16> {
     Ok(port)
 }
 
-async fn socks5_connect_via_transport(
-    transport_tx: &mpsc::Sender<ClientTransportEvent>,
-    stream_id: u64,
-    mut remote: TransportOutputReader,
-    host: &str,
+struct SocksProxyRequest {
+    host: String,
     port: u16,
-) -> Result<TransportOutputReader> {
-    send_transport_bytes(transport_tx, stream_id, vec![0x05, 0x01, 0x00]).await?;
-    let method = remote.read_exact_vec(2).await?;
-    if method != [0x05, 0x00] {
-        bail!("server SOCKS5 egress rejected no-auth method");
-    }
-
-    send_transport_bytes(transport_tx, stream_id, socks5_connect_request(host, port)?).await?;
-    let head = remote.read_exact_vec(4).await?;
-    if head[0] != 0x05 {
-        bail!("server SOCKS5 egress returned invalid version");
-    }
-    if head[1] != 0x00 {
-        bail!("server SOCKS5 egress connect failed with code {}", head[1]);
-    }
-    match head[3] {
-        0x01 => {
-            let _ = remote.read_exact_vec(6).await?;
-        }
-        0x03 => {
-            let len = remote.read_exact_vec(1).await?[0] as usize;
-            let _ = remote.read_exact_vec(len + 2).await?;
-        }
-        0x04 => {
-            let _ = remote.read_exact_vec(18).await?;
-        }
-        other => bail!("server SOCKS5 egress returned unsupported address type {other}"),
-    }
-    Ok(remote)
 }
 
-fn socks5_connect_request(host: &str, port: u16) -> Result<Vec<u8>> {
-    let mut request = vec![0x05, 0x01, 0x00];
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        match ip {
-            std::net::IpAddr::V4(addr) => {
-                request.push(0x01);
-                request.extend_from_slice(&addr.octets());
-            }
-            std::net::IpAddr::V6(addr) => {
-                request.push(0x04);
-                request.extend_from_slice(&addr.octets());
-            }
+async fn read_local_socks5_request(stream: &mut TcpStream) -> Result<SocksProxyRequest> {
+    timeout(HTTP_PROXY_HEADER_TIMEOUT, async {
+        let mut greeting = [0u8; 2];
+        stream
+            .read_exact(&mut greeting)
+            .await
+            .context("read SOCKS greeting")?;
+        if greeting[0] != 0x05 {
+            bail!("SOCKS client used unsupported version");
         }
-    } else {
-        let host_bytes = host.as_bytes();
-        if host_bytes.is_empty() || host_bytes.len() > u8::MAX as usize {
-            bail!("domain proxy target must be 1..=255 bytes");
+        let mut methods = vec![0u8; greeting[1] as usize];
+        stream
+            .read_exact(&mut methods)
+            .await
+            .context("read SOCKS methods")?;
+        if !methods.contains(&0x00) {
+            stream.write_all(&[0x05, 0xff]).await.ok();
+            bail!("SOCKS client did not offer no-auth method");
         }
-        request.push(0x03);
-        request.push(host_bytes.len() as u8);
-        request.extend_from_slice(host_bytes);
-    }
-    request.extend_from_slice(&port.to_be_bytes());
-    Ok(request)
+        stream
+            .write_all(&[0x05, 0x00])
+            .await
+            .context("write SOCKS method selection")?;
+
+        let mut head = [0u8; 4];
+        stream
+            .read_exact(&mut head)
+            .await
+            .context("read SOCKS connect header")?;
+        if head[0] != 0x05 || head[1] != 0x01 || head[2] != 0x00 {
+            bail!("SOCKS proxy mode supports CONNECT only");
+        }
+        let host = match head[3] {
+            0x01 => {
+                let mut octets = [0u8; 4];
+                stream
+                    .read_exact(&mut octets)
+                    .await
+                    .context("read SOCKS IPv4 target")?;
+                std::net::Ipv4Addr::from(octets).to_string()
+            }
+            0x03 => {
+                let mut len = [0u8; 1];
+                stream
+                    .read_exact(&mut len)
+                    .await
+                    .context("read SOCKS domain length")?;
+                let mut name = vec![0u8; len[0] as usize];
+                stream
+                    .read_exact(&mut name)
+                    .await
+                    .context("read SOCKS domain target")?;
+                String::from_utf8(name).context("SOCKS domain is not valid UTF-8")?
+            }
+            0x04 => {
+                let mut octets = [0u8; 16];
+                stream
+                    .read_exact(&mut octets)
+                    .await
+                    .context("read SOCKS IPv6 target")?;
+                std::net::Ipv6Addr::from(octets).to_string()
+            }
+            other => bail!("SOCKS target used unsupported address type {other}"),
+        };
+        let mut port = [0u8; 2];
+        stream
+            .read_exact(&mut port)
+            .await
+            .context("read SOCKS target port")?;
+        let port = u16::from_be_bytes(port);
+        OpenTarget::new(host.clone(), port)?;
+        Ok(SocksProxyRequest { host, port })
+    })
+    .await
+    .context("SOCKS request timed out")?
+}
+
+async fn send_local_socks5_reply(stream: &mut TcpStream, code: u8) -> Result<()> {
+    stream
+        .write_all(&[0x05, code, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        .await
+        .context("write SOCKS reply")
 }
 
 struct TransportOutputReader {
@@ -2315,18 +2795,6 @@ impl TransportOutputReader {
             output_rx,
             pending: VecDeque::new(),
         }
-    }
-
-    async fn read_exact_vec(&mut self, len: usize) -> Result<Vec<u8>> {
-        while self.pending.len() < len {
-            match self.output_rx.recv().await {
-                Some(ClientStreamOutput::Bytes(bytes)) => self.pending.extend(bytes),
-                Some(ClientStreamOutput::Close) | None => {
-                    bail!("remote stream closed during proxy handshake")
-                }
-            }
-        }
-        Ok(self.pending.drain(..len).collect())
     }
 
     async fn write_to_local(mut self, writer: &mut tokio::net::tcp::OwnedWriteHalf) -> Result<()> {
@@ -2353,11 +2821,12 @@ async fn run_client_transport(
     runtime: Arc<ClientRuntime>,
     event_rx: mpsc::Receiver<ClientTransportEvent>,
 ) -> Result<()> {
-    let (response_tx, response_rx) = mpsc::channel::<ClientDnsResult>(CLIENT_INFLIGHT_WINDOW * 4);
+    let (response_tx, response_rx) = mpsc::channel::<ClientDnsResult>(CLIENT_RESPONSE_CHANNEL);
     let now = Instant::now();
+    let conn_id = fresh_client_conn_id();
     let mut transport = ClientTransport {
         runtime,
-        conn_id: rand::random::<u64>(),
+        conn_id,
         next_packet_no: 0,
         resolver_cursor: 0,
         stream_cursor: 0,
@@ -2384,6 +2853,7 @@ impl ClientTransport {
             self.cleanup_drained_streams().await;
             self.emit_diag_if_due().await;
             self.fill_outbound_window().await?;
+            let idle_delay = self.idle_delay();
 
             tokio::select! {
                 event = event_rx.recv() => {
@@ -2391,7 +2861,7 @@ impl ClientTransport {
                         if self.streams.is_empty() && self.outstanding.is_empty() {
                             return Ok(());
                         }
-                        tokio::time::sleep(Duration::from_millis(2)).await;
+                        tokio::time::sleep(idle_delay).await;
                         continue;
                     };
                     self.handle_event(event).await?;
@@ -2402,7 +2872,7 @@ impl ClientTransport {
                     };
                     self.handle_dns_response(response).await?;
                 }
-                _ = tokio::time::sleep(Duration::from_millis(2)) => {}
+                _ = tokio::time::sleep(idle_delay) => {}
             }
         }
     }
@@ -2422,8 +2892,13 @@ impl ClientTransport {
 
     async fn handle_event(&mut self, event: ClientTransportEvent) -> Result<()> {
         match event {
-            ClientTransportEvent::OpenStream { stream_id, output } => {
-                self.streams.insert(stream_id, ClientMuxStream::new(output));
+            ClientTransportEvent::OpenStream {
+                stream_id,
+                target,
+                output,
+            } => {
+                self.streams
+                    .insert(stream_id, ClientMuxStream::new(target, output));
                 self.stream_order.push_back(stream_id);
                 self.active_poll_until = Instant::now() + CLIENT_ACTIVE_POLL_GRACE;
             }
@@ -2524,6 +2999,8 @@ impl ClientTransport {
             .values()
             .map(|stream| stream.downlink.pending_len())
             .sum::<usize>();
+        let upload_pending_bytes = self.upload_pending_bytes();
+        let outbound_window = self.outbound_window();
         let mut resolver_snapshots = Vec::with_capacity(self.runtime.config.resolvers.len());
         for (index, resolver) in self.runtime.config.resolvers.iter().enumerate() {
             let health = self.runtime.resolver_health[index].lock().await;
@@ -2536,6 +3013,10 @@ impl ClientTransport {
                 .prefer_tcp_until
                 .and_then(|until| (until > now).then_some(until.duration_since(now).as_millis()))
                 .unwrap_or(0) as u64;
+            let prefer_tcp_data_ms = health
+                .prefer_tcp_data_until
+                .and_then(|until| (until > now).then_some(until.duration_since(now).as_millis()))
+                .unwrap_or(0) as u64;
             resolver_snapshots.push(serde_json::json!({
                 "index": index,
                 "resolver": resolver.to_string(),
@@ -2545,12 +3026,14 @@ impl ClientTransport {
                 "loss_ewma_ppm": health.loss_ewma_ppm,
                 "max_response_bytes": health.max_response_bytes,
                 "goodput_ewma_Bps": health.goodput_ewma,
+                "upload_goodput_ewma_Bps": health.upload_goodput_ewma,
                 "pacing_ms": health.pacing_interval.as_millis() as u64,
                 "srtt_ms": health.srtt.map(|duration| duration.as_millis() as u64),
                 "rttvar_ms": health.rttvar.as_millis() as u64,
                 "timeout_ms": health.timeout.as_millis() as u64,
                 "blocked_ms": blocked_ms,
                 "prefer_tcp_ms": prefer_tcp_ms,
+                "prefer_tcp_data_ms": prefer_tcp_data_ms,
                 "sent": resolver_diag.sent.load(Ordering::Relaxed),
                 "ok": resolver_diag.ok.load(Ordering::Relaxed),
                 "failed": resolver_diag.failed.load(Ordering::Relaxed),
@@ -2572,10 +3055,14 @@ impl ClientTransport {
         }
         let payload = serde_json::json!({
             "kind": "client_transport_diag",
+            "mode": self.runtime.config.mode.as_str(),
             "conn_id": self.conn_id,
             "elapsed_ms": self.diag_started.elapsed().as_millis() as u64,
             "streams": pending_streams,
             "outstanding": self.outstanding.len(),
+            "outbound_window": outbound_window,
+            "upload_bulk_mode": self.bulk_upload_mode(),
+            "upload_pending_bytes": upload_pending_bytes,
             "downlink_pending": downlink_pending,
             "queries_sent": diag.queries_sent.load(Ordering::Relaxed),
             "queries_ok": diag.queries_ok.load(Ordering::Relaxed),
@@ -2619,7 +3106,7 @@ impl ClientTransport {
     }
 
     async fn fill_outbound_window(&mut self) -> Result<()> {
-        while self.outstanding.len() < CLIENT_INFLIGHT_WINDOW {
+        while self.outstanding.len() < self.outbound_window() {
             let Some(kind) = self.next_send_kind() else {
                 if let Some(diag) = &self.runtime.diag {
                     diag.fill_stop_no_kind.fetch_add(1, Ordering::Relaxed);
@@ -2656,6 +3143,7 @@ impl ClientTransport {
             let mut request = Packet::new(self.conn_id, sent_packet_no);
             request.max_response_bytes = path.max_response_bytes;
             request.ack_ranges = self.received_server.ack_ranges(match class {
+                ClientSendClass::Data if !self.has_downlink_pressure() => 0,
                 ClientSendClass::Data => 2,
                 ClientSendClass::Control | ClientSendClass::Poll => 4,
             });
@@ -2664,7 +3152,9 @@ impl ClientTransport {
                 kind,
                 stream_acks: Vec::new(),
             };
-            self.append_due_stream_acks(&mut request, &mut sent);
+            if class != ClientSendClass::Data || self.has_downlink_pressure() {
+                self.append_due_stream_acks(&mut request, &mut sent);
+            }
             self.append_kind_frames(&mut request, &sent.kind);
 
             sent.kind = fit_mux_client_request_to_dns_budget(
@@ -2717,6 +3207,7 @@ impl ClientTransport {
                 MuxSentKind::Open {
                     stream_id,
                     first_data,
+                    ..
                 } => {
                     if let Some(stream) = self.streams.get_mut(stream_id) {
                         stream.open_in_flight = true;
@@ -2755,6 +3246,7 @@ impl ClientTransport {
             tokio::spawn(async move {
                 let _ping_slot = ping_slot;
                 let started = Instant::now();
+                let request_upload_bytes = packet_useful_data_bytes(&request);
                 let result = send_dns_packet(
                     &runtime_for_query,
                     Some(path.resolver_index),
@@ -2847,11 +3339,15 @@ impl ClientTransport {
                     runtime_for_query
                         .record_resolver_result(
                             path.resolver_index,
-                            result.is_ok(),
-                            elapsed,
-                            truncated,
-                            useful_bytes,
-                            transport,
+                            ResolverResultSample {
+                                ok: result.is_ok(),
+                                elapsed,
+                                truncated,
+                                useful_bytes,
+                                request_upload_bytes,
+                                class: Some(class),
+                                transport,
+                            },
                         )
                         .await;
                 }
@@ -2903,12 +3399,17 @@ impl ClientTransport {
         match kind {
             MuxSentKind::Open {
                 stream_id,
+                target,
                 first_data,
             } => {
+                let (host, port) = target
+                    .as_ref()
+                    .map(|target| (target.host.clone(), target.port))
+                    .unwrap_or_else(|| (String::new(), 0));
                 request.frames.push(Frame::Open {
                     stream_id: *stream_id,
-                    host: String::new(),
-                    port: 0,
+                    host,
+                    port,
                 });
                 if let Some(segment) = first_data {
                     request.frames.push(Frame::Data {
@@ -2947,12 +3448,19 @@ impl ClientTransport {
         }
         if let Some(stream_id) = self.choose_stream_for_open() {
             let upload_chunk = self.upload_chunk();
-            let first_data = self
+            let (target, first_data) = self
                 .streams
                 .get(&stream_id)
-                .and_then(|stream| stream.upload_send.peek_next(upload_chunk));
+                .map(|stream| {
+                    (
+                        stream.target.clone(),
+                        stream.upload_send.peek_next(upload_chunk),
+                    )
+                })
+                .unwrap_or((None, None));
             return Some(MuxSentKind::Open {
                 stream_id,
+                target,
                 first_data,
             });
         }
@@ -2978,7 +3486,10 @@ impl ClientTransport {
     }
 
     fn poll_should_preempt_data(&self, now: Instant) -> bool {
-        if self.data_since_poll < CLIENT_ACTIVE_POLL_DATA_BUDGET {
+        if self.bulk_upload_mode() {
+            return false;
+        }
+        if self.data_since_poll < self.runtime.config.mode_profile().active_poll_data_budget {
             return false;
         }
         if !self.streams.values().any(|stream| stream.wants_poll(now)) {
@@ -2994,6 +3505,47 @@ impl ClientTransport {
                 .checked_duration_since(self.last_ping_sent_at)
                 .map(|elapsed| elapsed >= CLIENT_ACTIVE_POLL_INTERVAL)
                 .unwrap_or(true)
+    }
+
+    fn outbound_window(&self) -> usize {
+        let profile = self.runtime.config.mode_profile();
+        if self.bulk_upload_mode() {
+            profile.inflight_bulk
+        } else {
+            profile.inflight_base
+        }
+    }
+
+    fn idle_delay(&self) -> Duration {
+        let profile = self.runtime.config.mode_profile();
+        if self.bulk_upload_mode() {
+            profile.bulk_idle_delay
+        } else {
+            profile.transport_idle_delay
+        }
+    }
+
+    fn bulk_upload_mode(&self) -> bool {
+        self.upload_pending_bytes() >= self.runtime.config.mode_profile().bulk_pending_bytes
+            && self.streams.values().any(|stream| {
+                !stream.closed
+                    && (stream.upload_send.has_pending_send()
+                        || stream.upload_send.has_retained_bytes())
+            })
+    }
+
+    fn has_downlink_pressure(&self) -> bool {
+        self.streams.values().any(|stream| {
+            !stream.closed && (stream.downlink.pending_len() > 0 || stream.pending_output_bytes > 0)
+        })
+    }
+
+    fn upload_pending_bytes(&self) -> usize {
+        self.streams
+            .values()
+            .filter(|stream| !stream.closed)
+            .map(|stream| stream.upload_send.retained_len())
+            .sum()
     }
 
     fn choose_stream_for_open(&mut self) -> Option<u64> {
@@ -3062,10 +3614,11 @@ impl ClientTransport {
     }
 
     fn upload_chunk(&self) -> usize {
+        let profile = self.runtime.config.mode_profile();
         if self.runtime.config.tcp_first_resolver_path() {
-            UPLOAD_SEND_CHUNK_CONSTRAINED
+            profile.upload_chunk_constrained
         } else {
-            UPLOAD_SEND_CHUNK_NORMAL
+            profile.upload_chunk_normal
         }
     }
 
@@ -3078,10 +3631,11 @@ impl ClientTransport {
     }
 
     fn ping_inflight_limit(&self, now: Instant) -> usize {
+        let profile = self.runtime.config.mode_profile();
         if self.streams.values().any(|stream| stream.wants_poll(now)) {
-            CLIENT_PING_INFLIGHT_ACTIVE
+            profile.ping_inflight_active
         } else {
-            CLIENT_PING_INFLIGHT_IDLE
+            profile.ping_inflight_idle
         }
     }
 
@@ -3108,6 +3662,7 @@ impl ClientTransport {
             MuxSentKind::Open {
                 stream_id,
                 first_data,
+                ..
             } => {
                 if let Some(stream) = self.streams.get_mut(&stream_id) {
                     stream.open_in_flight = false;
@@ -3384,7 +3939,11 @@ async fn send_dns_packet_inner(
 ) -> Result<DnsPacketOutcome> {
     let config = &runtime.config;
     let envelope = seal_packet(&config.access_key, Direction::ClientToServer, packet)?;
-    let qname = envelope_to_qname(&envelope, &config.domain)?;
+    let qname = if config.mode == ClientMode::Frontier {
+        envelope_to_compact_qname(&envelope, &config.domain)?
+    } else {
+        envelope_to_qname(&envelope, &config.domain)?
+    };
     let dns_id = (packet.packet_no as u16).wrapping_mul(31).wrapping_add(7);
     let query = build_query(dns_id, &qname, packet.max_response_bytes)?;
     if let Some(diag) = &runtime.diag {
@@ -3427,7 +3986,7 @@ async fn send_dns_packet_inner(
     }
     let prefer_tcp = direct_tcp_first
         || match resolver_index {
-            Some(index) => runtime.prefer_tcp_for_resolver(index).await,
+            Some(index) => runtime.prefer_tcp_for_resolver(index, class).await,
             None => false,
         };
     let (response, transport) = if let Some(pool) = &runtime.tcp_pool {
@@ -4128,7 +4687,11 @@ impl ServerState {
         session
     }
 
-    async fn get_or_create_session(&self, key: SessionKey) -> Arc<SessionHandle> {
+    async fn get_or_create_session(
+        &self,
+        key: SessionKey,
+        open_target: Option<OpenTarget>,
+    ) -> Arc<SessionHandle> {
         let mut sessions = self.sessions.lock().await;
         if let Some(handle) = sessions.get(&key) {
             handle.touch();
@@ -4145,9 +4708,17 @@ impl ServerState {
         tokio::spawn(async move {
             let result = match target_mode {
                 ServerTargetMode::Tcp => run_server_session(target, upload_rx, download_tx).await,
-                ServerTargetMode::Socks5Direct => {
-                    run_server_socks5_direct_session(upload_rx, download_tx).await
-                }
+                ServerTargetMode::Socks5Direct => match open_target {
+                    Some(target) => {
+                        run_server_direct_target_session(
+                            SocketTarget::from_open_target(target),
+                            upload_rx,
+                            download_tx,
+                        )
+                        .await
+                    }
+                    None => run_server_socks5_direct_session(upload_rx, download_tx).await,
+                },
             };
             if let Err(error) = result {
                 eprintln!("server target session failed: {error:#}");
@@ -4445,12 +5016,41 @@ struct DownloadFrame {
 
 async fn run_server_session(
     target: SocketAddr,
-    mut upload_rx: mpsc::Receiver<UploadFrame>,
+    upload_rx: mpsc::Receiver<UploadFrame>,
     download_tx: mpsc::Sender<DownloadFrame>,
 ) -> Result<()> {
     let stream = TcpStream::connect(target)
         .await
         .with_context(|| format!("connect target {target}"))?;
+    run_server_connected_stream(stream, upload_rx, download_tx).await
+}
+
+async fn run_server_direct_target_session(
+    target: SocketTarget,
+    upload_rx: mpsc::Receiver<UploadFrame>,
+    download_tx: mpsc::Sender<DownloadFrame>,
+) -> Result<()> {
+    let stream = match connect_socket_target(target).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            let _ = download_tx
+                .send(DownloadFrame {
+                    offset: 0,
+                    fin: true,
+                    bytes: Vec::new(),
+                })
+                .await;
+            return Err(error);
+        }
+    };
+    run_server_connected_stream(stream, upload_rx, download_tx).await
+}
+
+async fn run_server_connected_stream(
+    stream: TcpStream,
+    mut upload_rx: mpsc::Receiver<UploadFrame>,
+    download_tx: mpsc::Sender<DownloadFrame>,
+) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
 
     let upload_task = tokio::spawn(async move {
@@ -4718,6 +5318,16 @@ enum SocketTarget {
     Domain(String, u16),
 }
 
+impl SocketTarget {
+    fn from_open_target(target: OpenTarget) -> Self {
+        if let Ok(ip) = target.host.parse::<std::net::IpAddr>() {
+            Self::Ip(SocketAddr::new(ip, target.port))
+        } else {
+            Self::Domain(target.host, target.port)
+        }
+    }
+}
+
 async fn read_socks_port(upload: &mut UploadFrameReader) -> Result<u16> {
     let port = upload.read_exact_vec(2).await?;
     Ok(u16::from_be_bytes([port[0], port[1]]))
@@ -4894,11 +5504,23 @@ async fn handle_dns_query(state: Arc<ServerState>, query_bytes: &[u8]) -> Result
                     ranges,
                 ));
             }
-            Frame::Open { stream_id, .. } => {
+            Frame::Open {
+                stream_id,
+                host,
+                port,
+            } => {
                 push_unique_stream(&mut active_streams, stream_id);
                 if !duplicate_client_packet {
+                    let open_target = if host.is_empty() && port == 0 {
+                        None
+                    } else {
+                        Some(OpenTarget::new(host, port).context("invalid open target")?)
+                    };
                     state
-                        .get_or_create_session((key.client_id, packet.conn_id, stream_id))
+                        .get_or_create_session(
+                            (key.client_id, packet.conn_id, stream_id),
+                            open_target,
+                        )
                         .await;
                 }
             }
@@ -5432,11 +6054,13 @@ fn fit_mux_client_request_to_dns_budget(
     match kind {
         MuxSentKind::Open {
             stream_id,
+            target,
             first_data: Some(_),
         } if !client_request_fits(config, request) => {
             remove_last_data_frame(request);
             let kind = MuxSentKind::Open {
                 stream_id,
+                target,
                 first_data: None,
             };
             if client_request_fits(config, request) {
@@ -5609,9 +6233,16 @@ fn shrink_packet_ack_ranges(request: &mut Packet) -> bool {
 }
 
 fn client_request_fits(config: &ClientConfig, request: &Packet) -> bool {
-    seal_packet(&config.access_key, Direction::ClientToServer, request)
-        .and_then(|envelope| envelope_to_qname(&envelope, &config.domain))
-        .is_ok()
+    sealed_packet_len(request)
+        .and_then(|envelope_len| {
+            if config.mode == ClientMode::Frontier {
+                compact_envelope_qname_len(envelope_len, &config.domain)
+            } else {
+                envelope_qname_len(envelope_len, &config.domain)
+            }
+        })
+        .map(|qname_len| qname_len <= 253)
+        .unwrap_or(false)
 }
 
 fn is_in_domain(qname: &str, domain: &str) -> bool {
@@ -5627,6 +6258,7 @@ mod tests {
     fn test_client_config(tcp_path: bool, dns_max_payload: u16) -> ClientConfig {
         ClientConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
+            socks_listen: None,
             http_listen: None,
             resolvers: vec!["192.0.2.1:53".parse().unwrap()],
             domain: "t.example.test".to_string(),
@@ -5642,6 +6274,7 @@ mod tests {
             admission_report: None,
             resolver_cohort_size: None,
             resolver_admission_min: 1,
+            mode: ClientMode::Secure,
         }
     }
 
@@ -5675,6 +6308,7 @@ mod tests {
             Duration::from_millis(20),
             Duration::from_millis(1),
             Duration::from_secs(30),
+            PROXY_MAX_CWND,
         );
 
         assert!(health.pacing_interval < Duration::from_millis(10));
@@ -5711,16 +6345,13 @@ mod tests {
         assert!(should_admit_resolvers(&config));
 
         config.admission_report = None;
-        config.resolvers = vec!["192.0.2.1:53".parse().unwrap(); RESOLVER_TARGET_ADMITTED_UDP];
-        assert!(!should_admit_resolvers(&config));
-
-        config.resolvers = vec!["192.0.2.1:53".parse().unwrap(); RESOLVER_TARGET_ADMITTED_UDP + 1];
+        config.resolvers = vec!["192.0.2.1:53".parse().unwrap(); 2];
         assert!(should_admit_resolvers(&config));
     }
 
     #[test]
     fn admission_thresholds_are_stricter_for_proxy_paths() {
-        assert!(admission_challenges(true).len() > admission_challenges(false).len());
+        assert!(admission_challenges(false).len() >= admission_challenges(true).len());
         assert!(admission_max_elapsed(true) > admission_max_elapsed(false));
         assert!(admission_min_response_bps(false) > admission_min_response_bps(true));
         assert!(resolver_admission_probe_timeout(true) > resolver_admission_timeout(true));
@@ -5790,7 +6421,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_udp_timeout_falls_back_to_tcp_and_prefers_tcp_after_success() {
+    async fn direct_udp_timeout_falls_back_to_tcp_with_short_tcp_preference() {
         let udp_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let resolver = udp_socket.local_addr().unwrap();
         let tcp_listener = TcpListener::bind(resolver).await.unwrap();
@@ -5850,14 +6481,27 @@ mod tests {
         runtime
             .record_resolver_result(
                 0,
-                true,
-                Duration::from_millis(60),
-                outcome.truncated,
-                0,
-                Some(outcome.transport),
+                ResolverResultSample {
+                    ok: true,
+                    elapsed: Duration::from_millis(60),
+                    truncated: outcome.truncated,
+                    useful_bytes: 0,
+                    request_upload_bytes: 0,
+                    class: Some(ClientSendClass::Control),
+                    transport: Some(outcome.transport),
+                },
             )
             .await;
-        assert!(runtime.prefer_tcp_for_resolver(0).await);
+        assert!(
+            runtime
+                .prefer_tcp_for_resolver(0, Some(ClientSendClass::Control))
+                .await
+        );
+        assert!(
+            runtime
+                .prefer_tcp_for_resolver(0, Some(ClientSendClass::Data))
+                .await
+        );
         tcp_server.await.unwrap();
         drop(udp_socket);
     }

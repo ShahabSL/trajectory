@@ -23,13 +23,6 @@ adb shell logcat -c
 adb shell am start -W -n "$activity" > "$artifact_dir/start.txt"
 sleep 2
 
-adb exec-out uiautomator dump /dev/tty > "$artifact_dir/main.xml"
-adb exec-out screencap -p > "$artifact_dir/main.png"
-
-grep -Fq "Trajectory" "$artifact_dir/main.xml"
-grep -Fq "Tunnel" "$artifact_dir/main.xml"
-grep -Fq "Resolvers" "$artifact_dir/main.xml"
-
 screen_size="$(adb shell wm size | tr -d '\r' | awk '/Physical size/ {print $3; exit}')"
 if [[ "$screen_size" =~ ^[0-9]+x[0-9]+$ ]]; then
   screen_width="${screen_size%x*}"
@@ -43,17 +36,96 @@ swipe_x=$((screen_width / 2))
 swipe_start_y=$((screen_height * 78 / 100))
 swipe_end_y=$((screen_height * 28 / 100))
 
-xml_files=("$artifact_dir/main.xml")
-for step in middle bottom final; do
+dump_screen() {
+  local name="$1"
+  adb exec-out uiautomator dump /dev/tty > "$artifact_dir/$name.raw.xml"
+  python3 - "$artifact_dir/$name.raw.xml" "$artifact_dir/$name.xml" <<'PY'
+import sys
+from pathlib import Path
+
+raw = Path(sys.argv[1]).read_text(errors="replace")
+end = raw.find("</hierarchy>")
+if end < 0:
+    raise SystemExit("uiautomator XML did not contain </hierarchy>")
+Path(sys.argv[2]).write_text(raw[: end + len("</hierarchy>")])
+PY
+  adb exec-out screencap -p > "$artifact_dir/$name.png"
+}
+
+tap_node() {
+  local needle="$1"
+  local xml="$2"
+  local coords
+  if ! coords="$(python3 - "$xml" "$needle" <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+tree = ET.parse(sys.argv[1])
+needle = sys.argv[2]
+for node in tree.iter("node"):
+    if node.attrib.get("content-desc") == needle or node.attrib.get("text") == needle:
+        bounds = node.attrib.get("bounds", "")
+        match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+        if match:
+            x1, y1, x2, y2 = map(int, match.groups())
+            print((x1 + x2) // 2, (y1 + y2) // 2)
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+  )"; then
+    return 1
+  fi
+  adb shell input tap ${coords}
+}
+
+capture_tab() {
+  local label="$1"
+  local prefix="$2"
+  dump_screen "${prefix}_top"
   adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
   sleep 1
-  adb exec-out uiautomator dump /dev/tty > "$artifact_dir/$step.xml"
-  adb exec-out screencap -p > "$artifact_dir/$step.png"
-  xml_files+=("$artifact_dir/$step.xml")
+  dump_screen "${prefix}_bottom"
+  cat "$artifact_dir/${prefix}_top.xml" "$artifact_dir/${prefix}_bottom.xml" > "$artifact_dir/${prefix}.xml"
+  xml_files+=("$artifact_dir/${prefix}.xml")
+  if [[ "$label" != "Status" ]]; then
+    tap_node "nav.${label,,}" "$artifact_dir/${prefix}_bottom.xml" || tap_node "$label" "$artifact_dir/${prefix}_bottom.xml"
+    sleep 1
+  fi
+}
+
+xml_files=()
+dump_screen main
+grep -Fq "Trajectory" "$artifact_dir/main.xml"
+grep -Fq "Status" "$artifact_dir/main.xml"
+grep -Fq "Start proxy" "$artifact_dir/main.xml"
+xml_files+=("$artifact_dir/main.xml")
+
+nav_source="$artifact_dir/main.xml"
+for tab in Profile Resolvers VPN Diagnostics; do
+  tap_node "nav.${tab,,}" "$nav_source" || tap_node "$tab" "$nav_source"
+  sleep 1
+  dump_screen "${tab,,}_top"
+  adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
+  sleep 1
+  dump_screen "${tab,,}_bottom"
+  cat "$artifact_dir/${tab,,}_top.xml" "$artifact_dir/${tab,,}_bottom.xml" > "$artifact_dir/${tab,,}.xml"
+  xml_files+=("$artifact_dir/${tab,,}.xml")
+  adb shell input swipe "$swipe_x" "$swipe_end_y" "$swipe_x" "$swipe_start_y" 600
+  sleep 1
+  dump_screen "nav_${tab,,}"
+  nav_source="$artifact_dir/nav_${tab,,}.xml"
 done
 
 cat "${xml_files[@]}" > "$artifact_dir/all.xml"
-grep -Fq "Controls" "$artifact_dir/all.xml"
+grep -Fq "Profile" "$artifact_dir/all.xml"
+grep -Fq "Tunnel domain" "$artifact_dir/all.xml"
+grep -Fq "Resolvers" "$artifact_dir/all.xml"
+grep -Fq "Check DNS list" "$artifact_dir/all.xml"
+grep -Fq "VPN" "$artifact_dir/all.xml"
+grep -Fq "MTU" "$artifact_dir/all.xml"
+grep -Fq "Diagnostics" "$artifact_dir/all.xml"
+grep -Fq "Runtime log" "$artifact_dir/all.xml"
 grep -Fq "Start VPN" "$artifact_dir/all.xml"
 grep -Fq "Stop Trajectory" "$artifact_dir/all.xml"
 

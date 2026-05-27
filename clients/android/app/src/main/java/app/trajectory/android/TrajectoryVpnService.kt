@@ -15,69 +15,115 @@ import java.net.Socket
 import java.util.concurrent.Executors
 
 class TrajectoryVpnService : VpnService() {
+    private val controlExecutor = Executors.newSingleThreadExecutor()
     private val processExecutor = Executors.newSingleThreadExecutor()
     private val bridgeExecutor = Executors.newSingleThreadExecutor()
     private lateinit var runtime: TrajectoryRuntimeProcess
     private var running = false
+    @Volatile private var requestedStop = false
 
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
 
     override fun onStartCommand(intent: android.content.Intent?, flags: Int, startId: Int): Int {
         if (!::runtime.isInitialized) {
-            runtime = TrajectoryRuntimeProcess(this, processExecutor, "TrajectoryVpn") {
+            runtime = TrajectoryRuntimeProcess(
+                this,
+                processExecutor,
+                "TrajectoryVpn",
+                onOutputLine = { line ->
+                    RuntimeStatusCenter.observeRuntimeLine(
+                        RuntimeMode.VPN,
+                        ProfileStore.load(this),
+                        line,
+                    )
+                },
+            ) {
+                if (!requestedStop) {
+                    RuntimeStatusCenter.markFailed(
+                        RuntimeMode.VPN,
+                        "sidecar",
+                        "trajectory-client exited",
+                    )
+                }
                 stopSelf()
             }
         }
         when (intent?.action) {
-            ACTION_STOP -> stopRuntime()
-            else -> startRuntime()
+            ACTION_STOP -> controlExecutor.execute { stopRuntime(resetStatus = true) }
+            else -> {
+                RuntimeStatusCenter.starting(
+                    RuntimeMode.VPN,
+                    "Launching sidecar before creating the Android VPN interface.",
+                )
+                startVpnForeground("Starting Trajectory VPN")
+                controlExecutor.execute { startRuntime() }
+            }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
-        stopRuntime()
+        stopRuntime(resetStatus = false)
+        controlExecutor.shutdownNow()
         bridgeExecutor.shutdownNow()
         processExecutor.shutdownNow()
         super.onDestroy()
     }
 
     override fun onRevoke() {
-        stopRuntime()
+        RuntimeStatusCenter.markFailed(RuntimeMode.VPN, "Android VPN", "permission was revoked")
+        stopRuntime(resetStatus = false)
         super.onRevoke()
     }
 
     private fun startRuntime() {
         if (running) return
-        startVpnForeground("Starting Trajectory VPN")
         val profile = ProfileStore.load(this)
+        requestedStop = false
+        RuntimeStatusCenter.validating(RuntimeMode.VPN)
         val errors = profile.validate()
         if (errors.isNotEmpty()) {
             android.util.Log.e("TrajectoryVpn", errors.joinToString("; "))
-            stopRuntime()
+            RuntimeStatusCenter.markFailed(RuntimeMode.VPN, "profile", errors.joinToString("; "))
+            stopRuntime(resetStatus = false)
             return
         }
         if (!runtime.start(profile)) {
-            stopRuntime()
+            RuntimeStatusCenter.markFailed(RuntimeMode.VPN, "sidecar", "failed to start trajectory-client")
+            stopRuntime(resetStatus = false)
             return
         }
         if (!waitForPort(profile.socksPort, 8_000)) {
             android.util.Log.e("TrajectoryVpn", "local Trajectory SOCKS listener did not become ready")
-            stopRuntime()
+            RuntimeStatusCenter.markFailed(
+                RuntimeMode.VPN,
+                "SOCKS listener",
+                "port ${profile.socksPort} did not open",
+            )
+            stopRuntime(resetStatus = false)
             return
         }
 
         val tun = try {
+            RuntimeStatusCenter.markListenersReady(RuntimeMode.VPN, profile)
             createTun(profile)
         } catch (error: Exception) {
             android.util.Log.e("TrajectoryVpn", "failed to establish VPN", error)
-            stopRuntime()
+            RuntimeStatusCenter.markFailed(
+                RuntimeMode.VPN,
+                "Android VPN",
+                error.message ?: "failed to establish VPN",
+            )
+            stopRuntime(resetStatus = false)
             return
         }
         val rawFd = tun.detachFd()
         running = true
-        startVpnForeground("VPN active via SOCKS 127.0.0.1:${profile.socksPort}")
+        RuntimeStatusCenter.markTunEstablished()
+        startVpnForeground("VPN bridge starting via SOCKS 127.0.0.1:${profile.socksPort}")
         bridgeExecutor.execute {
+            RuntimeStatusCenter.markVpnConnected()
+            startVpnForeground("VPN connected via SOCKS 127.0.0.1:${profile.socksPort}")
             val code = TrajectoryVpnBridge.run(
                 rawFd,
                 profile.socksPort,
@@ -88,12 +134,21 @@ class TrajectoryVpnService : VpnService() {
             )
             if (code != 0) {
                 android.util.Log.e("TrajectoryVpn", "tun2proxy bridge exited with code $code")
+                RuntimeStatusCenter.markFailed(
+                    RuntimeMode.VPN,
+                    "bridge",
+                    "tun2proxy exited with code $code",
+                )
             }
             stopSelf()
         }
     }
 
-    private fun stopRuntime() {
+    private fun stopRuntime(resetStatus: Boolean) {
+        if (resetStatus) {
+            RuntimeStatusCenter.markStopping(RuntimeMode.VPN)
+        }
+        requestedStop = true
         if (running) {
             TrajectoryVpnBridge.stop()
         }
@@ -102,6 +157,9 @@ class TrajectoryVpnService : VpnService() {
             runtime.stop()
         }
         stopForeground(STOP_FOREGROUND_REMOVE)
+        if (resetStatus) {
+            RuntimeStatusCenter.reset()
+        }
         stopSelf()
     }
 
@@ -149,7 +207,7 @@ class TrajectoryVpnService : VpnService() {
             startForeground(
                 NOTIFICATION_ID,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
             )
         } else {
             startForeground(NOTIFICATION_ID, notification)

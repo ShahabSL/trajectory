@@ -6,15 +6,18 @@ use chacha20poly1305::{
 };
 use std::collections::HashMap;
 
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 const MAX_ACK_RANGES: usize = 64;
 const MAX_STREAM_RANGES: usize = 64;
 const MAX_FRAMES: usize = 64;
 const MAX_FRAME_LEN: usize = 4096;
 const MAX_HOST_LEN: usize = 253;
-const SEALED_FIXED_HEADER_LEN: usize = 4 + 8;
+const SEALED_FIXED_HEADER_LEN: usize = 4;
 const AEAD_TAG_LEN: usize = 16;
 const DEFAULT_MAX_RESPONSE_BYTES: u16 = 900;
+const PACKET_FLAG_STREAM_ACK_OFFSET: u8 = 0x01;
+const PACKET_FLAG_COMPACT_DATA: u8 = 0x02;
+const PACKET_FLAG_COMPACT_FIN: u8 = 0x04;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Direction {
@@ -227,9 +230,9 @@ fn packet_nonce(direction: Direction, packet_no: u64) -> [u8; 12] {
 }
 
 fn sealed_header(client_id: u32, conn_id: u64, packet_no: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(sealed_header_len(packet_no));
+    let mut out = Vec::with_capacity(sealed_header_len(conn_id, packet_no));
     put_u32(&mut out, client_id);
-    put_u64(&mut out, conn_id);
+    put_var_u64(&mut out, conn_id);
     put_var_u64(&mut out, packet_no);
     out
 }
@@ -242,36 +245,23 @@ struct SealedHeader {
 }
 
 fn parse_sealed_header(envelope: &[u8]) -> Result<SealedHeader> {
-    if envelope.len() < SEALED_FIXED_HEADER_LEN + 1 + AEAD_TAG_LEN {
+    if envelope.len() < SEALED_FIXED_HEADER_LEN + 2 + AEAD_TAG_LEN {
         bail!("sealed packet too short");
     }
     let client_id = u32::from_be_bytes(envelope[0..4].try_into().unwrap());
-    let conn_id = u64::from_be_bytes(envelope[4..12].try_into().unwrap());
-    let mut packet_no = 0u64;
-    for index in 0..10 {
-        let pos = SEALED_FIXED_HEADER_LEN + index;
-        if pos >= envelope.len() {
-            bail!("sealed packet truncated");
-        }
-        let byte = envelope[pos];
-        if index == 9 && byte & 0xfe != 0 {
-            bail!("sealed packet number varint exceeds u64");
-        }
-        packet_no |= ((byte & 0x7f) as u64) << (index * 7);
-        if byte & 0x80 == 0 {
-            let header_len = pos + 1;
-            if envelope.len() < header_len + AEAD_TAG_LEN {
-                bail!("sealed packet too short");
-            }
-            return Ok(SealedHeader {
-                client_id,
-                conn_id,
-                packet_no,
-                header_len,
-            });
-        }
+    let (conn_id, after_conn_id) =
+        parse_header_var_u64(envelope, SEALED_FIXED_HEADER_LEN).context("sealed connection id")?;
+    let (packet_no, header_len) =
+        parse_header_var_u64(envelope, after_conn_id).context("sealed packet number")?;
+    if envelope.len() < header_len + AEAD_TAG_LEN {
+        bail!("sealed packet too short");
     }
-    bail!("sealed packet number varint exceeds u64")
+    Ok(SealedHeader {
+        client_id,
+        conn_id,
+        packet_no,
+        header_len,
+    })
 }
 
 fn connection_packet_key(key: &ClientAccessKey, conn_id: u64) -> [u8; 32] {
@@ -283,23 +273,34 @@ fn connection_packet_key(key: &ClientAccessKey, conn_id: u64) -> [u8; 32] {
 
 pub fn sealed_packet_len(packet: &Packet) -> Result<usize> {
     checked_add_len(
-        checked_add_len(sealed_header_len(packet.packet_no), AEAD_TAG_LEN)?,
+        checked_add_len(
+            sealed_header_len(packet.conn_id, packet.packet_no),
+            AEAD_TAG_LEN,
+        )?,
         encoded_packet_len(packet)?,
     )
 }
 
 pub fn sealed_packet_len_with_extra_frame(packet: &Packet, frame: &Frame) -> Result<usize> {
+    let mut packet = packet.clone();
+    packet.frames.push(frame.clone());
     checked_add_len(
-        checked_add_len(sealed_header_len(packet.packet_no), AEAD_TAG_LEN)?,
-        encoded_packet_len_with_extra_frame(packet, frame)?,
+        checked_add_len(
+            sealed_header_len(packet.conn_id, packet.packet_no),
+            AEAD_TAG_LEN,
+        )?,
+        encoded_packet_len(&packet)?,
     )
 }
 
-fn sealed_header_len(packet_no: u64) -> usize {
-    SEALED_FIXED_HEADER_LEN + var_len_u64(packet_no)
+fn sealed_header_len(conn_id: u64, packet_no: u64) -> usize {
+    SEALED_FIXED_HEADER_LEN + var_len_u64(conn_id) + var_len_u64(packet_no)
 }
 
 pub fn encoded_packet_len(packet: &Packet) -> Result<usize> {
+    if let Some(frame) = compact_data_frame(packet) {
+        return compact_data_packet_len(frame);
+    }
     if packet.ack_ranges.len() > MAX_ACK_RANGES {
         bail!("too many ack ranges");
     }
@@ -331,15 +332,42 @@ pub fn encoded_packet_len_with_extra_frame(packet: &Packet, frame: &Frame) -> Re
     if packet.frames.len() >= MAX_FRAMES {
         bail!("too many frames");
     }
-    checked_add_len(encoded_packet_len(packet)?, frame_encoded_len(frame)?)
+    let mut packet = packet.clone();
+    packet.frames.push(frame.clone());
+    encoded_packet_len(&packet)
 }
 
 pub fn encode_packet(packet: &Packet) -> Result<Vec<u8>> {
+    if let Some(frame) = compact_data_frame(packet) {
+        let mut out = Vec::with_capacity(compact_data_packet_len(frame)?);
+        out.push(VERSION);
+        let flags = PACKET_FLAG_COMPACT_DATA
+            | if compact_data_fin(frame) {
+                PACKET_FLAG_COMPACT_FIN
+            } else {
+                0
+            };
+        out.push(flags);
+        let Frame::Data {
+            stream_id,
+            offset,
+            bytes,
+            ..
+        } = frame
+        else {
+            unreachable!("compact data frame checked");
+        };
+        put_var_u64(&mut out, *stream_id);
+        put_var_u64(&mut out, *offset);
+        out.extend_from_slice(bytes);
+        return Ok(out);
+    }
+
     let mut out = Vec::with_capacity(encoded_packet_len(packet)?);
     out.push(VERSION);
     let mut flags = 0u8;
     if packet.stream_ack_offset.is_some() {
-        flags |= 1;
+        flags |= PACKET_FLAG_STREAM_ACK_OFFSET;
     }
     out.push(flags);
     if let Some(offset) = packet.stream_ack_offset {
@@ -372,10 +400,34 @@ fn decode_packet(
         bail!("unsupported packet version {version}");
     }
     let flags = cur.u8()?;
-    if flags & !1 != 0 {
+    if flags & PACKET_FLAG_COMPACT_DATA != 0 {
+        if flags & !(PACKET_FLAG_COMPACT_DATA | PACKET_FLAG_COMPACT_FIN) != 0 {
+            bail!("unsupported compact packet flags");
+        }
+        let stream_id = cur.var_u64()?;
+        let offset = cur.var_u64()?;
+        let bytes = cur.take_remaining()?.to_vec();
+        if bytes.len() > MAX_FRAME_LEN {
+            bail!("data frame too large");
+        }
+        return Ok(Packet {
+            conn_id,
+            packet_no,
+            max_response_bytes,
+            stream_ack_offset: None,
+            ack_ranges: Vec::new(),
+            frames: vec![Frame::Data {
+                stream_id,
+                offset,
+                fin: flags & PACKET_FLAG_COMPACT_FIN != 0,
+                bytes,
+            }],
+        });
+    }
+    if flags & !(PACKET_FLAG_STREAM_ACK_OFFSET) != 0 {
         bail!("unsupported packet flags");
     }
-    let stream_ack_offset = if flags & 1 != 0 {
+    let stream_ack_offset = if flags & PACKET_FLAG_STREAM_ACK_OFFSET != 0 {
         Some(cur.var_u64()?)
     } else {
         None
@@ -694,6 +746,45 @@ fn frame_encoded_len(frame: &Frame) -> Result<usize> {
     Ok(len)
 }
 
+fn compact_data_frame(packet: &Packet) -> Option<&Frame> {
+    if packet.stream_ack_offset.is_some()
+        || !packet.ack_ranges.is_empty()
+        || packet.frames.len() != 1
+    {
+        return None;
+    }
+    match &packet.frames[0] {
+        frame @ Frame::Data { bytes, .. } if bytes.len() <= MAX_FRAME_LEN => Some(frame),
+        _ => None,
+    }
+}
+
+fn compact_data_fin(frame: &Frame) -> bool {
+    match frame {
+        Frame::Data { fin, .. } => *fin,
+        _ => false,
+    }
+}
+
+fn compact_data_packet_len(frame: &Frame) -> Result<usize> {
+    let Frame::Data {
+        stream_id,
+        offset,
+        bytes,
+        ..
+    } = frame
+    else {
+        bail!("compact packet requires data frame");
+    };
+    if bytes.len() > MAX_FRAME_LEN {
+        bail!("data frame too large");
+    }
+    let len = 2usize;
+    let len = checked_add_len(len, var_len_u64(*stream_id))?;
+    let len = checked_add_len(len, var_len_u64(*offset))?;
+    checked_add_len(len, bytes.len())
+}
+
 fn validate_stream_ack(
     cumulative_offset: u64,
     max_stream_data: u64,
@@ -740,10 +831,6 @@ fn put_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_be_bytes());
 }
 
-fn put_u64(out: &mut Vec<u8>, value: u64) {
-    out.extend_from_slice(&value.to_be_bytes());
-}
-
 fn put_var_u64(out: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
         out.push((value as u8) | 0x80);
@@ -768,6 +855,29 @@ fn checked_add_len(lhs: usize, rhs: usize) -> Result<usize> {
 
 fn u16_from_var(value: u64, field: &str) -> Result<u16> {
     u16::try_from(value).with_context(|| format!("{field} exceeds u16"))
+}
+
+fn parse_header_var_u64(bytes: &[u8], start: usize) -> Result<(u64, usize)> {
+    let mut value = 0u64;
+    for index in 0..10 {
+        let pos = start
+            .checked_add(index)
+            .context("sealed header cursor overflow")?;
+        let Some(&byte) = bytes.get(pos) else {
+            bail!("sealed packet truncated");
+        };
+        if index == 9 && byte & 0xfe != 0 {
+            bail!("sealed header varint exceeds u64");
+        }
+        value |= ((byte & 0x7f) as u64) << (index * 7);
+        if byte & 0x80 == 0 {
+            if index + 1 != var_len_u64(value) {
+                bail!("sealed header varint is not canonical");
+            }
+            return Ok((value, pos + 1));
+        }
+    }
+    bail!("sealed header varint exceeds u64")
 }
 
 struct Cursor<'a> {
@@ -814,6 +924,10 @@ impl<'a> Cursor<'a> {
 
     fn is_empty(&self) -> bool {
         self.pos == self.bytes.len()
+    }
+
+    fn take_remaining(&mut self) -> Result<&'a [u8]> {
+        self.take(self.bytes.len().saturating_sub(self.pos))
     }
 }
 
@@ -926,6 +1040,88 @@ mod tests {
         let with_extra = encoded_packet_len_with_extra_frame(&packet, &extra).unwrap();
         packet.frames.push(extra);
         assert_eq!(with_extra, encode_packet(&packet).unwrap().len());
+    }
+
+    #[test]
+    fn compact_data_packet_roundtrips_and_matches_len() {
+        let key = ClientAccessKey::generate();
+        let mut packet = Packet::new(17, 3);
+        packet.frames.push(Frame::Data {
+            stream_id: 1,
+            offset: 16_384,
+            fin: true,
+            bytes: vec![7; 123],
+        });
+
+        let encoded = encode_packet(&packet).unwrap();
+        assert_eq!(encoded_packet_len(&packet).unwrap(), encoded.len());
+        assert_eq!(
+            decode_packet(
+                &encoded,
+                packet.conn_id,
+                packet.packet_no,
+                packet.max_response_bytes
+            )
+            .unwrap(),
+            packet
+        );
+        assert_eq!(
+            sealed_packet_len(&packet).unwrap(),
+            seal_packet(&key, Direction::ClientToServer, &packet)
+                .unwrap()
+                .len()
+        );
+
+        let mut non_compact = packet.clone();
+        non_compact.ack_ranges.push(AckRange { first: 1, last: 1 });
+        assert!(encoded.len() < encode_packet(&non_compact).unwrap().len());
+
+        let with_extra =
+            encoded_packet_len_with_extra_frame(&packet, &Frame::Ping { nonce: 9 }).unwrap();
+        let mut expanded = packet.clone();
+        expanded.frames.push(Frame::Ping { nonce: 9 });
+        assert_eq!(with_extra, encode_packet(&expanded).unwrap().len());
+    }
+
+    #[test]
+    fn small_conn_id_uses_shorter_sealed_header() {
+        let key = ClientAccessKey::generate();
+        let mut small = Packet::new(17, 3);
+        small.frames.push(Frame::Data {
+            stream_id: 1,
+            offset: 0,
+            fin: false,
+            bytes: vec![1; 64],
+        });
+
+        let mut large = small.clone();
+        large.conn_id = u64::MAX - 1;
+
+        let sealed_small = seal_packet(&key, Direction::ClientToServer, &small).unwrap();
+        let sealed_large = seal_packet(&key, Direction::ClientToServer, &large).unwrap();
+        assert_eq!(sealed_packet_len(&small).unwrap(), sealed_small.len());
+        assert_eq!(sealed_packet_len(&large).unwrap(), sealed_large.len());
+        assert!(sealed_small.len() < sealed_large.len());
+        assert_eq!(
+            open_packet_with_key(&key, Direction::ClientToServer, &sealed_small).unwrap(),
+            small
+        );
+        assert_eq!(
+            open_packet_with_key(&key, Direction::ClientToServer, &sealed_large).unwrap(),
+            large
+        );
+    }
+
+    #[test]
+    fn sealed_header_varints_must_be_canonical() {
+        let bytes = [0x80, 0x00];
+        assert!(parse_header_var_u64(&bytes, 0).is_err());
+
+        let bytes = [0x81, 0x00];
+        assert!(parse_header_var_u64(&bytes, 0).is_err());
+
+        let bytes = [0x80, 0x01];
+        assert_eq!(parse_header_var_u64(&bytes, 0).unwrap(), (128, 2));
     }
 
     #[test]

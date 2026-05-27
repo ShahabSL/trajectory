@@ -24,6 +24,9 @@ object ProfileStore {
                 .filter { it.isNotEmpty() }
                 .toList(),
             resolverSocksProxy = prefs.getString("resolverSocksProxy", "") ?: "",
+            resolverTransport = prefs.getString("resolverTransport", "auto") ?: "auto",
+            transportMode = prefs.getString("transportMode", "secure") ?: "secure",
+            resolverCohortSize = prefs.getInt("resolverCohortSize", 0).takeIf { it > 0 },
             socksPort = prefs.getInt("socksPort", 7000),
             httpPort = prefs.getInt("httpPort", 7001),
             dnsMaxPayload = prefs.getInt("dnsMaxPayload", 1232),
@@ -48,6 +51,9 @@ object ProfileStore {
             .remove("accessKey")
             .putString("resolvers", profile.resolvers.joinToString("\n"))
             .putString("resolverSocksProxy", profile.resolverSocksProxy)
+            .putString("resolverTransport", profile.resolverTransport)
+            .putString("transportMode", profile.transportMode)
+            .putInt("resolverCohortSize", profile.resolverCohortSize ?: 0)
             .putInt("socksPort", profile.socksPort)
             .putInt("httpPort", profile.httpPort)
             .putInt("dnsMaxPayload", profile.dnsMaxPayload)
