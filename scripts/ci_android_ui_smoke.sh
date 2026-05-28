@@ -1413,7 +1413,7 @@ assert_vpn_network_active() {
   probe_uid="$(resolve_smoke_probe_uid "${output%.txt}")"
   app_uid="$(resolve_trajectory_app_uid "${output%.txt}")"
   timeout 10s adb shell dumpsys connectivity > "$output" 2>&1
-  python3 - "$output" "$summary_output" "$probe_uid" "$app_uid" <<'PY'
+  python3 - "$output" "$summary_output" "$probe_uid" "$app_uid" "${android_sdk:-0}" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -1422,6 +1422,7 @@ text = Path(sys.argv[1]).read_text(errors="replace")
 summary_path = Path(sys.argv[2])
 probe_uid = int(sys.argv[3])
 app_uid = int(sys.argv[4])
+android_sdk = int(sys.argv[5]) if sys.argv[5].isdigit() else 0
 
 
 def network_blocks(source: str) -> list[str]:
@@ -1451,6 +1452,14 @@ def uid_in_ranges(block: str, uid: int) -> bool:
     return False
 
 
+def exposes_uid_ranges(block: str) -> bool:
+    return re.search(r"Uids:\s*<[\{\[]", block, re.S) is not None
+
+
+def has_tun_interface(block: str) -> bool:
+    return re.search(r"InterfaceName:\s*tun\d+", block) is not None
+
+
 def owned_by_trajectory(block: str) -> bool:
     owner_matches = re.search(rf"\bOwnerUid:\s*{app_uid}\b", block) is not None
     admin_matches = re.search(rf"\bAdminUids:\s*\[[^\]]*\b{app_uid}\b", block) is not None
@@ -1471,6 +1480,25 @@ vpn_blocks = [
 ]
 trajectory_blocks = [block for block in vpn_blocks if owned_by_trajectory(block)]
 if not trajectory_blocks:
+    if android_sdk and android_sdk <= 28:
+        legacy_tun_blocks = [block for block in vpn_blocks if has_tun_interface(block)]
+        if len(legacy_tun_blocks) == 1:
+            trajectory_blocks = legacy_tun_blocks
+        else:
+            summary_path.write_text(
+                "legacy Android VPN block did not have a unique TUN candidate; "
+                f"app_uid={app_uid}; vpn_blocks={len(vpn_blocks)}; tun_blocks={len(legacy_tun_blocks)}\n",
+                encoding="utf-8",
+            )
+            raise SystemExit("Android VPN network was not visible in dumpsys connectivity")
+    else:
+        summary_path.write_text(
+            f"no Trajectory-owned VPN block found for app_uid={app_uid}; vpn_blocks={len(vpn_blocks)}\n",
+            encoding="utf-8",
+        )
+        raise SystemExit("Android VPN network was not visible in dumpsys connectivity")
+
+if not trajectory_blocks:
     summary_path.write_text(
         f"no Trajectory-owned VPN block found for app_uid={app_uid}; vpn_blocks={len(vpn_blocks)}\n",
         encoding="utf-8",
@@ -1478,8 +1506,9 @@ if not trajectory_blocks:
     raise SystemExit("Android VPN network was not visible in dumpsys connectivity")
 
 for block in trajectory_blocks:
-    has_tun = re.search(r"InterfaceName:\s*tun\d+", block) is not None
+    has_tun = has_tun_interface(block)
     routes_probe = uid_in_ranges(block, probe_uid)
+    routes_probe_unknown = android_sdk and android_sdk <= 28 and not exposes_uid_ranges(block)
     validated = "VALIDATED" in block
     owner = re.search(r"\bOwnerUid:\s*([0-9]+)", block)
     establishing = re.search(r"\bEstablishingAppUid:\s*([0-9]+)", block)
@@ -1492,13 +1521,13 @@ for block in trajectory_blocks:
         f"establishing_app_uid={establishing.group(1) if establishing else 'unknown'}\n"
         f"probe_uid={probe_uid}\n"
         f"has_tun={has_tun}\n"
-        f"routes_probe_uid={routes_probe}\n"
+        f"routes_probe_uid={routes_probe if not routes_probe_unknown else 'unknown_legacy_api'}\n"
         f"validated={validated}\n",
         encoding="utf-8",
     )
     if not has_tun:
         continue
-    if not routes_probe:
+    if not routes_probe and not routes_probe_unknown:
         continue
     raise SystemExit(0)
 

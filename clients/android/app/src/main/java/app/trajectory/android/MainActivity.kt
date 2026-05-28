@@ -567,6 +567,8 @@ private fun StatusCard(
     profileErrors: List<String>,
     onDismissNotice: () -> Unit,
 ) {
+    val dnsReady = status.admittedResolvers > 0 ||
+        status.phase.ordinal > RuntimePhase.ADMITTING_RESOLVERS.ordinal
     CardShell(
         modifier = Modifier.semantics {
             contentDescription = "status.phase.${status.phase.name.lowercase()}"
@@ -618,7 +620,7 @@ private fun StatusCard(
                 "DNS",
                 resolverSummary(status, profile),
                 Modifier.fillMaxWidth(),
-                if (status.admittedResolvers > 0) "status.dns.admitted" else "status.dns.waiting",
+                if (dnsReady) "status.dns.admitted" else "status.dns.waiting",
             )
             StatusChip("Mode", modeLabel(profile.transportMode), Modifier.fillMaxWidth())
         }
