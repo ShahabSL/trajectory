@@ -358,6 +358,14 @@ async function assertLaunches(command, args, label, extraEnv = {}, options = {})
     ? [backendFile, pageFile]
     : [backendFile, pageFile, frontendFile, stateFile, uiFlowFile];
   if (liveFile) readyFiles.push(liveFile);
+  const frontendSmokeEnv = pageOnly
+    ? {}
+    : {
+        TRAJECTORY_DESKTOP_SMOKE_READY_FILE: frontendFile,
+        TRAJECTORY_DESKTOP_SMOKE_STATE_FILE: stateFile,
+        TRAJECTORY_DESKTOP_SMOKE_UI_FLOW_FILE: uiFlowFile,
+        TRAJECTORY_DESKTOP_SMOKE_ERROR_FILE: errorFile,
+      };
   const xvfb = await startPackageXvfb(label);
   const smokeEnv = {
     ...process.env,
@@ -365,10 +373,7 @@ async function assertLaunches(command, args, label, extraEnv = {}, options = {})
     TRAJECTORY_DESKTOP_SMOKE: "1",
     TRAJECTORY_DESKTOP_SMOKE_BACKEND_FILE: backendFile,
     TRAJECTORY_DESKTOP_SMOKE_PAGE_FILE: pageFile,
-    TRAJECTORY_DESKTOP_SMOKE_READY_FILE: frontendFile,
-    TRAJECTORY_DESKTOP_SMOKE_STATE_FILE: stateFile,
-    TRAJECTORY_DESKTOP_SMOKE_UI_FLOW_FILE: uiFlowFile,
-    TRAJECTORY_DESKTOP_SMOKE_ERROR_FILE: errorFile,
+    ...frontendSmokeEnv,
     NO_AT_BRIDGE: "1",
     WEBKIT_DISABLE_COMPOSITING_MODE: "1",
     ...liveEnv,
@@ -399,7 +404,7 @@ async function assertLaunches(command, args, label, extraEnv = {}, options = {})
     const ready = await waitForReadyFiles(
       child,
       readyFiles,
-      [errorFile],
+      pageOnly ? [] : [errorFile],
       pageOnly ? 30_000 : liveFile ? 90_000 : 45_000,
       () => launchError,
     );
