@@ -33,6 +33,22 @@ wait_for_boot_completed() {
   return 1
 }
 
+adb_wait_ready() {
+  local attempt
+  for attempt in $(seq 1 20); do
+    timeout 10s adb wait-for-device >/dev/null 2>&1 || true
+    if [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]] &&
+      adb shell true >/dev/null 2>&1; then
+      return 0
+    fi
+    if [[ "$attempt" -eq 8 ]]; then
+      adb reconnect >/dev/null 2>&1 || true
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 install_apk() {
   local attempt
   for attempt in 1 2 3; do
@@ -196,13 +212,76 @@ swipe_restore_end_y=$((screen_height * 68 / 100))
 dump_ui_tree_raw() {
   local output="$1"
   local seconds="${2:-10}"
-  for _ in 1 2; do
+  for _ in 1 2 3 4; do
     if timeout "${seconds}s" adb exec-out uiautomator dump /dev/tty > "$output"; then
       return 0
     fi
+    adb_wait_ready || true
     sleep 1
   done
   return 1
+}
+
+valid_png_file() {
+  python3 - "$1" <<'PY'
+import struct
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = path.read_bytes()
+except FileNotFoundError:
+    raise SystemExit(1)
+signature = b"\x89PNG\r\n\x1a\n"
+if not data.startswith(signature):
+    raise SystemExit(1)
+offset = len(signature)
+seen_ihdr = False
+seen_idat = False
+while offset + 12 <= len(data):
+    length = struct.unpack(">I", data[offset : offset + 4])[0]
+    kind = data[offset + 4 : offset + 8]
+    end = offset + 12 + length
+    if end > len(data):
+        raise SystemExit(1)
+    if kind == b"IHDR":
+        width, height = struct.unpack(">II", data[offset + 8 : offset + 16])
+        if width <= 0 or height <= 0 or width > 10000 or height > 10000:
+            raise SystemExit(1)
+        seen_ihdr = True
+    elif kind == b"IDAT":
+        seen_idat = True
+    elif kind == b"IEND":
+        raise SystemExit(0 if seen_ihdr and seen_idat else 1)
+    offset = end
+raise SystemExit(1)
+PY
+}
+
+valid_raw_screencap() {
+  python3 - "$1" <<'PY'
+import struct
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = path.read_bytes()
+except FileNotFoundError:
+    raise SystemExit(1)
+if len(data) < 16:
+    raise SystemExit(1)
+width, height, _pixel_format = struct.unpack_from("<III", data, 0)
+if width <= 0 or height <= 0 or width > 10000 or height > 10000:
+    raise SystemExit(1)
+pixels = width * height
+for header_size in (12, 16):
+    payload = len(data) - header_size
+    if payload in (pixels * 2, pixels * 3, pixels * 4):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
 }
 
 capture_screenshot() {
@@ -210,19 +289,61 @@ capture_screenshot() {
   local raw="${output%.png}.raw-screencap"
   local visual_report="${output%.png}.visual.txt"
   local png_capture_status=0
-  timeout 20s adb exec-out screencap > "$raw"
-  if [[ "${TRAJECTORY_ANDROID_SMOKE_FORCE_RAW_SCREENSHOT:-}" == "1" ]]; then
-    : > "$output"
-    png_capture_status=77
-  else
-    timeout 20s adb exec-out screencap -p > "$output" 2> "${output}.stderr" || png_capture_status=$?
-    if [[ ! -s "$output" ]]; then
+  local raw_capture_status=0
+  local captured=0
+  local attempt
+  local remote_png
+
+  : > "$raw"
+  : > "$output"
+  for attempt in 1 2 3 4; do
+    png_capture_status=0
+    raw_capture_status=0
+    rm -f "${output}.tmp" "${raw}.tmp"
+
+    if [[ "${TRAJECTORY_ANDROID_SMOKE_FORCE_RAW_SCREENSHOT:-}" != "1" ]]; then
+      if timeout 20s adb exec-out screencap -p > "${output}.tmp" 2> "${output}.stderr" &&
+        valid_png_file "${output}.tmp"; then
+        mv "${output}.tmp" "$output"
+        captured=1
+        break
+      else
+        png_capture_status=$?
+      fi
+
       remote_png="/sdcard/trajectory-smoke-${RANDOM}-${RANDOM}.png"
       if timeout 20s adb shell screencap -p "$remote_png" >/dev/null 2> "${output}.device.stderr"; then
-        timeout 20s adb pull "$remote_png" "$output" >/dev/null 2>> "${output}.device.stderr" || true
+        if timeout 20s adb pull "$remote_png" "${output}.tmp" >/dev/null 2>> "${output}.device.stderr" &&
+          valid_png_file "${output}.tmp"; then
+          mv "${output}.tmp" "$output"
+          adb shell rm -f "$remote_png" >/dev/null 2>&1 || true
+          captured=1
+          break
+        fi
         adb shell rm -f "$remote_png" >/dev/null 2>&1 || true
       fi
+    else
+      png_capture_status=77
     fi
+
+    if timeout 20s adb exec-out screencap > "${raw}.tmp" 2> "${raw}.stderr" &&
+      valid_raw_screencap "${raw}.tmp"; then
+      mv "${raw}.tmp" "$raw"
+      captured=1
+      break
+    else
+      raw_capture_status=$?
+    fi
+
+    echo "Android screenshot capture attempt ${attempt} failed; png_status=${png_capture_status}; raw_status=${raw_capture_status}" \
+      >> "$visual_report.capture"
+    adb_wait_ready || true
+    sleep 1
+  done
+
+  if [[ "$captured" -ne 1 ]]; then
+    echo "Android screenshot capture failed after retries; png_status=${png_capture_status}; raw_status=${raw_capture_status}" \
+      >> "$visual_report.capture"
   fi
   python3 - "$raw" "$visual_report" "$output" "$png_capture_status" <<'PY'
 import binascii
@@ -322,25 +443,29 @@ def decode_png(path: Path):
 
 
 def parse_raw(path: Path):
-    data = path.read_bytes()
-    if len(data) < 12:
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    if len(data) < 16:
         return None
     width, height, pixel_format = struct.unpack_from("<III", data, 0)
     if width <= 0 or height <= 0 or width > 10000 or height > 10000:
         return None
 
     pixels = width * height
-    payload = data[12:]
-    for candidate_bpp in (4, 3, 2):
-        if len(payload) >= pixels * candidate_bpp:
-            return {
-                "width": width,
-                "height": height,
-                "format": pixel_format,
-                "bytes_per_pixel": candidate_bpp,
-                "payload": payload[: pixels * candidate_bpp],
-                "source": "raw-rgb565" if candidate_bpp == 2 else "raw",
-            }
+    for header_size in (12, 16):
+        payload = data[header_size:]
+        for candidate_bpp in (4, 3, 2):
+            if len(payload) >= pixels * candidate_bpp:
+                return {
+                    "width": width,
+                    "height": height,
+                    "format": pixel_format,
+                    "bytes_per_pixel": candidate_bpp,
+                    "payload": payload[: pixels * candidate_bpp],
+                    "source": f"raw-header-{header_size}",
+                }
     return None
 
 
@@ -467,6 +592,7 @@ if failures:
     raise SystemExit("; ".join(failures))
 PY
   rm -f "${output}.stderr"
+  rm -f "${output}.tmp" "${raw}.tmp" "${raw}.stderr"
   rm -f "$raw"
 }
 
@@ -970,7 +1096,21 @@ assert_no_android_crash() {
     echo "Android logcat capture timed out or failed; continuing with UI/data-path assertions" > "${log}.warning"
     return 0
   fi
-  if grep -E "FATAL EXCEPTION|E AndroidRuntime" "$log"; then
+  if ! python3 - "$log" "$package_name" <<'PY'
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text(errors="replace").splitlines()
+package_name = sys.argv[2]
+for index, line in enumerate(lines):
+    if "FATAL EXCEPTION" not in line and "E AndroidRuntime" not in line:
+        continue
+    block = "\n".join(lines[index:index + 30])
+    if package_name in block or "Process: Trajectory" in block:
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+  then
     echo "Android crash detected during UI smoke test" >&2
     return 1
   fi
@@ -978,6 +1118,8 @@ assert_no_android_crash() {
 
 assert_clean_proxy_shutdown() {
   local source_xml="$1"
+  local shutdown_label="${2:-Proxy}"
+  local marker="${3:-$artifact_dir/live-proxy-clean-shutdown.txt}"
   local http_port="${TRAJECTORY_ANDROID_SMOKE_HTTP_PORT:-7001}"
   local socks_port="${TRAJECTORY_ANDROID_SMOKE_SOCKS_PORT:-7000}"
   tap_control "Stop Trajectory" "$source_xml" "live_proxy_stop" || true
@@ -991,19 +1133,24 @@ assert_clean_proxy_shutdown() {
       port_is_closed "$http_port" &&
       port_is_closed "$socks_port" &&
       ! adb shell ps -A | grep -E 'trajectory_client|libtrajectory_client' > "$artifact_dir/live-proxy-sidecar-processes.txt"; then
-      echo "Proxy stopped cleanly after ${pass}s" > "$artifact_dir/live-proxy-clean-shutdown.txt"
+      if [[ "$shutdown_label" == "VPN" ]]; then
+        assert_vpn_network_stopped "$artifact_dir/vpn-shutdown-connectivity.txt"
+      fi
+      echo "${shutdown_label} stopped cleanly after ${pass}s" > "$marker"
       return 0
     fi
   done
-  echo "Android live proxy smoke did not prove clean shutdown" >&2
+  echo "Android ${shutdown_label} smoke did not prove clean shutdown" >&2
   return 1
 }
 
 accept_vpn_consent() {
   local probe="$artifact_dir/vpn-consent.raw.xml"
   local action
-  for _ in $(seq 1 10); do
+  local none_seen=0
+  for _ in $(seq 1 25); do
     if ! timeout 5s adb exec-out uiautomator dump /dev/tty > "$probe" 2>/dev/null; then
+      none_seen=0
       sleep 1
       continue
     fi
@@ -1041,27 +1188,35 @@ PY
       continue
     fi
     if [[ "$action" == TAP* ]]; then
+      none_seen=0
       adb shell input tap ${action#TAP }
       sleep 2
       continue
     fi
     if [[ "$action" == "NONE" ]]; then
-      return 0
-    fi
-    if [[ "$action" == "WAIT" ]]; then
+      none_seen=$((none_seen + 1))
+      if [[ "$none_seen" -ge 3 ]]; then
+        return 0
+      fi
       sleep 1
       continue
     fi
+    if [[ "$action" == "WAIT" ]]; then
+      none_seen=0
+      sleep 1
+      continue
+    fi
+    none_seen=0
     sleep 1
   done
   echo "Android VPN consent dialog did not dismiss" >&2
   return 1
 }
 
-assert_vpn_network_active() {
-  local output="$1"
-  local uid_output="${output%.txt}-smokeprobe-uid.txt"
-  local package_output="${output%.txt}-smokeprobe-package.txt"
+resolve_smoke_probe_uid() {
+  local output_prefix="$1"
+  local uid_output="${output_prefix}-smokeprobe-uid.txt"
+  local package_output="${output_prefix}-smokeprobe-package.txt"
   local probe_uid
   adb shell dumpsys package "$smoke_probe_package" > "$package_output" 2>&1 || true
   probe_uid="$(
@@ -1079,20 +1234,29 @@ assert_vpn_network_active() {
     return 1
   fi
   printf '%s\n' "$probe_uid" > "$uid_output"
+  printf '%s\n' "$probe_uid"
+}
+
+assert_vpn_network_active() {
+  local output="$1"
+  local probe_uid
+  probe_uid="$(resolve_smoke_probe_uid "${output%.txt}")"
   timeout 10s adb shell dumpsys connectivity > "$output" 2>&1
-  if ! grep -Fq "VPN CONNECTED extra: VPN:${package_name}" "$output" ||
-    ! grep -Fq "InterfaceName: tun0" "$output"; then
-    echo "Android VPN network was not visible in dumpsys connectivity" >&2
-    return 1
-  fi
-  python3 - "$output" "$probe_uid" <<'PY'
+  python3 - "$output" "$probe_uid" "$package_name" <<'PY'
 import re
 import sys
 from pathlib import Path
 
 text = Path(sys.argv[1]).read_text(errors="replace")
 probe_uid = int(sys.argv[2])
-match = re.search(r"VPN CONNECTED extra: VPN:app\.trajectory\.android.*?Uids: <\{([^}]*)\}>", text, re.S)
+package_name = sys.argv[3]
+start = text.find(f"VPN CONNECTED extra: VPN:{package_name}")
+if start < 0:
+    raise SystemExit("Android VPN network was not visible in dumpsys connectivity")
+block = text[start:start + 5000]
+if not re.search(r"InterfaceName:\s*tun\d+", block):
+    raise SystemExit("Android VPN network did not expose a tun interface")
+match = re.search(r"Uids:\s*<\{([^}]*)\}>", block, re.S)
 if not match:
     raise SystemExit("could not find VPN UID ranges")
 for entry in match.group(1).split(","):
@@ -1106,6 +1270,40 @@ for entry in match.group(1).split(","):
     if start <= probe_uid <= end:
         raise SystemExit(0)
 raise SystemExit(f"smoke probe UID {probe_uid} is not routed through the VPN")
+PY
+}
+
+assert_vpn_network_stopped() {
+  local output="$1"
+  local probe_uid
+  probe_uid="$(resolve_smoke_probe_uid "${output%.txt}")"
+  timeout 10s adb shell dumpsys connectivity > "$output" 2>&1
+  python3 - "$output" "$probe_uid" "$package_name" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(errors="replace")
+probe_uid = int(sys.argv[2])
+package_name = sys.argv[3]
+if f"VPN:{package_name}" in text:
+    raise SystemExit("Trajectory VPN network still present after shutdown")
+for block in text.split("VPN CONNECTED extra: VPN:")[1:]:
+    block = block[:5000]
+    match = re.search(r"Uids:\s*<\{([^}]*)\}>", block, re.S)
+    if not match:
+        continue
+    for entry in match.group(1).split(","):
+        entry = entry.strip()
+        if "-" in entry:
+            start, end = [int(part) for part in entry.split("-", 1)]
+        elif entry:
+            start = end = int(entry)
+        else:
+            continue
+        if start <= probe_uid <= end:
+            raise SystemExit(f"smoke probe UID {probe_uid} is still routed through a VPN after shutdown")
+raise SystemExit(0)
 PY
 }
 
@@ -1170,6 +1368,10 @@ run_vpn_smoke() {
     adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 500 >/dev/null 2>&1 || true
     dump_screen "vpn_live_${pass}"
     assert_no_android_crash "$artifact_dir/vpn-live-logcat-${pass}.txt"
+    if grep -Fq 'package="com.android.vpndialogs"' "$artifact_dir/vpn_live_${pass}.xml"; then
+      accept_vpn_consent
+      continue
+    fi
     if grep -Fq "VPN connected" "$artifact_dir/vpn_live_${pass}.xml" ||
       grep -Fq "status.phase.vpn_connected" "$artifact_dir/vpn_live_${pass}.xml"; then
       install_smoke_probe_apk
@@ -1180,7 +1382,7 @@ run_vpn_smoke() {
       dump_screen "vpn_live_proven_${pass}"
       assert_vpn_status_connected "$artifact_dir/vpn_live_proven_${pass}.xml"
       echo "VPN connected after ${pass}s" > "$artifact_dir/vpn-smoke.txt"
-      assert_clean_proxy_shutdown "$artifact_dir/vpn_live_proven_${pass}.xml"
+      assert_clean_proxy_shutdown "$artifact_dir/vpn_live_proven_${pass}.xml" "VPN" "$artifact_dir/vpn-clean-shutdown.txt"
       return 0
     fi
     if grep -Fq "Failed" "$artifact_dir/vpn_live_${pass}.xml"; then

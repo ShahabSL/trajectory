@@ -381,8 +381,12 @@ fn disable_system_proxy(state: State<'_, AppState>) -> Result<RuntimeSnapshot, S
 }
 
 #[tauri::command]
-fn mark_frontend_ready(visible_text: Option<String>) -> Result<(), String> {
+fn mark_frontend_ready(
+    visible_text: Option<String>,
+    visual_report: Option<String>,
+) -> Result<(), String> {
     let visible_text = visible_text.unwrap_or_default();
+    let visual_report = visual_report.unwrap_or_default();
     if std::env::var_os("TRAJECTORY_DESKTOP_SMOKE_READY_FILE").is_some() {
         for required in [
             "Trajectory",
@@ -400,15 +404,95 @@ fn mark_frontend_ready(visible_text: Option<String>) -> Result<(), String> {
                 ));
             }
         }
+        assert_frontend_visual_report(&visual_report)?;
     }
     write_smoke_marker_env(
         "TRAJECTORY_DESKTOP_SMOKE_READY_FILE",
         format!(
-            "frontend ready at {}\nvisible_text_len={}\n",
+            "frontend ready at {}\nvisible_text_len={}\n{}\n",
             now_string(),
             visible_text.len(),
+            visual_report,
         ),
     )
+}
+
+#[tauri::command]
+fn smoke_ui_flow_enabled() -> bool {
+    std::env::var_os("TRAJECTORY_DESKTOP_SMOKE_UI_FLOW_FILE").is_some()
+}
+
+#[tauri::command]
+fn mark_smoke_ui_flow_ready(
+    connected_text: Option<String>,
+    connected_visual_report: Option<String>,
+    disconnected_text: Option<String>,
+    disconnected_visual_report: Option<String>,
+) -> Result<(), String> {
+    if std::env::var_os("TRAJECTORY_DESKTOP_SMOKE_UI_FLOW_FILE").is_none() {
+        return Ok(());
+    }
+    let connected_text = connected_text.unwrap_or_default();
+    let disconnected_text = disconnected_text.unwrap_or_default();
+    for required in ["Connected", "Disconnect", "SOCKS", "HTTP"] {
+        if !connected_text.contains(required) {
+            return Err(format!(
+                "desktop packaged UI flow smoke did not render connected text: {required}"
+            ));
+        }
+    }
+    for required in ["Disconnected", "Connect", "Connection Readiness"] {
+        if !disconnected_text.contains(required) {
+            return Err(format!(
+                "desktop packaged UI flow smoke did not render disconnected text: {required}"
+            ));
+        }
+    }
+    let connected_visual_report = connected_visual_report.unwrap_or_default();
+    let disconnected_visual_report = disconnected_visual_report.unwrap_or_default();
+    assert_frontend_visual_report(&connected_visual_report)?;
+    assert_frontend_visual_report(&disconnected_visual_report)?;
+    write_smoke_marker_env(
+        "TRAJECTORY_DESKTOP_SMOKE_UI_FLOW_FILE",
+        format!(
+            "ui flow ready at {}\nconnected_text_len={}\ndisconnected_text_len={}\n[connected]\n{}\n[disconnected]\n{}\n",
+            now_string(),
+            connected_text.len(),
+            disconnected_text.len(),
+            connected_visual_report,
+            disconnected_visual_report,
+        ),
+    )
+}
+
+fn assert_frontend_visual_report(report: &str) -> Result<(), String> {
+    let metric = |name: &str| -> Result<u64, String> {
+        report
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once('=')?;
+                (key == name).then(|| value.parse::<u64>().ok()).flatten()
+            })
+            .ok_or_else(|| format!("desktop packaged frontend smoke missing visual metric: {name}"))
+    };
+    for (name, minimum) in [
+        ("bodyWidth", 700),
+        ("bodyHeight", 500),
+        ("visibleNodes", 40),
+        ("visibleButtons", 7),
+        ("visibleInputs", 1),
+        ("visiblePanels", 3),
+        ("visibleSvgIcons", 8),
+        ("visibleTextArea", 20_000),
+    ] {
+        let value = metric(name)?;
+        if value < minimum {
+            return Err(format!(
+                "desktop packaged frontend smoke visual metric {name}={value} below required {minimum}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -516,7 +600,9 @@ pub fn run() {
             enable_system_proxy,
             disable_system_proxy,
             mark_frontend_ready,
-            mark_smoke_state_ready
+            mark_smoke_state_ready,
+            smoke_ui_flow_enabled,
+            mark_smoke_ui_flow_ready
         ])
         .run(tauri::generate_context!())
         .expect("error while running trajectory desktop");

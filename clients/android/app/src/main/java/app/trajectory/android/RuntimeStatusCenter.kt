@@ -226,8 +226,13 @@ object RuntimeStatusCenter {
             (lower.contains("http proxy stream") &&
                 lower.contains("client closed before sending headers")) ||
                 (lower.contains("socks proxy stream") &&
-                    lower.contains("read socks greeting") &&
-                    lower.contains("early eof"))
+                    (
+                        (lower.contains("read socks greeting") &&
+                            lower.contains("early eof")) ||
+                            lower.contains("socks proxy mode supports connect only") ||
+                            lower.contains("socks client used unsupported version") ||
+                            lower.contains("socks client did not offer no-auth method")
+                    ))
         if (!isRecoveredTransportFallback &&
             !isBenignLocalProbe &&
             (lower.contains("failed") || lower.contains("timed out") || lower.contains("error"))

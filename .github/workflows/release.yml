@@ -171,6 +171,7 @@ jobs:
             curl \
             wget \
             file \
+            imagemagick \
             xvfb \
             rpm \
             cpio \

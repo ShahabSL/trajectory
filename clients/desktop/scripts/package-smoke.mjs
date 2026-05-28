@@ -5,6 +5,7 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { constants, existsSync, writeFileSync } from "node:fs";
 import { accessSync, chmodSync } from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 
 const artifactDir =
   process.argv[2] ?? path.join(process.env.RUNNER_TEMP ?? "/tmp", "trajectory-desktop-package");
@@ -88,9 +89,7 @@ async function smokeLinux(files) {
     const rpmSidecar = requireOne(rpmFiles, /usr[/\\]bin[/\\]trajectory-client$/, "trajectory-client inside .rpm");
     const rpmLauncher = requireOne(rpmFiles, /usr[/\\]bin[/\\]trajectory-desktop$/, "trajectory-desktop inside .rpm");
     runChecked(rpmSidecar, ["--help"], "Linux rpm payload sidecar --help");
-    const rpmLaunchCommand = commandExists("xvfb-run") ? "xvfb-run" : rpmLauncher;
-    const rpmLaunchArgs = commandExists("xvfb-run") ? ["-a", rpmLauncher] : [];
-    await assertLaunches(rpmLaunchCommand, rpmLaunchArgs, "Linux rpm extracted app launch smoke");
+    await assertLaunches(rpmLauncher, [], "Linux rpm extracted app launch smoke");
   } else if (process.env.CI) {
     throw new Error("rpm2cpio and cpio are required for CI Linux RPM package smoke");
   } else {
@@ -98,16 +97,12 @@ async function smokeLinux(files) {
   }
   manifest.push(`deb=${relative(deb)}`, `rpm=${relative(rpm)}`, `appimage=${relative(appImage)}`);
 
-  const launcher = commandExists("xvfb-run") ? "xvfb-run" : appRun;
-  const args = commandExists("xvfb-run") ? ["-a", appRun] : [];
-  await assertLaunches(launcher, args, "Linux AppDir launch smoke");
+  await assertLaunches(appRun, [], "Linux AppDir launch smoke");
   if (process.env.CI && commandExists("sudo")) {
     const debPackageName = packageField(deb, "Package") || "trajectory-desktop";
     runChecked("sudo", ["dpkg", "-i", deb], "install Linux .deb");
     try {
-      const installedLauncher = commandExists("xvfb-run") ? "xvfb-run" : "/usr/bin/trajectory-desktop";
-      const installedArgs = commandExists("xvfb-run") ? ["-a", "/usr/bin/trajectory-desktop"] : [];
-      await assertLaunches(installedLauncher, installedArgs, "Linux deb installed app launch smoke");
+      await assertLaunches("/usr/bin/trajectory-desktop", [], "Linux deb installed app launch smoke");
     } finally {
       runChecked("sudo", ["dpkg", "-r", debPackageName], "uninstall Linux .deb");
     }
@@ -115,9 +110,7 @@ async function smokeLinux(files) {
     manifest.push("Linux deb install launch=skipped outside CI or without sudo");
   }
   manifest.push("Linux rpm launch=covered by extracted payload sidecar checks on this runner");
-  const appImageLauncher = commandExists("xvfb-run") ? "xvfb-run" : appImage;
-  const appImageArgs = commandExists("xvfb-run") ? ["-a", appImage] : [];
-  await assertLaunches(appImageLauncher, appImageArgs, "Linux AppImage launch smoke", {
+  await assertLaunches(appImage, [], "Linux AppImage launch smoke", {
     APPIMAGE_EXTRACT_AND_RUN: "1",
   });
 }
@@ -329,19 +322,23 @@ async function assertLaunches(command, args, label, extraEnv = {}) {
   const pageFile = path.join(artifactDir, `${safeName(label)}-page-ready.txt`);
   const frontendFile = path.join(artifactDir, `${safeName(label)}-frontend-ready.txt`);
   const stateFile = path.join(artifactDir, `${safeName(label)}-state-ready.txt`);
+  const uiFlowFile = path.join(artifactDir, `${safeName(label)}-ui-flow-ready.txt`);
   const liveEnv = await prepareDesktopLiveSmoke(label);
   const liveFile = liveEnv.TRAJECTORY_DESKTOP_SMOKE_LIVE_FILE;
-  const readyFiles = [backendFile, pageFile, frontendFile, stateFile];
+  const readyFiles = [backendFile, pageFile, frontendFile, stateFile, uiFlowFile];
   if (liveFile) readyFiles.push(liveFile);
+  const xvfb = await startPackageXvfb(label);
   const child = spawn(command, args, {
     cwd: artifactDir,
     env: {
       ...process.env,
+      ...xvfb.env,
       TRAJECTORY_DESKTOP_SMOKE: "1",
       TRAJECTORY_DESKTOP_SMOKE_BACKEND_FILE: backendFile,
       TRAJECTORY_DESKTOP_SMOKE_PAGE_FILE: pageFile,
       TRAJECTORY_DESKTOP_SMOKE_READY_FILE: frontendFile,
       TRAJECTORY_DESKTOP_SMOKE_STATE_FILE: stateFile,
+      TRAJECTORY_DESKTOP_SMOKE_UI_FLOW_FILE: uiFlowFile,
       NO_AT_BRIDGE: "1",
       WEBKIT_DISABLE_COMPOSITING_MODE: "1",
       ...liveEnv,
@@ -364,19 +361,32 @@ async function assertLaunches(command, args, label, extraEnv = {}) {
     launchError = error.message;
   });
 
-  const ready = await waitForReadyFiles(
-    child,
-    readyFiles,
-    liveFile ? 90_000 : 45_000,
-    () => launchError,
-  );
-  if (!ready.ok) {
+  try {
+    const ready = await waitForReadyFiles(
+      child,
+      readyFiles,
+      liveFile ? 90_000 : 45_000,
+      () => launchError,
+    );
+    if (!ready.ok) {
+      await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
+      throw new Error(`${label} did not prove packaged app/frontend/backend readiness: ${ready.reason}`);
+    }
+    const screen = await capturePackageScreenshot(label, xvfb.env);
+    if (screen) {
+      await assertPngVisual(screen, `${label} packaged screen`);
+      manifest.push(`${label}=packaged screen pixels ready`);
+    }
+  } catch (error) {
+    stopProcess(child);
+    stopPackageXvfb(xvfb);
     await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
-    throw new Error(`${label} did not prove packaged app/frontend/backend readiness: ${ready.reason}`);
+    throw error;
   }
   stopProcess(child);
+  stopPackageXvfb(xvfb);
   await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
-  manifest.push(`${label}=backend, page, frontend IPC, and state ready`);
+  manifest.push(`${label}=backend, page, frontend IPC, state, and UI connect/disconnect ready`);
   if (liveFile) {
     manifest.push(`${label}=live HTTP/SOCKS proxy smoke and shutdown ready`);
   }
@@ -653,6 +663,250 @@ async function pickTcpPort() {
       server.close(() => resolve(address.port));
     });
   });
+}
+
+async function capturePackageScreenshot(label, captureEnv = {}) {
+  const output = path.join(artifactDir, `${safeName(label)}-screen.png`);
+  let command = null;
+  let args = [];
+  if (process.platform === "linux" && commandExists("import")) {
+    command = "import";
+    args = ["-window", "root", output];
+  } else if (process.platform === "darwin") {
+    command = "screencapture";
+    args = ["-x", output];
+  } else if (process.platform === "win32") {
+    const escapedOutput = output.replaceAll("'", "''");
+    command = "powershell.exe";
+    args = [
+      "-NoProfile",
+      "-Command",
+      [
+        `Add-Type -AssemblyName System.Windows.Forms`,
+        `Add-Type -AssemblyName System.Drawing`,
+        `$path='${escapedOutput}'`,
+        `$bounds=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds`,
+        `$bitmap=New-Object System.Drawing.Bitmap $bounds.Width,$bounds.Height`,
+        `$graphics=[System.Drawing.Graphics]::FromImage($bitmap)`,
+        `$graphics.CopyFromScreen($bounds.Location,[System.Drawing.Point]::Empty,$bounds.Size)`,
+        `$bitmap.Save($path,[System.Drawing.Imaging.ImageFormat]::Png)`,
+        `$graphics.Dispose()`,
+        `$bitmap.Dispose()`,
+      ].join("; "),
+    ];
+  }
+
+  if (!command) {
+    if (process.env.CI) {
+      throw new Error(`no packaged app screenshot capture command available on ${process.platform}`);
+    }
+    manifest.push(`${label}=packaged screen pixels skipped locally`);
+    return null;
+  }
+  const result = spawnSync(command, args, {
+    cwd: artifactDir,
+    env: {
+      ...process.env,
+      ...captureEnv,
+    },
+    encoding: "utf8",
+    timeout: 30_000,
+    windowsHide: true,
+  });
+  writeCommandLog(`${label} screen capture`, result);
+  if (result.status !== 0 || !existsSync(output)) {
+    if (process.env.CI) {
+      throw new Error(`${label} packaged app screenshot capture failed with status ${result.status}`);
+    }
+    manifest.push(`${label}=packaged screen pixels skipped after capture failure`);
+    return null;
+  }
+  return output;
+}
+
+async function startPackageXvfb(label) {
+  if (process.platform !== "linux") {
+    return { env: {}, process: null };
+  }
+  if (!commandExists("Xvfb")) {
+    if (process.env.CI) {
+      throw new Error("Xvfb is required for CI Linux desktop package smoke");
+    }
+    return { env: {}, process: null };
+  }
+
+  const base = 90 + (process.pid % 100);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const display = `:${base + attempt}`;
+    const child = spawn(
+      "Xvfb",
+      [display, "-screen", "0", "1440x1100x24", "-nolisten", "tcp"],
+      {
+        cwd: artifactDir,
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
+      },
+    );
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    await sleep(500);
+    if (child.exitCode === null && child.signalCode === null) {
+      await writeFile(
+        path.join(artifactDir, `${safeName(label)}-xvfb.txt`),
+        `display=${display}\n`,
+      );
+      return { env: { DISPLAY: display }, process: child };
+    }
+    stopPackageXvfb({ process: child });
+    await writeFile(
+      path.join(artifactDir, `${safeName(label)}-xvfb-attempt-${attempt + 1}.txt`),
+      stderr,
+    );
+  }
+  throw new Error("could not start Xvfb for Linux desktop package smoke");
+}
+
+function stopPackageXvfb(xvfb) {
+  const child = xvfb?.process;
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    child.kill("SIGTERM");
+  }
+}
+
+async function assertPngVisual(file, label) {
+  const image = decodePng(await readFile(file));
+  const pixels = image.width * image.height;
+  const step = Math.max(1, Math.floor(pixels / 80_000));
+  let sampled = 0;
+  let nonBackground = 0;
+  let ink = 0;
+  let edges = 0;
+  let minLuma = 255;
+  let maxLuma = 0;
+  let previousLuma = null;
+  const buckets = new Set();
+  for (let index = 0; index < pixels; index += step) {
+    const y = Math.floor(index / image.width);
+    if (y < image.height * 0.02 || y > image.height * 0.98) continue;
+    const offset = index * image.channels;
+    const red = image.pixels[offset];
+    const green = image.pixels[offset + 1];
+    const blue = image.pixels[offset + 2];
+    const luma = Math.trunc((red * 299 + green * 587 + blue * 114) / 1000);
+    const chroma = Math.max(red, green, blue) - Math.min(red, green, blue);
+    sampled += 1;
+    minLuma = Math.min(minLuma, luma);
+    maxLuma = Math.max(maxLuma, luma);
+    if (luma < 242 || chroma > 8) nonBackground += 1;
+    if (luma < 120) ink += 1;
+    if (previousLuma !== null && Math.abs(luma - previousLuma) > 20) edges += 1;
+    previousLuma = luma;
+    buckets.add(`${red >> 5}:${green >> 5}:${blue >> 5}`);
+  }
+  const contrast = maxLuma - minLuma;
+  const nonBackgroundRatio = nonBackground / Math.max(1, sampled);
+  const inkRatio = ink / Math.max(1, sampled);
+  const edgeRatio = edges / Math.max(1, sampled - 1);
+  const report = [
+    `label=${label}`,
+    `width=${image.width}`,
+    `height=${image.height}`,
+    `sampled=${sampled}`,
+    `non_background_ratio=${nonBackgroundRatio.toFixed(5)}`,
+    `ink_ratio=${inkRatio.toFixed(5)}`,
+    `edge_ratio=${edgeRatio.toFixed(5)}`,
+    `contrast=${contrast}`,
+    `color_buckets=${buckets.size}`,
+  ].join("\n");
+  await writeFile(file.replace(/\.png$/, ".visual.txt"), `${report}\n`);
+  const failures = [];
+  if (sampled < 1000) failures.push(`not enough sampled pixels (${sampled})`);
+  if (contrast < 35) failures.push(`contrast too low (${contrast})`);
+  if (nonBackgroundRatio < 0.02) failures.push(`non-background pixel ratio too low (${nonBackgroundRatio.toFixed(5)})`);
+  if (inkRatio < 0.002) failures.push(`ink pixel ratio too low (${inkRatio.toFixed(5)})`);
+  if (edgeRatio < 0.0008) failures.push(`edge ratio too low (${edgeRatio.toFixed(5)})`);
+  if (buckets.size < 6) failures.push(`too few color buckets (${buckets.size})`);
+  if (failures.length > 0) {
+    throw new Error(`${label} screenshot failed visual smoke: ${failures.join("; ")}`);
+  }
+}
+
+function decodePng(data) {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (!data.subarray(0, 8).equals(signature)) {
+    throw new Error("screenshot is not a PNG");
+  }
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  let interlace = 0;
+  const idat = [];
+  while (offset + 12 <= data.length) {
+    const length = data.readUInt32BE(offset);
+    const kind = data.subarray(offset + 4, offset + 8).toString("ascii");
+    const payload = data.subarray(offset + 8, offset + 8 + length);
+    offset += 12 + length;
+    if (kind === "IHDR") {
+      width = payload.readUInt32BE(0);
+      height = payload.readUInt32BE(4);
+      bitDepth = payload[8];
+      colorType = payload[9];
+      interlace = payload[12];
+    } else if (kind === "IDAT") {
+      idat.push(payload);
+    } else if (kind === "IEND") {
+      break;
+    }
+  }
+  if (!width || !height || bitDepth !== 8 || ![2, 6].includes(colorType) || interlace !== 0) {
+    throw new Error(`unsupported PNG screenshot format: ${width}x${height} depth=${bitDepth} color=${colorType} interlace=${interlace}`);
+  }
+  const channels = colorType === 6 ? 4 : 3;
+  const rowBytes = width * channels;
+  const inflated = zlib.inflateSync(Buffer.concat(idat));
+  const pixels = Buffer.alloc(width * height * channels);
+  const previous = Buffer.alloc(rowBytes);
+  let source = 0;
+  let target = 0;
+  for (let y = 0; y < height; y += 1) {
+    const filter = inflated[source];
+    source += 1;
+    for (let x = 0; x < rowBytes; x += 1) {
+      const value = inflated[source + x];
+      const left = x >= channels ? pixels[target + x - channels] : 0;
+      const up = previous[x];
+      const upLeft = x >= channels ? previous[x - channels] : 0;
+      let decoded = value;
+      if (filter === 1) decoded += left;
+      else if (filter === 2) decoded += up;
+      else if (filter === 3) decoded += Math.floor((left + up) / 2);
+      else if (filter === 4) decoded += paeth(left, up, upLeft);
+      else if (filter !== 0) throw new Error(`unsupported PNG filter ${filter}`);
+      pixels[target + x] = decoded & 0xff;
+    }
+    pixels.copy(previous, 0, target, target + rowBytes);
+    source += rowBytes;
+    target += rowBytes;
+  }
+  return { width, height, channels, pixels };
+}
+
+function paeth(left, up, upLeft) {
+  const estimate = left + up - upLeft;
+  const leftDistance = Math.abs(estimate - left);
+  const upDistance = Math.abs(estimate - up);
+  const upLeftDistance = Math.abs(estimate - upLeft);
+  if (leftDistance <= upDistance && leftDistance <= upLeftDistance) return left;
+  return upDistance <= upLeftDistance ? up : upLeft;
 }
 
 async function sleep(ms) {

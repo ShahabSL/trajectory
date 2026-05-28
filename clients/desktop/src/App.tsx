@@ -22,7 +22,7 @@ import {
   Trash2,
   Wifi,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import logoUrl from "./assets/trajectory-logo.png";
 import { desktopApi } from "./lib/api";
 import { createDefaultProfile, scrubProfile } from "./lib/profile-store";
@@ -136,6 +136,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>("status");
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot>(emptySnapshot);
   const [uiError, setUiError] = useState<string | undefined>();
+  const smokeFlowStarted = useRef(false);
 
   const selectedProfile = useMemo(
     () => profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0],
@@ -158,8 +159,17 @@ export default function App() {
               return;
             }
             try {
-              await desktopApi.markFrontendReady(document.body.innerText);
+              await waitForStablePaint();
+              await desktopApi.markFrontendReady(document.body.innerText, collectSmokeVisualReport());
               await desktopApi.markSmokeStateReady();
+              if (!smokeFlowStarted.current && (await desktopApi.smokeUiFlowEnabled())) {
+                smokeFlowStarted.current = true;
+                await runPackagedSmokeUiFlow(profileState, (next) => {
+                  if (alive) {
+                    setSnapshot(next);
+                  }
+                });
+              }
             } catch (error) {
               if (alive) {
                 setUiError(String(error));
@@ -1107,6 +1117,100 @@ function validateProfile(profile: TrajectoryProfile) {
     }
   }
   return warnings;
+}
+
+function collectSmokeVisualReport() {
+  const visible = (element: Element) => {
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    return (
+      rect.width > 1 &&
+      rect.height > 1 &&
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      Number(style.opacity || "1") > 0.01
+    );
+  };
+  const count = (selector: string) =>
+    Array.from(document.querySelectorAll(selector)).filter(visible).length;
+  const bodyRect = document.body.getBoundingClientRect();
+  const textElements = Array.from(document.querySelectorAll("h1,h2,h3,p,span,strong,small,button,label,dt,dd,code"));
+  const visibleTextArea = textElements
+    .filter((element) => visible(element) && (element.textContent ?? "").trim().length > 0)
+    .reduce((area, element) => {
+      const rect = element.getBoundingClientRect();
+      return area + rect.width * rect.height;
+    }, 0);
+  const report: Record<string, number> = {
+    bodyWidth: Math.round(bodyRect.width),
+    bodyHeight: Math.round(bodyRect.height),
+    visibleNodes: count("main, aside, section, div, button, input, select, textarea, svg"),
+    visibleButtons: count("button"),
+    visibleInputs: count("input, select, textarea"),
+    visiblePanels: count(".panel"),
+    visibleSvgIcons: count("svg"),
+    visibleTextArea: Math.round(visibleTextArea),
+  };
+  return Object.entries(report)
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+}
+
+async function runPackagedSmokeUiFlow(
+  profileState: ProfileStoreSnapshot,
+  publishSnapshot: (snapshot: RuntimeSnapshot) => void,
+) {
+  const profileId = profileState.selectedProfileId ?? profileState.profiles[0]?.id;
+  if (!profileId) {
+    throw new Error("desktop packaged UI smoke has no profile to connect");
+  }
+
+  publishSnapshot(await desktopApi.connect(profileId));
+  await waitForRuntimePhase("connected", 60_000, publishSnapshot);
+  await waitForStablePaint();
+  const connectedText = document.body.innerText;
+  const connectedVisualReport = collectSmokeVisualReport();
+
+  publishSnapshot(await desktopApi.disconnect());
+  await waitForRuntimePhase("disconnected", 15_000, publishSnapshot);
+  await waitForStablePaint();
+  await desktopApi.markSmokeUiFlowReady(
+    connectedText,
+    connectedVisualReport,
+    document.body.innerText,
+    collectSmokeVisualReport(),
+  );
+}
+
+async function waitForRuntimePhase(
+  phase: ConnectionPhase,
+  timeoutMs: number,
+  publishSnapshot: (snapshot: RuntimeSnapshot) => void,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const next = await desktopApi.loadSnapshot();
+    publishSnapshot(next);
+    if (next.phase === phase) {
+      return next;
+    }
+    if (next.phase === "failed") {
+      throw new Error(next.lastError ?? `desktop runtime entered failed state while waiting for ${phase}`);
+    }
+    await sleep(250);
+  }
+  throw new Error(`timed out waiting for desktop runtime phase ${phase}`);
+}
+
+async function waitForStablePaint() {
+  for (let pass = 0; pass < 2; pass += 1) {
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+  }
+  await sleep(50);
+}
+
+async function sleep(ms: number) {
+  await new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function copyText(value: string) {

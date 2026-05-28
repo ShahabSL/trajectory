@@ -37,9 +37,11 @@ const mockSnapshot: RuntimeSnapshot = {
   },
 };
 
+let previewSnapshot = mockSnapshot;
+
 const mockApi: DesktopApi = {
   async loadSnapshot() {
-    return mockSnapshot;
+    return previewSnapshot;
   },
   async loadProfiles() {
     const profiles = loadProfiles();
@@ -75,7 +77,7 @@ const mockApi: DesktopApi = {
   async connect(profileId: string) {
     const profiles = loadProfiles();
     const profile = profiles.find((item) => item.id === profileId) ?? profiles[0];
-    return {
+    previewSnapshot = {
       ...mockSnapshot,
       phase: "starting",
       statusDetail: "Browser preview simulated a start request; no real listeners are running.",
@@ -93,9 +95,11 @@ const mockApi: DesktopApi = {
         `profile ${profile.name} would start against ${profile.domain || "<missing domain>"}`,
       ],
     };
+    return previewSnapshot;
   },
   async disconnect() {
-    return mockSnapshot;
+    previewSnapshot = mockSnapshot;
+    return previewSnapshot;
   },
   async enableSystemProxy() {
     return {
@@ -111,6 +115,10 @@ const mockApi: DesktopApi = {
   },
   async markFrontendReady() {},
   async markSmokeStateReady() {},
+  async smokeUiFlowEnabled() {
+    return false;
+  },
+  async markSmokeUiFlowReady() {},
 };
 
 export const desktopApi: DesktopApi = hasTauriRuntime()
@@ -129,8 +137,21 @@ export const desktopApi: DesktopApi = hasTauriRuntime()
       enableSystemProxy: (profileId) =>
         invokeCommand<RuntimeSnapshot>("enable_system_proxy", { profileId }),
       disableSystemProxy: () => invokeCommand<RuntimeSnapshot>("disable_system_proxy"),
-      markFrontendReady: (visibleText) =>
-        invokeCommand<void>("mark_frontend_ready", { visibleText }),
+      markFrontendReady: (visibleText, visualReport) =>
+        invokeCommand<void>("mark_frontend_ready", { visibleText, visualReport }),
       markSmokeStateReady: () => invokeCommand<void>("mark_smoke_state_ready"),
+      smokeUiFlowEnabled: () => invokeCommand<boolean>("smoke_ui_flow_enabled"),
+      markSmokeUiFlowReady: (
+        connectedText,
+        connectedVisualReport,
+        disconnectedText,
+        disconnectedVisualReport,
+      ) =>
+        invokeCommand<void>("mark_smoke_ui_flow_ready", {
+          connectedText,
+          connectedVisualReport,
+          disconnectedText,
+          disconnectedVisualReport,
+        }),
     }
   : mockApi;

@@ -75,6 +75,13 @@ export interface DesktopApi {
   disconnect(): Promise<RuntimeSnapshot>;
   enableSystemProxy(profileId: string): Promise<RuntimeSnapshot>;
   disableSystemProxy(): Promise<RuntimeSnapshot>;
-  markFrontendReady(visibleText?: string): Promise<void>;
+  markFrontendReady(visibleText?: string, visualReport?: string): Promise<void>;
   markSmokeStateReady(): Promise<void>;
+  smokeUiFlowEnabled(): Promise<boolean>;
+  markSmokeUiFlowReady(
+    connectedText?: string,
+    connectedVisualReport?: string,
+    disconnectedText?: string,
+    disconnectedVisualReport?: string,
+  ): Promise<void>;
 }
