@@ -142,6 +142,33 @@ object RuntimeStatusCenter {
         )
     }
 
+    fun markProxyDataPathReady(profile: ClientProfile, probeUrl: String) {
+        update(
+            mode = RuntimeMode.PROXY,
+            phase = RuntimePhase.PROXY_CONNECTED,
+            title = "Proxy connected",
+            detail = "HTTP proxy data path proved through ${probeUrl.take(96)}.",
+            socksReady = true,
+            httpReady = true,
+            admittedResolvers = snapshot().admittedResolvers.coerceAtLeast(1),
+            candidateResolvers = snapshot().candidateResolvers.coerceAtLeast(profile.resolvers.size),
+            lastError = null,
+        )
+    }
+
+    fun markProxyDataPathPending(profile: ClientProfile, probeUrl: String) {
+        update(
+            mode = RuntimeMode.PROXY,
+            phase = RuntimePhase.LISTENERS_READY,
+            title = "Data path check pending",
+            detail = "SOCKS and HTTP listeners are open; HTTP proof through ${probeUrl.take(80)} has not completed yet.",
+            socksReady = true,
+            httpReady = true,
+            candidateResolvers = snapshot().candidateResolvers.coerceAtLeast(profile.resolvers.size),
+            lastError = "HTTP proxy proof did not complete yet",
+        )
+    }
+
     fun observeRuntimeLine(mode: RuntimeMode, profile: ClientProfile, line: String) {
         appendLog(line)
         val lower = line.lowercase(Locale.US)
@@ -177,6 +204,7 @@ object RuntimeStatusCenter {
                     ?: current.candidateResolvers,
                 lastError = null,
             )
+            promoteIfReady(mode, profile)
             return
         }
 
@@ -190,6 +218,7 @@ object RuntimeStatusCenter {
                 candidateResolvers = current.candidateResolvers.coerceAtLeast(profile.resolvers.size),
                 lastError = null,
             )
+            promoteIfReady(mode, profile)
             return
         }
 
@@ -256,7 +285,7 @@ object RuntimeStatusCenter {
             mode = mode,
             phase = RuntimePhase.LISTENERS_READY,
             title = "Listeners ready",
-            detail = "Local listener checks passed on loopback.",
+            detail = "Local listeners are accepting on loopback; waiting for signed DNS path admission.",
             socksReady = socksReady,
             httpReady = httpReady,
             lastError = null,
@@ -279,22 +308,32 @@ object RuntimeStatusCenter {
         val socksReady = current.socksReady || isPortOpen(profile.socksPort)
         val httpReady = current.httpReady || isPortOpen(profile.httpPort)
         val proxyReady = socksReady && httpReady
+        val tunnelReady = current.admittedResolvers > 0
 
         when {
             mode == RuntimeMode.PROXY && proxyReady -> update(
                 mode = RuntimeMode.PROXY,
-                phase = RuntimePhase.PROXY_CONNECTED,
-                title = "Proxy connected",
-                detail = "SOCKS and HTTP listeners are accepting local connections.",
+                phase = RuntimePhase.LISTENERS_READY,
+                title = "Checking data path",
+                detail = "SOCKS and HTTP are open; proving outbound proxy traffic before marking connected.",
                 socksReady = true,
                 httpReady = true,
                 lastError = null,
             )
-            mode == RuntimeMode.VPN && socksReady -> update(
+            mode == RuntimeMode.VPN && socksReady && tunnelReady -> update(
                 mode = RuntimeMode.VPN,
                 phase = RuntimePhase.ESTABLISHING_TUN,
                 title = "Establishing VPN",
-                detail = "Sidecar is ready; creating the Android TUN interface.",
+                detail = "Signed DNS path admission passed; creating the Android TUN interface.",
+                socksReady = true,
+                httpReady = httpReady,
+                lastError = null,
+            )
+            mode == RuntimeMode.VPN && socksReady -> update(
+                mode = RuntimeMode.VPN,
+                phase = RuntimePhase.LISTENERS_READY,
+                title = "Waiting for DNS proof",
+                detail = "Local SOCKS is open; waiting for a signed resolver admission proof before creating VPN.",
                 socksReady = true,
                 httpReady = httpReady,
                 lastError = null,

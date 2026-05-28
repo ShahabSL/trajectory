@@ -589,12 +589,15 @@ pub fn run() {
             .map_err(|error| Box::<dyn std::error::Error>::from(std::io::Error::other(error)))?;
             Ok(())
         })
-        .on_page_load(|_, payload| {
+        .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Finished {
                 let _ = write_smoke_marker_env(
                     "TRAJECTORY_DESKTOP_SMOKE_PAGE_FILE",
                     format!("page loaded at {}\nurl={}\n", now_string(), payload.url()),
                 );
+                if std::env::var_os("TRAJECTORY_DESKTOP_SMOKE").is_some() {
+                    let _ = webview.eval(DESKTOP_SMOKE_WATCHDOG_JS);
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -616,6 +619,41 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running trajectory desktop");
 }
+
+const DESKTOP_SMOKE_WATCHDOG_JS: &str = r#"
+(function () {
+  window.__TRAJECTORY_DESKTOP_BACKEND_EVAL__ = new Date().toISOString();
+  var report = function (message) {
+    try {
+      var internals = window.__TAURI_INTERNALS__;
+      if (internals && typeof internals.invoke === 'function') {
+        internals.invoke('mark_smoke_frontend_error', { message: message });
+      }
+    } catch (_) {}
+  };
+  window.addEventListener('vite:preloadError', function (event) {
+    report('desktop smoke preload failed: ' + String(event && event.payload || event));
+  });
+  window.addEventListener('error', function (event) {
+    var target = event && event.target;
+    if (target && (target.tagName === 'SCRIPT' || target.tagName === 'LINK')) {
+      report('desktop smoke asset failed: ' + (target.src || target.href || target.outerHTML || target.tagName));
+    }
+  }, true);
+  setTimeout(function () {
+    if (!window.__TRAJECTORY_DESKTOP_FRONTEND_RENDERED__) {
+      report(
+        'desktop smoke frontend did not render after page load; bootstrap=' +
+          String(window.__TRAJECTORY_DESKTOP_FRONTEND_BOOTSTRAP__ || 'missing') +
+          '; readyState=' + String(document.readyState) +
+          '; scripts=' + Array.prototype.map.call(document.scripts, function (script) {
+            return script.src || 'inline';
+          }).join(',')
+      );
+    }
+  }, 8000);
+})();
+"#;
 
 fn write_smoke_marker_env(var: &str, contents: String) -> Result<(), String> {
     let Ok(path) = std::env::var(var) else {

@@ -16,7 +16,11 @@ const bundleRoot = path.join(tauriDir, "target", "release", "bundle");
 const packageJson = JSON.parse(
   await readText(path.join(desktopDir, "package.json")),
 );
+const tauriConfig = JSON.parse(
+  await readText(path.join(tauriDir, "tauri.conf.json")),
+);
 const version = packageJson.version;
+const macBundleIdentifier = tauriConfig.identifier ?? "com.shahablavasani.trajectory";
 const releaseTag = process.env.RELEASE_TAG;
 if (releaseTag && releaseTag !== `v${version}`) {
   throw new Error(`desktop package version ${version} does not match ${releaseTag}`);
@@ -125,7 +129,7 @@ async function smokeMac(files) {
   const dmg = findOptional(files, new RegExp(`Trajectory_?${escapeRegex(version)}.*\\.dmg$`), "macOS .dmg");
   let appArchive = findOptional(files, /\.app\.tar\.gz$/, "macOS app tarball");
   const appBundle = path.join(bundleRoot, "macos", "Trajectory.app");
-  const { sidecar, launcher } = await inspectMacApp(appBundle, "macOS bundled app");
+  const { sidecar } = await inspectMacApp(appBundle, "macOS bundled app");
   runChecked(sidecar, ["--help"], "macOS bundled sidecar --help");
   if (dmg) {
     runChecked("hdiutil", ["verify", dmg], "macOS dmg verification");
@@ -135,7 +139,7 @@ async function smokeMac(files) {
     manifest.push("dmg=not emitted by this Tauri build");
   }
   manifest.push(`app=${relative(appBundle)}`);
-  await assertLaunches(launcher, [], "macOS app bundle launch smoke");
+  await assertLaunchesMacApp(appBundle, "macOS app bundle launch smoke");
 
   if (!appArchive) {
     if (process.env.CI) {
@@ -148,13 +152,13 @@ async function smokeMac(files) {
   await mkdir(appArchiveExtract, { recursive: true });
   runChecked("tar", ["-xzf", appArchive, "-C", appArchiveExtract], "extract macOS app tarball");
   const extractedApp = path.join(appArchiveExtract, "Trajectory.app");
-  const { sidecar: extractedSidecar, launcher: extractedLauncher } = await inspectMacApp(
+  const { sidecar: extractedSidecar } = await inspectMacApp(
     extractedApp,
     "macOS app tarball",
   );
   manifest.push(`app_tar=${relative(appArchive)}`);
   runChecked(extractedSidecar, ["--help"], "macOS app tarball sidecar --help");
-  await assertLaunches(extractedLauncher, [], "macOS app tarball launch smoke");
+  await assertLaunchesMacApp(extractedApp, "macOS app tarball launch smoke");
 }
 
 async function inspectMacApp(appBundle, label) {
@@ -177,15 +181,15 @@ async function smokeMountedDmg(dmg) {
   );
   try {
     const mountedApp = path.join(mountPoint, "Trajectory.app");
-    const { sidecar, launcher } = await inspectMacApp(mountedApp, "mounted macOS dmg");
+    const { sidecar } = await inspectMacApp(mountedApp, "mounted macOS dmg");
     runChecked(sidecar, ["--help"], "macOS mounted dmg sidecar --help");
-    await assertLaunches(launcher, [], "macOS mounted dmg launch smoke");
+    await assertLaunchesMacApp(mountedApp, "macOS mounted dmg launch smoke");
     const copiedAppRoot = path.join(artifactDir, "dmg-installed-copy");
     await mkdir(copiedAppRoot, { recursive: true });
     const copiedApp = path.join(copiedAppRoot, "Trajectory.app");
     runChecked("ditto", [mountedApp, copiedApp], "copy macOS dmg app to installed location");
-    const { launcher: copiedLauncher } = await inspectMacApp(copiedApp, "copied macOS dmg app");
-    await assertLaunches(copiedLauncher, [], "macOS copied dmg app launch smoke");
+    await inspectMacApp(copiedApp, "copied macOS dmg app");
+    await assertLaunchesMacApp(copiedApp, "macOS copied dmg app launch smoke");
   } finally {
     runChecked("hdiutil", ["detach", mountPoint], "macOS dmg detach");
   }
@@ -323,7 +327,21 @@ function packageField(deb, field) {
   return result.status === 0 ? result.stdout.trim() : "";
 }
 
-async function assertLaunches(command, args, label, extraEnv = {}) {
+async function assertLaunchesMacApp(appBundle, label, extraEnv = {}) {
+  if (!commandExists("open")) {
+    throw new Error("macOS packaged app smoke requires the open command");
+  }
+  if (!macOpenSupportsEnv()) {
+    throw new Error("macOS packaged app smoke requires open --env so the .app receives smoke markers");
+  }
+  const { launcher } = await inspectMacApp(appBundle, label);
+  await assertLaunches("open", [appBundle], label, extraEnv, {
+    macAppBundle: appBundle,
+    macExecutable: path.basename(launcher),
+  });
+}
+
+async function assertLaunches(command, args, label, extraEnv = {}, options = {}) {
   const backendFile = path.join(artifactDir, `${safeName(label)}-backend-ready.txt`);
   const pageFile = path.join(artifactDir, `${safeName(label)}-page-ready.txt`);
   const frontendFile = path.join(artifactDir, `${safeName(label)}-frontend-ready.txt`);
@@ -335,26 +353,28 @@ async function assertLaunches(command, args, label, extraEnv = {}) {
   const readyFiles = [backendFile, pageFile, frontendFile, stateFile, uiFlowFile];
   if (liveFile) readyFiles.push(liveFile);
   const xvfb = await startPackageXvfb(label);
-  const child = spawn(command, args, {
+  const smokeEnv = {
+    ...process.env,
+    ...xvfb.env,
+    TRAJECTORY_DESKTOP_SMOKE: "1",
+    TRAJECTORY_DESKTOP_SMOKE_BACKEND_FILE: backendFile,
+    TRAJECTORY_DESKTOP_SMOKE_PAGE_FILE: pageFile,
+    TRAJECTORY_DESKTOP_SMOKE_READY_FILE: frontendFile,
+    TRAJECTORY_DESKTOP_SMOKE_STATE_FILE: stateFile,
+    TRAJECTORY_DESKTOP_SMOKE_UI_FLOW_FILE: uiFlowFile,
+    TRAJECTORY_DESKTOP_SMOKE_ERROR_FILE: errorFile,
+    NO_AT_BRIDGE: "1",
+    WEBKIT_DISABLE_COMPOSITING_MODE: "1",
+    ...liveEnv,
+    ...extraEnv,
+  };
+  const launch = macAppLaunch(command, args, label, smokeEnv, options);
+  const child = spawn(launch.command, launch.args, {
     cwd: artifactDir,
-    env: {
-      ...process.env,
-      ...xvfb.env,
-      TRAJECTORY_DESKTOP_SMOKE: "1",
-      TRAJECTORY_DESKTOP_SMOKE_BACKEND_FILE: backendFile,
-      TRAJECTORY_DESKTOP_SMOKE_PAGE_FILE: pageFile,
-      TRAJECTORY_DESKTOP_SMOKE_READY_FILE: frontendFile,
-      TRAJECTORY_DESKTOP_SMOKE_STATE_FILE: stateFile,
-      TRAJECTORY_DESKTOP_SMOKE_UI_FLOW_FILE: uiFlowFile,
-      TRAJECTORY_DESKTOP_SMOKE_ERROR_FILE: errorFile,
-      NO_AT_BRIDGE: "1",
-      WEBKIT_DISABLE_COMPOSITING_MODE: "1",
-      ...liveEnv,
-      ...extraEnv,
-    },
+    env: launch.env,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
-    detached: process.platform !== "win32",
+    detached: launch.detached,
   });
   let stdout = "";
   let stderr = "";
@@ -378,6 +398,9 @@ async function assertLaunches(command, args, label, extraEnv = {}) {
       () => launchError,
     );
     if (!ready.ok) {
+      await capturePackageScreenshot(`${label} failure`, xvfb.env).catch((error) =>
+        writeFile(path.join(artifactDir, `${safeName(label)}-failure-screen-error.txt`), `${formatError(error)}\n`),
+      );
       await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
       throw new Error(`${label} did not prove packaged app/frontend/backend readiness: ${ready.reason}`);
     }
@@ -387,18 +410,70 @@ async function assertLaunches(command, args, label, extraEnv = {}) {
       manifest.push(`${label}=packaged screen pixels ready`);
     }
   } catch (error) {
-    stopProcess(child);
+    stopLaunchedApp(child, options);
     stopPackageXvfb(xvfb);
     await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
     throw error;
   }
-  stopProcess(child);
+  stopLaunchedApp(child, options);
   stopPackageXvfb(xvfb);
   await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
   manifest.push(`${label}=backend, page, frontend IPC, state, and UI connect/disconnect ready`);
   if (liveFile) {
     manifest.push(`${label}=live HTTP/SOCKS proxy smoke and shutdown ready`);
   }
+}
+
+function macAppLaunch(command, args, label, smokeEnv, options) {
+  if (!options.macAppBundle) {
+    return {
+      command,
+      args,
+      env: smokeEnv,
+      detached: process.platform !== "win32",
+    };
+  }
+
+  const stdoutLog = path.join(artifactDir, `${safeName(label)}-app-stdout.log`);
+  const stderrLog = path.join(artifactDir, `${safeName(label)}-app-stderr.log`);
+  const envArgs = Object.entries(smokeEnv)
+    .filter(([key, value]) => value !== undefined && value !== null && shouldForwardMacSmokeEnv(key))
+    .flatMap(([key, value]) => ["--env", `${key}=${String(value)}`]);
+  return {
+    command: "open",
+    args: ["-n", "-W", "--stdout", stdoutLog, "--stderr", stderrLog, ...envArgs, options.macAppBundle],
+    env: process.env,
+    detached: false,
+  };
+}
+
+function shouldForwardMacSmokeEnv(key) {
+  return (
+    key.startsWith("TRAJECTORY_DESKTOP_") ||
+    key === "NO_AT_BRIDGE" ||
+    key === "WEBKIT_DISABLE_COMPOSITING_MODE" ||
+    key === "RUST_BACKTRACE" ||
+    key === "RUST_LOG"
+  );
+}
+
+let macOpenEnvSupport;
+
+function macOpenSupportsEnv() {
+  if (process.platform !== "darwin") return false;
+  if (macOpenEnvSupport !== undefined) return macOpenEnvSupport;
+  const result = spawnSync("open", ["--help"], {
+    cwd: artifactDir,
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  writeFileSync(
+    path.join(artifactDir, "macos-open-help.log"),
+    [result.stdout ?? "", result.stderr ?? ""].join("\n"),
+  );
+  macOpenEnvSupport = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.includes("--env");
+  return macOpenEnvSupport;
 }
 
 async function prepareDesktopLiveSmoke(label) {
@@ -963,6 +1038,21 @@ function stopProcess(child) {
     child.kill("SIGTERM");
   }
   spawnSync("pkill", ["-TERM", "-P", String(child.pid)], { stdio: "ignore" });
+}
+
+function stopLaunchedApp(child, options = {}) {
+  if (process.platform === "darwin" && options.macAppBundle) {
+    const quit = spawnSync(
+      "osascript",
+      ["-e", `tell application id "${macBundleIdentifier}" to quit`],
+      { cwd: artifactDir, encoding: "utf8", timeout: 10_000, windowsHide: true },
+    );
+    writeCommandLog("macOS app quit", quit);
+    if (options.macExecutable) {
+      spawnSync("pkill", ["-TERM", "-x", options.macExecutable], { stdio: "ignore" });
+    }
+  }
+  stopProcess(child);
 }
 
 function commandExists(command) {

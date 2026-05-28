@@ -103,7 +103,6 @@ class TrajectoryVpnService : VpnService() {
             stopRuntime(resetStatus = false)
             return
         }
-
         val tun = try {
             RuntimeStatusCenter.markListenersReady(RuntimeMode.VPN, profile)
             createTun(profile)

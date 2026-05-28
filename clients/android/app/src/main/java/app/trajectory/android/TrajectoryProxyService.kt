@@ -8,6 +8,11 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.net.URI
 import java.util.concurrent.Executors
 
 class TrajectoryProxyService : Service() {
@@ -91,7 +96,20 @@ class TrajectoryProxyService : Service() {
             return
         }
         RuntimeStatusCenter.markListenersReady(RuntimeMode.PROXY, profile)
-        startForeground(NOTIFICATION_ID, notification("Proxy connected on 127.0.0.1:${profile.socksPort}/${profile.httpPort}"))
+        val probeUrl = ConnectivityProbeConfig.loadHttpUrl(this)
+        if (waitForHttpProxyDataPath(profile, probeUrl, 15_000)) {
+            RuntimeStatusCenter.markProxyDataPathReady(profile, probeUrl)
+            startForeground(
+                NOTIFICATION_ID,
+                notification("Proxy connected after HTTP data-path proof"),
+            )
+        } else {
+            RuntimeStatusCenter.markProxyDataPathPending(profile, probeUrl)
+            startForeground(
+                NOTIFICATION_ID,
+                notification("Proxy listeners ready; HTTP data-path proof is pending"),
+            )
+        }
     }
 
     private fun stopRuntime(resetStatus: Boolean) {
@@ -121,6 +139,50 @@ class TrajectoryProxyService : Service() {
             }
         }
         return false
+    }
+
+    private fun waitForHttpProxyDataPath(profile: ClientProfile, probeUrl: String, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (probeHttpProxy(profile.httpPort, probeUrl)) return true
+            try {
+                Thread.sleep(250)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+        }
+        return probeHttpProxy(profile.httpPort, probeUrl)
+    }
+
+    private fun probeHttpProxy(httpPort: Int, probeUrl: String): Boolean {
+        return try {
+            val uri = URI(probeUrl)
+            if (uri.scheme != "http" || uri.host.isNullOrBlank()) {
+                return false
+            }
+            val hostHeader = if (uri.port > 0) "${uri.host}:${uri.port}" else uri.host
+            Socket().use { socket ->
+                socket.soTimeout = 3_000
+                socket.connect(InetSocketAddress("127.0.0.1", httpPort), 1_000)
+                val request = buildString {
+                    append("GET ")
+                    append(uri.toASCIIString())
+                    append(" HTTP/1.1\r\nHost: ")
+                    append(hostHeader)
+                    append("\r\nConnection: close\r\nUser-Agent: TrajectoryAndroidProbe/0.1\r\n\r\n")
+                }
+                socket.getOutputStream().write(request.toByteArray(Charsets.US_ASCII))
+                socket.getOutputStream().flush()
+                val status = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.US_ASCII)).readLine()
+                    ?: return false
+                val code = status.split(' ').getOrNull(1)?.toIntOrNull()
+                    ?: return false
+                code in 200..499
+            }
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun notification(text: String): Notification {

@@ -137,6 +137,9 @@ class MainActivity : ComponentActivity() {
         val domain = intent.getStringExtra("trajectory_smoke_domain")?.trim().orEmpty()
         val accessKey = intent.getStringExtra("trajectory_smoke_access_key")?.trim().orEmpty()
         if (domain.isBlank() || accessKey.isBlank()) return null
+        intent.getStringExtra("trajectory_smoke_fetch_url")
+            ?.trim()
+            ?.let { ConnectivityProbeConfig.saveHttpUrl(this, it) }
 
         val resolvers = intent.getStringExtra("trajectory_smoke_resolvers")
             ?.lineSequence()

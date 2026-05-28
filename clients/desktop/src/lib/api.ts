@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import {
   loadProfiles,
   loadSelectedProfileId,
@@ -18,13 +19,6 @@ class NoTauriRuntimeError extends Error {
   }
 }
 
-let tauriCore: Promise<typeof import("@tauri-apps/api/core")> | undefined;
-
-const loadTauriCore = () => {
-  tauriCore ??= import("@tauri-apps/api/core");
-  return tauriCore;
-};
-
 function isMissingTauriRuntime(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return (
@@ -38,7 +32,6 @@ function isMissingTauriRuntime(error: unknown) {
 
 async function invokeCommand<T>(command: string, args?: Record<string, unknown>) {
   try {
-    const { invoke } = await loadTauriCore();
     return await invoke<T>(command, args);
   } catch (error) {
     if (isMissingTauriRuntime(error)) {

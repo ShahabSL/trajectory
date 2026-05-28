@@ -968,6 +968,7 @@ start_live_profile_from_intent() {
     --es trajectory_smoke_transport_mode velocity \
     --es trajectory_smoke_socks_port "${TRAJECTORY_ANDROID_SMOKE_SOCKS_PORT:-7000}" \
     --es trajectory_smoke_http_port "${TRAJECTORY_ANDROID_SMOKE_HTTP_PORT:-7001}" \
+    --es trajectory_smoke_fetch_url "${TRAJECTORY_ANDROID_SMOKE_FETCH_URL:-}" \
     > "$artifact_dir/live-smoke-intent-start.txt"
   sleep 2
   dump_screen "live_smoke_configured"

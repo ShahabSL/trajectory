@@ -1,7 +1,17 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import App from "./App";
 import { markSmokeFrontendErrorBestEffort } from "./lib/api";
 import "./styles.css";
+
+declare global {
+  interface Window {
+    __TRAJECTORY_DESKTOP_FRONTEND_BOOTSTRAP__?: string;
+    __TRAJECTORY_DESKTOP_FRONTEND_RENDERED__?: string;
+  }
+}
+
+window.__TRAJECTORY_DESKTOP_FRONTEND_BOOTSTRAP__ = new Date().toISOString();
 
 const formatStartupError = (error: unknown) => {
   if (error instanceof Error) {
@@ -23,12 +33,12 @@ window.addEventListener("unhandledrejection", (event) => {
 });
 
 async function bootstrap() {
-  const { default: App } = await import("./App");
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
       <App />
     </React.StrictMode>,
   );
+  window.__TRAJECTORY_DESKTOP_FRONTEND_RENDERED__ = new Date().toISOString();
 }
 
 void bootstrap().catch(reportStartupError);
