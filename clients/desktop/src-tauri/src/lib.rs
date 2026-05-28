@@ -9,6 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::webview::PageLoadEvent;
 use tauri::State;
 
 const LOG_LIMIT: usize = 400;
@@ -374,23 +375,17 @@ fn disable_system_proxy(state: State<'_, AppState>) -> Result<RuntimeSnapshot, S
 
 #[tauri::command]
 fn mark_frontend_ready() -> Result<(), String> {
-    let Ok(path) = std::env::var("TRAJECTORY_DESKTOP_SMOKE_READY_FILE") else {
-        return Ok(());
-    };
-    let path = PathBuf::from(path);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create smoke marker directory: {error}"))?;
-    }
-    fs::write(path, format!("frontend ready at {}\n", now_string()))
-        .map_err(|error| format!("failed to write smoke marker: {error}"))
+    write_smoke_marker_env(
+        "TRAJECTORY_DESKTOP_SMOKE_READY_FILE",
+        format!("frontend ready at {}\n", now_string()),
+    )
 }
 
 #[tauri::command]
 fn mark_smoke_state_ready(state: State<'_, AppState>) -> Result<(), String> {
-    let Ok(path) = std::env::var("TRAJECTORY_DESKTOP_SMOKE_STATE_FILE") else {
+    if std::env::var_os("TRAJECTORY_DESKTOP_SMOKE_STATE_FILE").is_none() {
         return Ok(());
-    };
+    }
     let profile_state = profile_store_snapshot(load_profile_store(&state.data_dir)?)?;
     if profile_state.profiles.is_empty() {
         return Err("smoke state check loaded zero profiles".to_string());
@@ -400,13 +395,8 @@ fn mark_smoke_state_ready(state: State<'_, AppState>) -> Result<(), String> {
         return Err("smoke state check loaded incomplete platform capabilities".to_string());
     }
 
-    let path = PathBuf::from(path);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create smoke state marker directory: {error}"))?;
-    }
-    fs::write(
-        path,
+    write_smoke_marker_env(
+        "TRAJECTORY_DESKTOP_SMOKE_STATE_FILE",
         format!(
             "state ready at {}\nprofiles={}\nphase={:?}\nos={}\narch={}\n",
             now_string(),
@@ -416,7 +406,6 @@ fn mark_smoke_state_ready(state: State<'_, AppState>) -> Result<(), String> {
             runtime_state.capabilities.arch,
         ),
     )
-    .map_err(|error| format!("failed to write smoke state marker: {error}"))
 }
 
 pub fn run() {
@@ -429,6 +418,27 @@ pub fn run() {
             }),
             logs: Arc::new(Mutex::new(VecDeque::new())),
             data_dir,
+        })
+        .setup(|_| {
+            write_smoke_marker_env(
+                "TRAJECTORY_DESKTOP_SMOKE_BACKEND_FILE",
+                format!("backend setup ready at {}\n", now_string()),
+            )
+            .map_err(|error| {
+                Box::<dyn std::error::Error>::from(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    error,
+                ))
+            })?;
+            Ok(())
+        })
+        .on_page_load(|_, payload| {
+            if payload.event() == PageLoadEvent::Finished {
+                let _ = write_smoke_marker_env(
+                    "TRAJECTORY_DESKTOP_SMOKE_PAGE_FILE",
+                    format!("page loaded at {}\nurl={}\n", now_string(), payload.url()),
+                );
+            }
         })
         .invoke_handler(tauri::generate_handler![
             load_snapshot,
@@ -445,6 +455,18 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running trajectory desktop");
+}
+
+fn write_smoke_marker_env(var: &str, contents: String) -> Result<(), String> {
+    let Ok(path) = std::env::var(var) else {
+        return Ok(());
+    };
+    let path = PathBuf::from(path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create smoke marker directory: {error}"))?;
+    }
+    fs::write(path, contents).map_err(|error| format!("failed to write smoke marker: {error}"))
 }
 
 impl StoredProfile {

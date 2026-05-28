@@ -102,7 +102,8 @@ Desktop proxy MVP:
   Frontier, and upload screenshots
 - desktop packaged smoke tests that inspect installable artifacts, launch the
   real Tauri bundle/AppImage/MSI-extracted app where the platform allows it, and
-  require frontend plus backend state readiness callbacks
+  require packaged backend setup, webview page-load, frontend IPC, and backend
+  state readiness markers
 - OS build matrix: Windows, macOS, Linux
 
 VPN clients:
@@ -125,8 +126,8 @@ Release gates:
 
 - packaged CLI archives are extracted and run through raw TCP, SOCKS5, and HTTP
   CONNECT loopbacks
-- desktop bundles must pass UI preview smoke plus packaged frontend/backend
-  readiness from the distributable app
+- desktop bundles must pass UI preview smoke plus packaged backend/page-load,
+  frontend IPC, and backend state readiness from the distributable app
 - Android debug and signed release APKs must install, run the sidecar, and render
   visually nonblank screens on emulator CI
 - release assets must match the expected set, per-target SHA256 manifests, and

@@ -110,7 +110,9 @@ npm --prefix clients/desktop run package:smoke -- /tmp/trajectory-desktop-packag
 validates the distributable Tauri output: it checks expected bundle files,
 verifies the packaged sidecar, inspects installable artifacts, launches the real
 app/AppImage/MSI-extracted app where the platform allows it, and waits for
-frontend plus backend state readiness markers written by the packaged backend.
+backend setup, webview page-load, frontend IPC, and backend state readiness
+markers written by the packaged app. Browser-preview smoke remains the rendered
+React UI gate.
 
 For live tunnel validation, use the existing protected CI workflow documented in
 `docs/CI_E2E.md`. Live secrets must stay in the protected

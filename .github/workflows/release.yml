@@ -227,6 +227,16 @@ jobs:
         run: npm run tauri:build
         working-directory: clients/desktop
 
+      - name: Archive macOS app bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app_path="clients/desktop/src-tauri/target/release/bundle/macos/Trajectory.app"
+          test -d "$app_path"
+          tar -C "$(dirname "$app_path")" \
+            -czf "clients/desktop/src-tauri/target/release/bundle/macos/Trajectory_${RELEASE_TAG}_${{ matrix.target }}.app.tar.gz" \
+            "$(basename "$app_path")"
+
       - name: Smoke-test Tauri desktop package
         run: npm run package:smoke -- "${{ runner.temp }}/desktop-package"
         working-directory: clients/desktop
@@ -239,16 +249,6 @@ jobs:
           path: ${{ runner.temp }}/desktop-package
           if-no-files-found: error
           retention-days: 14
-
-      - name: Archive macOS app bundle
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          app_path="clients/desktop/src-tauri/target/release/bundle/macos/Trajectory.app"
-          test -d "$app_path"
-          tar -C "$(dirname "$app_path")" \
-            -czf "clients/desktop/src-tauri/target/release/bundle/macos/Trajectory_${RELEASE_TAG}_${{ matrix.target }}.app.tar.gz" \
-            "$(basename "$app_path")"
 
       - name: Upload desktop release bundles
         uses: actions/upload-artifact@v7

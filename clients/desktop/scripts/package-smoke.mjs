@@ -55,8 +55,9 @@ async function smokeLinux(files) {
   runChecked("dpkg-deb", ["-x", deb, debExtract], "extract Linux .deb");
   const debFiles = await listFiles(debExtract);
   requireOne(debFiles, /usr[/\\]bin[/\\]trajectory-client$/, "trajectory-client inside .deb");
-  requireOne(debFiles, /usr[/\\]bin[/\\]trajectory-desktop$/, "trajectory-desktop inside .deb");
+  const debLauncher = requireOne(debFiles, /usr[/\\]bin[/\\]trajectory-desktop$/, "trajectory-desktop inside .deb");
 
+  let rpmLauncher = null;
   const rpmExtract = path.join(artifactDir, "rpm-extract");
   if (commandExists("rpm2cpio") && commandExists("cpio")) {
     await mkdir(rpmExtract, { recursive: true });
@@ -68,7 +69,7 @@ async function smokeLinux(files) {
     );
     const rpmFiles = await listFiles(rpmExtract);
     requireOne(rpmFiles, /usr[/\\]bin[/\\]trajectory-client$/, "trajectory-client inside .rpm");
-    requireOne(rpmFiles, /usr[/\\]bin[/\\]trajectory-desktop$/, "trajectory-desktop inside .rpm");
+    rpmLauncher = requireOne(rpmFiles, /usr[/\\]bin[/\\]trajectory-desktop$/, "trajectory-desktop inside .rpm");
   } else if (process.env.CI) {
     throw new Error("rpm2cpio and cpio are required for CI Linux RPM package smoke");
   } else {
@@ -79,6 +80,18 @@ async function smokeLinux(files) {
   const launcher = commandExists("xvfb-run") ? "xvfb-run" : appRun;
   const args = commandExists("xvfb-run") ? ["-a", appRun] : [];
   await assertLaunches(launcher, args, "Linux AppDir launch smoke");
+  await assertLaunches(
+    commandExists("xvfb-run") ? "xvfb-run" : debLauncher,
+    commandExists("xvfb-run") ? ["-a", debLauncher] : [],
+    "Linux deb payload launch smoke",
+  );
+  if (rpmLauncher) {
+    await assertLaunches(
+      commandExists("xvfb-run") ? "xvfb-run" : rpmLauncher,
+      commandExists("xvfb-run") ? ["-a", rpmLauncher] : [],
+      "Linux rpm payload launch smoke",
+    );
+  }
   const appImageLauncher = commandExists("xvfb-run") ? "xvfb-run" : appImage;
   const appImageArgs = commandExists("xvfb-run") ? ["-a", appImage] : [];
   await assertLaunches(appImageLauncher, appImageArgs, "Linux AppImage launch smoke", {
@@ -88,6 +101,7 @@ async function smokeLinux(files) {
 
 async function smokeMac(files) {
   const dmg = findOptional(files, new RegExp(`Trajectory_?${escapeRegex(version)}.*\\.dmg$`), "macOS .dmg");
+  let appArchive = findOptional(files, /\.app\.tar\.gz$/, "macOS app tarball");
   const appBundle = path.join(bundleRoot, "macos", "Trajectory.app");
   const macosDir = path.join(appBundle, "Contents", "MacOS");
   const executables = (await listFiles(macosDir)).filter(isExecutable);
@@ -104,6 +118,27 @@ async function smokeMac(files) {
   }
   manifest.push(`app=${relative(appBundle)}`);
   await assertLaunches(launcher, [], "macOS app bundle launch smoke");
+
+  if (!appArchive) {
+    if (process.env.CI) {
+      throw new Error("macOS app tarball is required for CI desktop package smoke");
+    }
+    appArchive = path.join(artifactDir, `Trajectory_${version}_local.app.tar.gz`);
+    runChecked("tar", ["-C", path.dirname(appBundle), "-czf", appArchive, path.basename(appBundle)], "create local macOS app tarball");
+  }
+  const appArchiveExtract = path.join(artifactDir, "macos-app-tar-extract");
+  await mkdir(appArchiveExtract, { recursive: true });
+  runChecked("tar", ["-xzf", appArchive, "-C", appArchiveExtract], "extract macOS app tarball");
+  const extractedApp = path.join(appArchiveExtract, "Trajectory.app");
+  const extractedMacosDir = path.join(extractedApp, "Contents", "MacOS");
+  const extractedExecutables = (await listFiles(extractedMacosDir)).filter(isExecutable);
+  const extractedSidecar = extractedExecutables.find((file) => path.basename(file).startsWith("trajectory-client"));
+  const extractedLauncher = extractedExecutables.find((file) => !path.basename(file).startsWith("trajectory-client"));
+  if (!extractedSidecar) throw new Error("missing trajectory-client sidecar in macOS app tarball");
+  if (!extractedLauncher) throw new Error("missing app launcher executable in macOS app tarball");
+  manifest.push(`app_tar=${relative(appArchive)}`);
+  runChecked(extractedSidecar, ["--help"], "macOS app tarball sidecar --help");
+  await assertLaunches(extractedLauncher, [], "macOS app tarball launch smoke");
 }
 
 async function smokeWindows(files) {
@@ -119,6 +154,13 @@ async function smokeWindows(files) {
   const sidecar = path.join(tauriDir, "bin", "trajectory-client-x86_64-pc-windows-msvc.exe");
   requireExecutable(sidecar, "Windows staged trajectory-client sidecar");
   runChecked(sidecar, ["--help"], "Windows staged sidecar --help");
+  if (commandExists("7z")) {
+    runChecked("7z", ["t", setup], "test Windows setup archive");
+  } else if (process.env.CI) {
+    throw new Error("7z is required for CI Windows setup package smoke");
+  } else {
+    manifest.push("Windows setup archive test=skipped locally because 7z is unavailable");
+  }
 
   manifest.push(`msi=${relative(msi)}`, `setup=${relative(setup)}`);
   await assertLaunches(msiLauncher, [], "Windows MSI app launch smoke");
@@ -191,14 +233,18 @@ function runChecked(command, args, label, options = {}) {
 }
 
 async function assertLaunches(command, args, label, extraEnv = {}) {
-  const readyFile = path.join(artifactDir, `${safeName(label)}-frontend-ready.txt`);
+  const backendFile = path.join(artifactDir, `${safeName(label)}-backend-ready.txt`);
+  const pageFile = path.join(artifactDir, `${safeName(label)}-page-ready.txt`);
+  const frontendFile = path.join(artifactDir, `${safeName(label)}-frontend-ready.txt`);
   const stateFile = path.join(artifactDir, `${safeName(label)}-state-ready.txt`);
   const child = spawn(command, args, {
     cwd: repoRoot,
     env: {
       ...process.env,
       TRAJECTORY_DESKTOP_SMOKE: "1",
-      TRAJECTORY_DESKTOP_SMOKE_READY_FILE: readyFile,
+      TRAJECTORY_DESKTOP_SMOKE_BACKEND_FILE: backendFile,
+      TRAJECTORY_DESKTOP_SMOKE_PAGE_FILE: pageFile,
+      TRAJECTORY_DESKTOP_SMOKE_READY_FILE: frontendFile,
       TRAJECTORY_DESKTOP_SMOKE_STATE_FILE: stateFile,
       NO_AT_BRIDGE: "1",
       WEBKIT_DISABLE_COMPOSITING_MODE: "1",
@@ -221,14 +267,19 @@ async function assertLaunches(command, args, label, extraEnv = {}) {
     launchError = error.message;
   });
 
-  const ready = await waitForReadyFiles(child, [readyFile, stateFile], 30_000, () => launchError);
+  const ready = await waitForReadyFiles(
+    child,
+    [backendFile, pageFile, frontendFile, stateFile],
+    45_000,
+    () => launchError,
+  );
   if (!ready.ok) {
     await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
-    throw new Error(`${label} did not prove packaged frontend/backend readiness: ${ready.reason}`);
+    throw new Error(`${label} did not prove packaged app/frontend/backend readiness: ${ready.reason}`);
   }
   stopProcess(child);
   await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
-  manifest.push(`${label}=frontend and backend ready`);
+  manifest.push(`${label}=backend, page, frontend IPC, and state ready`);
 }
 
 async function waitForReadyFiles(child, readyFiles, ms, launchError) {

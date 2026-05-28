@@ -8,7 +8,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-version = "0.1.17"
+version = "0.1.18"
 publish = false
 license-file = "LICENSE"
 
