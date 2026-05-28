@@ -146,6 +146,7 @@ export default function App() {
     let alive = true;
     const loadInitialState = async () => {
       try {
+        await desktopApi.markFrontendReady();
         const [profileState, runtimeState] = await Promise.all([
           desktopApi.loadProfiles(),
           desktopApi.loadSnapshot(),
@@ -153,7 +154,6 @@ export default function App() {
         if (alive) {
           applyProfileState(profileState);
           setSnapshot(runtimeState);
-          await desktopApi.markFrontendReady();
         }
       } catch (error) {
         if (alive) {
