@@ -1175,6 +1175,7 @@ assert_connected_status_ui() {
   local prefix="$4"
   local restored_xml="$artifact_dir/${prefix}_restored.xml"
   local combined_xml="$artifact_dir/${prefix}_connected_assertion.xml"
+  local checks_xml="$artifact_dir/${prefix}_checks.xml"
 
   if ! grep -Fq "$semantic_phase" "$source_xml"; then
     echo "Android data path worked, but UI semantics did not expose ${semantic_phase}" >&2
@@ -1189,6 +1190,16 @@ assert_connected_status_ui() {
   fi
 
   cat "$source_xml" "$restored_xml" > "$combined_xml" 2>/dev/null || cp "$source_xml" "$combined_xml"
+  if ! grep -Fq "status.dns.admitted" "$combined_xml" ||
+    ! grep -Fq "status.http.ready" "$combined_xml" ||
+    ([[ "$visible_title" == "VPN connected" ]] &&
+      (! grep -Fq "status.tun.ready" "$combined_xml" ||
+        ! grep -Fq "status.bridge.ready" "$combined_xml")); then
+    adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 500 >/dev/null 2>&1 || true
+    sleep 1
+    dump_screen "${prefix}_checks"
+    cat "$combined_xml" "$checks_xml" > "${combined_xml}.tmp" 2>/dev/null && mv "${combined_xml}.tmp" "$combined_xml"
+  fi
   if ! grep -Fq "$visible_title" "$combined_xml"; then
     echo "Android data path worked, but UI did not visibly show ${visible_title}" >&2
     return 1

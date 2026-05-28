@@ -589,6 +589,7 @@ private fun StatusCard(
                     status.detail,
                     color = TrajectoryColors.Muted,
                     lineHeight = 19.sp,
+                    maxLines = 2,
                 )
             }
         }
