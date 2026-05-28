@@ -37,7 +37,7 @@ public final class SmokeProbeActivity extends Activity {
 
         String fetchUrl = getIntent().getStringExtra(EXTRA_URL);
         String expectedBody = getIntent().getStringExtra(EXTRA_EXPECT);
-        if (fetchUrl == null || fetchUrl.isBlank()) {
+        if (isBlank(fetchUrl)) {
             finishWithResult(false, "missing fetch URL");
             return;
         }
@@ -140,7 +140,7 @@ public final class SmokeProbeActivity extends Activity {
                 finishWithResult(false, "HTTP status " + status + " body=" + trim(body));
                 return;
             }
-            if (!expectedBody.isBlank() && !body.contains(expectedBody)) {
+            if (!isBlank(expectedBody) && !body.contains(expectedBody)) {
                 finishWithResult(false, "missing expected marker body=" + trim(body));
                 return;
             }
@@ -197,5 +197,9 @@ public final class SmokeProbeActivity extends Activity {
             return compact;
         }
         return compact.substring(0, 240);
+    }
+
+    private boolean isBlank(String value) {
+        return value == null || value.trim().isEmpty();
     }
 }

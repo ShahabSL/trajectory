@@ -602,9 +602,24 @@ private fun StatusCard(
         }
         Spacer(Modifier.height(14.dp))
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatusChip("SOCKS", if (status.socksReady) "ready" else "waiting", Modifier.fillMaxWidth())
-            StatusChip("HTTP", if (status.httpReady) "ready" else "waiting", Modifier.fillMaxWidth())
-            StatusChip("DNS", resolverSummary(status, profile), Modifier.fillMaxWidth())
+            StatusChip(
+                "SOCKS",
+                if (status.socksReady) "ready" else "waiting",
+                Modifier.fillMaxWidth(),
+                if (status.socksReady) "status.socks.ready" else "status.socks.waiting",
+            )
+            StatusChip(
+                "HTTP",
+                if (status.httpReady) "ready" else "waiting",
+                Modifier.fillMaxWidth(),
+                if (status.httpReady) "status.http.ready" else "status.http.waiting",
+            )
+            StatusChip(
+                "DNS",
+                resolverSummary(status, profile),
+                Modifier.fillMaxWidth(),
+                if (status.admittedResolvers > 0) "status.dns.admitted" else "status.dns.waiting",
+            )
             StatusChip("Mode", modeLabel(profile.transportMode), Modifier.fillMaxWidth())
         }
         AnimatedVisibility(notice != null || status.lastError != null || profileErrors.isNotEmpty()) {
@@ -679,16 +694,48 @@ private fun RuntimeSteps(status: RuntimeStatusSnapshot) {
     CardShell {
         SectionTitle(Icons.Filled.NetworkCheck, "Connection checks")
         Spacer(Modifier.height(8.dp))
-        CheckRow("Profile", status.phase != RuntimePhase.DISCONNECTED && status.phase != RuntimePhase.FAILED)
-        CheckRow("Resolver admission", status.admittedResolvers > 0 || status.phase.ordinal > RuntimePhase.ADMITTING_RESOLVERS.ordinal)
-        CheckRow("SOCKS listener", status.socksReady)
+        CheckRow(
+            "Profile",
+            status.phase != RuntimePhase.DISCONNECTED && status.phase != RuntimePhase.FAILED,
+            semanticState = if (status.phase != RuntimePhase.DISCONNECTED && status.phase != RuntimePhase.FAILED) {
+                "status.profile.ready"
+            } else {
+                "status.profile.waiting"
+            },
+        )
+        CheckRow(
+            "Resolver admission",
+            status.admittedResolvers > 0 || status.phase.ordinal > RuntimePhase.ADMITTING_RESOLVERS.ordinal,
+            semanticState = if (status.admittedResolvers > 0 || status.phase.ordinal > RuntimePhase.ADMITTING_RESOLVERS.ordinal) {
+                "status.dns.admitted"
+            } else {
+                "status.dns.waiting"
+            },
+        )
+        CheckRow(
+            "SOCKS listener",
+            status.socksReady,
+            semanticState = if (status.socksReady) "status.socks.ready" else "status.socks.waiting",
+        )
         if (status.mode == RuntimeMode.VPN) {
-            CheckRow("HTTP listener", true, "Optional")
+            CheckRow("HTTP listener", true, "Optional", "status.http.optional")
         } else {
-            CheckRow("HTTP listener", status.httpReady)
+            CheckRow(
+                "HTTP listener",
+                status.httpReady,
+                semanticState = if (status.httpReady) "status.http.ready" else "status.http.waiting",
+            )
         }
-        CheckRow("Android TUN", status.tunReady)
-        CheckRow("Packet bridge", status.bridgeReady)
+        CheckRow(
+            "Android TUN",
+            status.tunReady,
+            semanticState = if (status.tunReady) "status.tun.ready" else "status.tun.waiting",
+        )
+        CheckRow(
+            "Packet bridge",
+            status.bridgeReady,
+            semanticState = if (status.bridgeReady) "status.bridge.ready" else "status.bridge.waiting",
+        )
     }
 }
 
@@ -981,9 +1028,21 @@ private fun StatusDot(phase: RuntimePhase, working: Boolean) {
 }
 
 @Composable
-private fun StatusChip(label: String, value: String, modifier: Modifier = Modifier) {
+private fun StatusChip(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    semanticState: String? = null,
+) {
     Row(
         modifier = modifier
+            .then(
+                if (semanticState == null) {
+                    Modifier
+                } else {
+                    Modifier.semantics { contentDescription = semanticState }
+                },
+            )
             .clip(RoundedCornerShape(999.dp))
             .background(TrajectoryColors.Subtle)
             .padding(horizontal = 10.dp, vertical = 7.dp),
@@ -1003,10 +1062,22 @@ private fun StatusChip(label: String, value: String, modifier: Modifier = Modifi
 }
 
 @Composable
-private fun CheckRow(label: String, done: Boolean, stateLabel: String = if (done) "Ready" else "Pending") {
+private fun CheckRow(
+    label: String,
+    done: Boolean,
+    stateLabel: String = if (done) "Ready" else "Pending",
+    semanticState: String? = null,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .then(
+                if (semanticState == null) {
+                    Modifier
+                } else {
+                    Modifier.semantics { contentDescription = semanticState }
+                },
+            )
             .padding(vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

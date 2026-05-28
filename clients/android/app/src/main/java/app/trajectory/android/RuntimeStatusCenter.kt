@@ -131,12 +131,36 @@ object RuntimeStatusCenter {
         )
     }
 
-    fun markVpnConnected() {
+    fun markVpnConnectedIfActive(): Boolean = synchronized(lock) {
+        val current = snapshot
+        if (current.mode != RuntimeMode.VPN ||
+            current.phase == RuntimePhase.FAILED ||
+            current.phase == RuntimePhase.STOPPING ||
+            current.phase == RuntimePhase.DISCONNECTED ||
+            !current.tunReady ||
+            !current.socksReady
+        ) {
+            return@synchronized false
+        }
+        snapshot = current.copy(
+            phase = RuntimePhase.VPN_CONNECTED,
+            title = "VPN connected",
+            detail = "TUN is established, local SOCKS is accepting connections, and the packet bridge stayed alive past startup guard.",
+            tunReady = true,
+            bridgeReady = true,
+            lastError = null,
+            updatedAtMillis = System.currentTimeMillis(),
+        )
+        true
+    }
+
+    internal fun markVpnConnectedForTest() {
         update(
             mode = RuntimeMode.VPN,
             phase = RuntimePhase.VPN_CONNECTED,
             title = "VPN connected",
-            detail = "TUN is established, local SOCKS is accepting connections, and the bridge passed startup guard.",
+            detail = "Test-only connected state.",
+            socksReady = true,
             tunReady = true,
             bridgeReady = true,
         )

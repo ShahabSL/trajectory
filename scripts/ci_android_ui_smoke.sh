@@ -60,6 +60,80 @@ clear_logcat_best_effort() {
   } >> "$output"
 }
 
+dismiss_runtime_permission_dialog() {
+  local probe="$artifact_dir/runtime-permission.raw.xml"
+  local action
+  local none_seen=0
+  for _ in $(seq 1 12); do
+    if ! timeout 5s adb exec-out uiautomator dump /dev/tty > "$probe" 2>/dev/null; then
+      none_seen=0
+      sleep 1
+      continue
+    fi
+    if ! action="$(python3 - "$probe" <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+raw = open(sys.argv[1], errors="replace").read()
+end = raw.find("</hierarchy>")
+if end < 0:
+    raise SystemExit(1)
+root = ET.fromstring(raw[: end + len("</hierarchy>")])
+texts = []
+for node in root.iter("node"):
+    for key in ("text", "content-desc"):
+        value = node.attrib.get(key, "")
+        if value:
+            texts.append(value)
+
+permission_dialog = any(
+    "notification" in text.lower() or "send you notifications" in text.lower()
+    for text in texts
+) and (
+    any(text in {"Allow", "OK", "Continue", "While using the app"} for text in texts) or
+    any("don't allow" in text.lower() or "don\u2019t allow" in text.lower() for text in texts)
+)
+if not permission_dialog:
+    print("NONE")
+    raise SystemExit(0)
+
+for node in root.iter("node"):
+    text = node.attrib.get("text", "")
+    enabled = node.attrib.get("enabled", "true") != "false"
+    if enabled and text in {"Allow", "OK", "Continue", "While using the app"}:
+        match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds", ""))
+        if match:
+            x1, y1, x2, y2 = map(int, match.groups())
+            print("TAP", (x1 + x2) // 2, (y1 + y2) // 2)
+            raise SystemExit(0)
+print("WAIT")
+PY
+    )"; then
+      sleep 1
+      continue
+    fi
+    if [[ "$action" == TAP* ]]; then
+      none_seen=0
+      adb shell input tap ${action#TAP }
+      sleep 1
+      continue
+    fi
+    if [[ "$action" == "NONE" ]]; then
+      none_seen=$((none_seen + 1))
+      if [[ "$none_seen" -ge 2 ]]; then
+        return 0
+      fi
+      sleep 1
+      continue
+    fi
+    none_seen=0
+    sleep 1
+  done
+  echo "Android runtime permission dialog did not dismiss" >&2
+  return 1
+}
+
 install_apk() {
   local attempt
   for attempt in 1 2 3; do
@@ -204,6 +278,7 @@ adb shell am force-stop "$package_name"
 clear_logcat_best_effort "$artifact_dir/logcat-clear.txt"
 adb shell am start -W -n "$activity" > "$artifact_dir/start.txt"
 sleep 2
+dismiss_runtime_permission_dialog
 
 screen_size="$(
   adb shell wm size |
@@ -1116,12 +1191,20 @@ assert_connected_status_ui() {
     echo "Android data path worked, but UI did not visibly show ${visible_title}" >&2
     return 1
   fi
-  if ! grep -Fq "SOCKS" "$combined_xml" || ! grep -Fq "ready" "$combined_xml" || ! grep -Fq "DNS" "$combined_xml"; then
+  if ! grep -Fq "status.socks.ready" "$combined_xml" ||
+    ! grep -Fq "status.dns.admitted" "$combined_xml"; then
     echo "Android connected UI did not expose runtime readiness chips" >&2
     return 1
   fi
-  if [[ "$visible_title" == "Proxy connected" ]] && ! grep -Fq "HTTP" "$combined_xml"; then
+  if [[ "$visible_title" == "Proxy connected" ]] &&
+    ! grep -Fq "status.http.ready" "$combined_xml"; then
     echo "Android connected proxy UI did not expose HTTP readiness" >&2
+    return 1
+  fi
+  if [[ "$visible_title" == "VPN connected" ]] &&
+    (! grep -Fq "status.tun.ready" "$combined_xml" ||
+      ! grep -Fq "status.bridge.ready" "$combined_xml"); then
+    echo "Android connected VPN UI did not expose TUN and bridge readiness" >&2
     return 1
   fi
 }
@@ -1217,12 +1300,26 @@ for node in root.iter("node"):
         value = node.attrib.get(key, "")
         if value:
             texts.append(value)
-dialog_present = any("Connection request" in text for text in texts) and any("VPN" in text for text in texts)
+dialog_present = (
+    any("connection request" in text.lower() for text in texts) and
+    any("vpn" in text.lower() for text in texts)
+)
 if not dialog_present:
     print("NONE")
     raise SystemExit(0)
 for node in root.iter("node"):
-    if node.attrib.get("text") in {"OK", "Connect", "Allow", "Continue"}:
+    if (
+        node.attrib.get("checkable") == "true" and
+        node.attrib.get("checked") == "false" and
+        node.attrib.get("enabled", "true") != "false"
+    ):
+        match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds", ""))
+        if match:
+            x1, y1, x2, y2 = map(int, match.groups())
+            print("TAP", (x1 + x2) // 2, (y1 + y2) // 2)
+            raise SystemExit(0)
+for node in root.iter("node"):
+    if node.attrib.get("enabled", "true") != "false" and node.attrib.get("text") in {"OK", "Connect", "Allow", "Continue"}:
         match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds", ""))
         if match:
             x1, y1, x2, y2 = map(int, match.groups())
@@ -1328,7 +1425,7 @@ app_uid = int(sys.argv[4])
 
 
 def network_blocks(source: str) -> list[str]:
-    matches = list(re.finditer(r"(?:^|\n)\s*NetworkAgentInfo\{", source))
+    matches = list(re.finditer(r"(?:^|\n)\s*NetworkAgentInfo(?:\{| |\[)", source))
     blocks = []
     for index, match in enumerate(matches):
         start = match.start()
@@ -1338,7 +1435,7 @@ def network_blocks(source: str) -> list[str]:
 
 
 def uid_in_ranges(block: str, uid: int) -> bool:
-    match = re.search(r"Uids:\s*<\{([^}]*)\}>", block, re.S)
+    match = re.search(r"Uids:\s*<[\{\[]([^}\]]*)[\}\]]>", block, re.S)
     if not match:
         return False
     for entry in match.group(1).split(","):
@@ -1365,7 +1462,12 @@ def owned_by_trajectory(block: str) -> bool:
 vpn_blocks = [
     block
     for block in network_blocks(text)
-    if "VPN" in block and ("ni{VPN CONNECTED" in block or "Transports:" in block)
+    if "VPN" in block and (
+        "CONNECTED" in block or
+        "Transports:" in block or
+        "TRANSPORT_VPN" in block or
+        "Capabilities:" in block
+    )
 ]
 trajectory_blocks = [block for block in vpn_blocks if owned_by_trajectory(block)]
 if not trajectory_blocks:
@@ -1402,6 +1504,21 @@ for block in trajectory_blocks:
 
 raise SystemExit(f"smoke probe UID {probe_uid} is not routed through the Trajectory VPN")
 PY
+}
+
+wait_for_vpn_network_active() {
+  local output="$1"
+  local pass
+  for pass in $(seq 1 20); do
+    if assert_vpn_network_active "${output%.txt}-${pass}.txt"; then
+      cp "${output%.txt}-${pass}.txt" "$output" 2>/dev/null || true
+      cp "${output%.txt}-${pass}-summary.txt" "${output%.txt}-summary.txt" 2>/dev/null || true
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Android VPN network did not become active for the smoke probe UID" >&2
+  return 1
 }
 
 assert_vpn_network_stopped() {
@@ -1547,7 +1664,7 @@ run_vpn_smoke() {
     if grep -Fq "VPN connected" "$artifact_dir/vpn_live_${pass}.xml" ||
       grep -Fq "status.phase.vpn_connected" "$artifact_dir/vpn_live_${pass}.xml"; then
       install_smoke_probe_apk
-      assert_vpn_network_active "$artifact_dir/vpn-connectivity.txt"
+      wait_for_vpn_network_active "$artifact_dir/vpn-connectivity.txt"
       run_vpn_probe_app "$http_fetch_url" "vpn_probe"
       adb shell am start -W -n "$activity" > "$artifact_dir/vpn-return-main.txt" 2>&1
       sleep 1

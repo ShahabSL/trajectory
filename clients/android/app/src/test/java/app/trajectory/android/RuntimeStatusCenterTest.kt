@@ -40,7 +40,7 @@ class RuntimeStatusCenterTest {
     @Test
     fun connectedVpnDoesNotDegradeOnNormalLocalSocksClose() {
         RuntimeStatusCenter.reset()
-        RuntimeStatusCenter.markVpnConnected()
+        RuntimeStatusCenter.markVpnConnectedForTest()
         RuntimeStatusCenter.observeRuntimeLine(
             RuntimeMode.VPN,
             profile(),
@@ -66,7 +66,7 @@ class RuntimeStatusCenterTest {
     @Test
     fun connectedVpnStillDegradesOnResolverFailure() {
         RuntimeStatusCenter.reset()
-        RuntimeStatusCenter.markVpnConnected()
+        RuntimeStatusCenter.markVpnConnectedForTest()
         RuntimeStatusCenter.observeRuntimeLine(
             RuntimeMode.VPN,
             profile(),

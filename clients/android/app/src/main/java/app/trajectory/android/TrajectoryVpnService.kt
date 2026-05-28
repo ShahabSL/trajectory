@@ -13,6 +13,7 @@ import android.os.IBinder
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class TrajectoryVpnService : VpnService() {
     private val controlExecutor = Executors.newSingleThreadExecutor()
@@ -121,11 +122,11 @@ class TrajectoryVpnService : VpnService() {
         RuntimeStatusCenter.markTunEstablished()
         startVpnForeground("VPN bridge starting via SOCKS 127.0.0.1:${profile.socksPort}")
         bridgeExecutor.execute {
+            val bridgeExited = AtomicBoolean(false)
             val readinessMarker = Thread {
                 try {
-                    Thread.sleep(750)
-                    if (running) {
-                        RuntimeStatusCenter.markVpnConnected()
+                    Thread.sleep(1_000)
+                    if (running && !requestedStop && !bridgeExited.get() && RuntimeStatusCenter.markVpnConnectedIfActive()) {
                         startVpnForeground("VPN connected via SOCKS 127.0.0.1:${profile.socksPort}")
                     }
                 } catch (_: InterruptedException) {
@@ -141,6 +142,8 @@ class TrajectoryVpnService : VpnService() {
                 profile.vpnMaxSessions,
                 profile.vpnIpv6Enabled,
             )
+            bridgeExited.set(true)
+            readinessMarker.interrupt()
             if (code != 0) {
                 android.util.Log.e("TrajectoryVpn", "tun2proxy bridge exited with code $code")
                 RuntimeStatusCenter.markFailed(
