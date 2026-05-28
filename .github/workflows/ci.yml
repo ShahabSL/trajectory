@@ -154,6 +154,10 @@ jobs:
         run: npx playwright install chromium
         working-directory: clients/desktop
 
+      - name: Remove macOS Setup Assistant before desktop smoke
+        if: runner.os == 'macOS'
+        run: scripts/ci_macos_remove_setup_assistant.sh
+
       - name: Smoke-test desktop UI
         run: npm run ui:smoke -- --preview "${{ runner.temp }}/desktop-ui"
         working-directory: clients/desktop
@@ -184,6 +188,10 @@ jobs:
           tar -C "$(dirname "$app_path")" \
             -czf "clients/desktop/src-tauri/target/release/bundle/macos/Trajectory_${{ matrix.target }}.app.tar.gz" \
             "$(basename "$app_path")"
+
+      - name: Remove macOS Setup Assistant before package smoke
+        if: runner.os == 'macOS'
+        run: scripts/ci_macos_remove_setup_assistant.sh
 
       - name: Smoke-test Tauri desktop package
         env:
