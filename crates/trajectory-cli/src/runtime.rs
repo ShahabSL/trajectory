@@ -2241,10 +2241,14 @@ impl AdmissionProbe {
             self.resolver,
             None,
             &packet,
-            resolver_admission_timeout(self.runtime.config.tcp_first_resolver_path()),
-            self.prefer_direct_tcp
-                || self.runtime.config.resolver_transport == ResolverTransportMode::Tcp,
-            false,
+            DnsSendOptions {
+                query_timeout: resolver_admission_timeout(
+                    self.runtime.config.tcp_first_resolver_path(),
+                ),
+                direct_tcp_first: self.prefer_direct_tcp
+                    || self.runtime.config.resolver_transport == ResolverTransportMode::Tcp,
+                use_frontier_short_header: false,
+            },
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -3955,11 +3959,20 @@ async fn send_dns_packet(
         resolver,
         class,
         packet,
-        query_timeout,
-        false,
-        use_frontier_short_header,
+        DnsSendOptions {
+            query_timeout,
+            direct_tcp_first: false,
+            use_frontier_short_header,
+        },
     )
     .await
+}
+
+#[derive(Clone, Copy)]
+struct DnsSendOptions {
+    query_timeout: Duration,
+    direct_tcp_first: bool,
+    use_frontier_short_header: bool,
 }
 
 async fn send_dns_packet_inner(
@@ -3968,12 +3981,10 @@ async fn send_dns_packet_inner(
     resolver: SocketAddr,
     class: Option<ClientSendClass>,
     packet: &Packet,
-    query_timeout: Duration,
-    direct_tcp_first: bool,
-    use_frontier_short_header: bool,
+    options: DnsSendOptions,
 ) -> Result<DnsPacketOutcome> {
     let config = &runtime.config;
-    let envelope = seal_client_packet(config, packet, use_frontier_short_header)?;
+    let envelope = seal_client_packet(config, packet, options.use_frontier_short_header)?;
     let qname = if config.mode == ClientMode::Frontier {
         envelope_to_compact_qname(&envelope, &config.domain)?
     } else {
@@ -4021,20 +4032,24 @@ async fn send_dns_packet_inner(
             }
         }
     }
-    let prefer_tcp = direct_tcp_first
+    let prefer_tcp = options.direct_tcp_first
         || match resolver_index {
             Some(index) => runtime.prefer_tcp_for_resolver(index, class).await,
             None => false,
         };
     let (response, transport) = if let Some(pool) = &runtime.tcp_pool {
         (
-            pool.query(resolver, &query, query_timeout).await?,
+            pool.query(resolver, &query, options.query_timeout).await?,
             DnsTransportOutcome::TcpProxy,
         )
     } else if prefer_tcp {
         match runtime
             .tcp_fallback_pool
-            .query(resolver, &query, query_timeout.max(PATH_RTO_MIN_TCP))
+            .query(
+                resolver,
+                &query,
+                options.query_timeout.max(PATH_RTO_MIN_TCP),
+            )
             .await
         {
             Ok(tcp_response) => {
@@ -4055,7 +4070,7 @@ async fn send_dns_packet_inner(
                 (
                     runtime
                         .udp_pool
-                        .query(resolver, &query, query_timeout)
+                        .query(resolver, &query, options.query_timeout)
                         .await?,
                     DnsTransportOutcome::UdpAfterPreferredTcpError,
                 )
@@ -4064,7 +4079,7 @@ async fn send_dns_packet_inner(
     } else {
         let response = match runtime
             .udp_pool
-            .query(resolver, &query, query_timeout)
+            .query(resolver, &query, options.query_timeout)
             .await
         {
             Ok(response) => response,
@@ -4078,7 +4093,11 @@ async fn send_dns_packet_inner(
                 eprintln!("resolver {resolver} UDP failed ({udp_error:#}); retrying over TCP");
                 match runtime
                     .tcp_fallback_pool
-                    .query(resolver, &query, query_timeout.max(PATH_RTO_MIN_TCP))
+                    .query(
+                        resolver,
+                        &query,
+                        options.query_timeout.max(PATH_RTO_MIN_TCP),
+                    )
                     .await
                 {
                     Ok(tcp_response) => {
@@ -4117,7 +4136,11 @@ async fn send_dns_packet_inner(
                 );
                 let tcp_response = runtime
                     .tcp_fallback_pool
-                    .query(resolver, &query, query_timeout.max(PATH_RTO_MIN_TCP))
+                    .query(
+                        resolver,
+                        &query,
+                        options.query_timeout.max(PATH_RTO_MIN_TCP),
+                    )
                     .await?;
                 return Ok(DnsPacketOutcome {
                     packet: open_dns_response(&config.access_key, &tcp_response)?,

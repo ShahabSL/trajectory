@@ -64,6 +64,13 @@ jobs:
           fi
           echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
 
+      - name: Verify release tag is on main
+        shell: bash
+        run: |
+          git fetch origin main --tags --force
+          tag_commit="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          git merge-base --is-ancestor "$tag_commit" origin/main
+
       - name: Check out release tag
         shell: bash
         run: |
@@ -120,6 +127,13 @@ jobs:
           fi
           echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
 
+      - name: Verify release tag is on main
+        shell: bash
+        run: |
+          git fetch origin main --tags --force
+          tag_commit="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          git merge-base --is-ancestor "$tag_commit" origin/main
+
       - name: Check out release tag
         shell: bash
         run: |
@@ -152,6 +166,25 @@ jobs:
         run: npm ci
         working-directory: clients/desktop
 
+      - name: Install desktop UI smoke browser
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+        working-directory: clients/desktop
+
+      - name: Smoke-test desktop UI
+        if: runner.os == 'Linux'
+        run: npm run ui:smoke -- "$RUNNER_TEMP/desktop-ui"
+        working-directory: clients/desktop
+
+      - name: Upload desktop release UI smoke artifacts
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-ui-smoke
+          path: ${{ runner.temp }}/desktop-ui
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Build Tauri desktop bundle
         run: npm run tauri:build
         working-directory: clients/desktop
@@ -166,6 +199,7 @@ jobs:
 
   android:
     runs-on: ubuntu-22.04
+    environment: trajectory-release-signing
 
     steps:
       - uses: actions/checkout@v5
@@ -187,6 +221,13 @@ jobs:
             exit 1
           fi
           echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
+
+      - name: Verify release tag is on main
+        shell: bash
+        run: |
+          git fetch origin main --tags --force
+          tag_commit="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          git merge-base --is-ancestor "$tag_commit" origin/main
 
       - name: Check out release tag
         shell: bash
@@ -211,6 +252,7 @@ jobs:
         run: rustup target add aarch64-linux-android x86_64-linux-android
 
       - name: Decode Android release signing key
+        id: android_signing
         shell: bash
         env:
           TRAJECTORY_ANDROID_KEYSTORE_BASE64: ${{ secrets.TRAJECTORY_ANDROID_KEYSTORE_BASE64 }}
@@ -239,16 +281,18 @@ jobs:
           mkdir -p "$signing_dir"
           printf '%s' "$TRAJECTORY_ANDROID_KEYSTORE_BASE64" | base64 --decode > "$signing_dir/release.jks"
           chmod 600 "$signing_dir/release.jks"
-          echo "TRAJECTORY_ANDROID_KEYSTORE_FILE=$signing_dir/release.jks" >> "$GITHUB_ENV"
-          echo "TRAJECTORY_ANDROID_KEYSTORE_PASSWORD=$TRAJECTORY_ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
-          echo "TRAJECTORY_ANDROID_KEY_ALIAS=$TRAJECTORY_ANDROID_KEY_ALIAS" >> "$GITHUB_ENV"
-          echo "TRAJECTORY_ANDROID_KEY_PASSWORD=$TRAJECTORY_ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
+          echo "keystore_file=$signing_dir/release.jks" >> "$GITHUB_OUTPUT"
 
       - name: Run Android JVM unit tests
         run: ./gradlew :app:testDebugUnitTest --no-daemon
         working-directory: clients/android
 
       - name: Build signed Android release APK
+        env:
+          TRAJECTORY_ANDROID_KEYSTORE_FILE: ${{ steps.android_signing.outputs.keystore_file }}
+          TRAJECTORY_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.TRAJECTORY_ANDROID_KEYSTORE_PASSWORD }}
+          TRAJECTORY_ANDROID_KEY_ALIAS: ${{ secrets.TRAJECTORY_ANDROID_KEY_ALIAS }}
+          TRAJECTORY_ANDROID_KEY_PASSWORD: ${{ secrets.TRAJECTORY_ANDROID_KEY_PASSWORD }}
         run: ./gradlew :app:assembleRelease --no-daemon
         working-directory: clients/android
 
@@ -258,6 +302,12 @@ jobs:
           test -f "$apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$apk"
           scripts/ci_android_vpn_static_checks.sh "$apk"
+
+      - name: Remove Android signing key before emulator smoke
+        if: always()
+        shell: bash
+        run: |
+          rm -f "${{ steps.android_signing.outputs.keystore_file }}"
 
       - name: Enable Android emulator KVM
         run: |
@@ -282,7 +332,7 @@ jobs:
         with:
           name: android-release-ui-smoke
           path: ${{ runner.temp }}/android-ui
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
 
       - name: Upload Android signed release APK
@@ -345,6 +395,13 @@ jobs:
           echo "RELEASE_DRAFT=$release_draft" >> "$GITHUB_ENV"
           echo "RELEASE_PRERELEASE=$release_prerelease" >> "$GITHUB_ENV"
 
+      - name: Verify release tag is on main
+        shell: bash
+        run: |
+          git fetch origin main --tags --force
+          tag_commit="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          git merge-base --is-ancestor "$tag_commit" origin/main
+
       - name: Check out release tag
         shell: bash
         run: |
@@ -361,14 +418,14 @@ jobs:
       - name: Download desktop release bundles
         uses: actions/download-artifact@v5
         with:
-          pattern: desktop-*
+          pattern: desktop-x86_64-*
           path: dist/release
           merge-multiple: true
 
       - name: Download Android release APK
         uses: actions/download-artifact@v5
         with:
-          pattern: android-*
+          pattern: android-release-apk
           path: dist/release
           merge-multiple: true
 

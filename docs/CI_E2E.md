@@ -108,3 +108,32 @@ installability, and basic launch/render behavior. They cannot prove user
 consent, OEM background behavior, always-on lockdown, DNS leaks, sleep/wake, or
 arbitrary app capture without a real device lab. Those tests must run on trusted
 device runners with secrets scoped to a protected environment.
+
+## Android Release Signing
+
+Create a second protected GitHub environment named:
+
+```text
+trajectory-release-signing
+```
+
+Required protection:
+
+- required reviewers enabled
+- deployment branch policy limited to `main` and release tags created from
+  reviewed `main` commits
+- signing secrets stored only as environment secrets
+
+Required environment secrets:
+
+```text
+TRAJECTORY_ANDROID_KEYSTORE_BASE64
+TRAJECTORY_ANDROID_KEYSTORE_PASSWORD
+TRAJECTORY_ANDROID_KEY_ALIAS
+TRAJECTORY_ANDROID_KEY_PASSWORD
+```
+
+The release workflow verifies the requested tag is reachable from `origin/main`,
+decodes the keystore into `$RUNNER_TEMP`, scopes signing passwords only to the
+Gradle assemble step, verifies the signed APK, deletes the keystore before the
+emulator smoke step, and uploads UI screenshots/XML as required artifacts.

@@ -53,6 +53,51 @@ const tabs: Array<{ id: TabId; label: string; icon: typeof Activity }> = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
+type TransportMode = TrajectoryProfile["transportMode"];
+
+const transportModes: Array<{
+  id: TransportMode;
+  label: string;
+  badge: string;
+  icon: typeof Activity;
+  summary: string;
+  experimental?: boolean;
+}> = [
+  {
+    id: "secure",
+    label: "Secure",
+    badge: "Default",
+    icon: Shield,
+    summary: "Conservative pacing and verification for the safest baseline.",
+  },
+  {
+    id: "velocity",
+    label: "Velocity",
+    badge: "Fast",
+    icon: Activity,
+    summary: "Aggressive scheduler for normal resolver cohorts and low latency.",
+  },
+  {
+    id: "resilient",
+    label: "Resilient",
+    badge: "Fallback",
+    icon: RadioTower,
+    summary: "Compatibility-first behavior for weak or restricted resolver paths.",
+  },
+  {
+    id: "frontier",
+    label: "Frontier",
+    badge: "Experimental",
+    icon: DatabaseZap,
+    summary: "Highest-ceiling profile for breakthrough testing across strong cohorts.",
+    experimental: true,
+  },
+];
+
+function modeDetails(mode: TransportMode) {
+  return transportModes.find((item) => item.id === mode) ?? transportModes[0];
+}
+
 const phaseLabels: Record<ConnectionPhase, string> = {
   disconnected: "Disconnected",
   starting: "Starting",
@@ -234,6 +279,7 @@ export default function App() {
                 key={tab.id}
                 className={activeTab === tab.id ? "nav-item active" : "nav-item"}
                 onClick={() => setActiveTab(tab.id)}
+                aria-current={activeTab === tab.id ? "page" : undefined}
               >
                 <Icon size={17} />
                 <span>{tab.label}</span>
@@ -251,8 +297,11 @@ export default function App() {
       <section className="workspace">
         <header className="topbar">
           <div>
-            <p className="eyeline">Active profile</p>
+            <p className="eyeline">Editing profile</p>
             <h1>{selectedProfile?.name ?? "No profile"}</h1>
+            {snapshot.activeProfileName && (
+              <p className="running-profile">Running: {snapshot.activeProfileName}</p>
+            )}
           </div>
           <div className="topbar-actions">
             <select
@@ -295,7 +344,7 @@ export default function App() {
         </header>
 
         {(uiError || snapshot.lastError || profileWarnings.length > 0) && (
-          <div className="notice">
+          <div className="notice" role="alert" aria-live="assertive">
             <AlertTriangle size={18} />
             <div>
               {uiError || snapshot.lastError || profileWarnings[0]}
@@ -374,11 +423,18 @@ function StatusView({
 }) {
   const socks = profile.socks.enabled ? `${profile.socks.host}:${profile.socks.port}` : "disabled";
   const http = profile.http.enabled ? `${profile.http.host}:${profile.http.port}` : "disabled";
+  const mode = modeDetails(profile.transportMode);
+  const runtimeReady = snapshot.phase === "connected";
+  const readySocks = runtimeReady && snapshot.socksEndpoint ? snapshot.socksEndpoint : undefined;
+  const readyHttp = runtimeReady && snapshot.httpEndpoint ? snapshot.httpEndpoint : undefined;
   return (
     <div className="content-grid">
       <section className="panel hero-panel">
         <div className="hero-copy">
-          <StatusPill phase={snapshot.phase} />
+          <div className="status-line">
+            <StatusPill phase={snapshot.phase} />
+            <ModeBadge mode={mode.id} />
+          </div>
           <h2>{phaseLabels[snapshot.phase]}</h2>
           <p>{snapshot.statusDetail ?? "Waiting for runtime status."}</p>
         </div>
@@ -391,24 +447,33 @@ function StatusView({
       </section>
 
       <section className="panel">
+        <SectionHeader icon={Activity} title="Connection Readiness" />
+        <ReadinessGrid snapshot={snapshot} profile={profile} />
+      </section>
+
+      <section className="panel">
         <SectionHeader icon={Wifi} title="Connect Apps" />
         <div className="endpoint-list">
           <EndpointRow
             label="SOCKS5"
-            value={socks}
-            command={`curl --socks5-hostname ${socks} https://ifconfig.me`}
+            value={readySocks ?? socks}
+            command={readySocks ? `curl --socks5-hostname ${readySocks} https://ifconfig.me` : undefined}
             onCopy={onCopy}
           />
           <EndpointRow
             label="HTTP"
-            value={http}
-            command={`curl -x http://${http} https://example.com`}
+            value={readyHttp ?? http}
+            command={readyHttp ? `curl -x http://${readyHttp} https://example.com` : undefined}
             onCopy={onCopy}
           />
           <EndpointRow
             label="Browser"
-            value="Manual proxy"
-            command={`Set HTTP proxy to ${http} and SOCKS proxy to ${socks}`}
+            value={runtimeReady ? "Manual proxy" : "Waiting for listeners"}
+            command={
+              runtimeReady
+                ? `Set HTTP proxy to ${readyHttp ?? http} and SOCKS proxy to ${readySocks ?? socks}`
+                : undefined
+            }
             onCopy={onCopy}
           />
         </div>
@@ -730,22 +795,13 @@ function SettingsView({
       <section className="panel">
         <SectionHeader icon={SlidersHorizontal} title="Transport Knobs" />
         <div className="form-grid">
-          <label>
+          <div className="wide">
             Client mode
-            <select
+            <ModeSelector
               value={draft.transportMode}
-              onChange={(event) =>
-                updateDraft({
-                  transportMode: event.target.value as TrajectoryProfile["transportMode"],
-                })
-              }
-            >
-              <option value="secure">Secure</option>
-              <option value="velocity">Velocity</option>
-              <option value="resilient">Resilient</option>
-              <option value="frontier">Frontier</option>
-            </select>
-          </label>
+              onChange={(transportMode) => updateDraft({ transportMode })}
+            />
+          </div>
           <label>
             Resolver transport
             <select
@@ -790,6 +846,106 @@ function SettingsView({
           Write resolver admission report while connecting
         </label>
       </section>
+    </div>
+  );
+}
+
+function ModeSelector({
+  value,
+  onChange,
+}: {
+  value: TransportMode;
+  onChange: (mode: TransportMode) => void;
+}) {
+  return (
+    <div className="mode-grid" role="radiogroup" aria-label="Client mode">
+      {transportModes.map((mode) => {
+        const Icon = mode.icon;
+        const selected = value === mode.id;
+        return (
+          <label
+            key={mode.id}
+            className={selected ? "mode-card selected" : "mode-card"}
+          >
+            <input
+              type="radio"
+              name="transport-mode"
+              value={mode.id}
+              checked={selected}
+              onChange={() => onChange(mode.id)}
+            />
+            <div className="mode-card-head">
+              <span className="mode-icon">
+                <Icon size={17} />
+              </span>
+              <div>
+                <strong>{mode.label}</strong>
+                <ModeBadge mode={mode.id} compact />
+              </div>
+            </div>
+            <p>{mode.summary}</p>
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+function ModeBadge({ mode, compact }: { mode: TransportMode; compact?: boolean }) {
+  const details = modeDetails(mode);
+  return (
+    <span className={details.experimental ? "mode-badge experimental" : "mode-badge"}>
+      {compact ? details.badge : `${details.label} ${details.badge}`}
+    </span>
+  );
+}
+
+function ReadinessGrid({
+  snapshot,
+  profile,
+}: {
+  snapshot: RuntimeSnapshot;
+  profile: TrajectoryProfile;
+}) {
+  const running = snapshot.phase !== "disconnected" && snapshot.phase !== "failed";
+  const socksReady = snapshot.phase === "connected" && Boolean(snapshot.socksEndpoint);
+  const httpRequired = profile.http.enabled;
+  const httpReady = !httpRequired || (snapshot.phase === "connected" && Boolean(snapshot.httpEndpoint));
+  const connected = snapshot.phase === "connected" && socksReady && httpReady;
+  const steps = [
+    {
+      label: "Profile",
+      value: running ? "validated" : "waiting",
+      ready: running,
+    },
+    {
+      label: "Resolver admission",
+      value: running ? "running" : `${profile.resolvers.length} configured`,
+      ready: connected,
+    },
+    {
+      label: "SOCKS listener",
+      value: snapshot.socksEndpoint ?? `${profile.socks.host}:${profile.socks.port}`,
+      ready: socksReady,
+    },
+    {
+      label: "HTTP listener",
+      value: httpRequired ? snapshot.httpEndpoint ?? `${profile.http.host}:${profile.http.port}` : "disabled",
+      ready: httpReady && connected,
+    },
+  ];
+
+  return (
+    <div className="readiness-grid">
+      {steps.map((step) => (
+        <div key={step.label} className={step.ready ? "readiness-step ready" : "readiness-step"}>
+          <span />
+          <div>
+            <strong>{step.label}</strong>
+            <small>{step.value}</small>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -882,7 +1038,7 @@ function EndpointRow({
 }: {
   label: string;
   value: string;
-  command: string;
+  command?: string;
   onCopy: (value: string) => void;
 }) {
   return (
@@ -891,8 +1047,13 @@ function EndpointRow({
         <strong>{label}</strong>
         <span>{value}</span>
       </div>
-      <code>{command}</code>
-      <button className="icon-button" aria-label={`Copy ${label}`} onClick={() => onCopy(command)}>
+      <code>{command ?? "Available after connection readiness is proven"}</code>
+      <button
+        className="icon-button"
+        aria-label={`Copy ${label}`}
+        disabled={!command}
+        onClick={() => command && onCopy(command)}
+      >
         <Copy size={15} />
       </button>
     </div>

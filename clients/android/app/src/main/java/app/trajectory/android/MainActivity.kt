@@ -33,8 +33,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
@@ -42,8 +44,8 @@ import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VpnKey
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -182,6 +184,47 @@ private enum class AndroidTab(val label: String, val icon: ImageVector) {
     DIAGNOSTICS("Diagnostics", Icons.Filled.BugReport),
 }
 
+private data class TransportModeOption(
+    val id: String,
+    val label: String,
+    val badge: String,
+    val summary: String,
+    val icon: ImageVector,
+    val experimental: Boolean = false,
+)
+
+private val transportModeOptions = listOf(
+    TransportModeOption(
+        id = "secure",
+        label = "Secure",
+        badge = "Default",
+        summary = "Conservative pacing and verification for the safest baseline.",
+        icon = Icons.Filled.Lock,
+    ),
+    TransportModeOption(
+        id = "velocity",
+        label = "Velocity",
+        badge = "Fast",
+        summary = "Aggressive scheduler for normal resolver cohorts and low latency.",
+        icon = Icons.Filled.Speed,
+    ),
+    TransportModeOption(
+        id = "resilient",
+        label = "Resilient",
+        badge = "Fallback",
+        summary = "Compatibility-first behavior for weak or restricted DNS paths.",
+        icon = Icons.Filled.NetworkCheck,
+    ),
+    TransportModeOption(
+        id = "frontier",
+        label = "Frontier",
+        badge = "Experimental",
+        summary = "Highest-ceiling profile for breakthrough testing across strong cohorts.",
+        icon = Icons.Filled.Explore,
+        experimental = true,
+    ),
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TrajectoryAndroidApp(
@@ -285,7 +328,7 @@ private fun TrajectoryAndroidApp(
                                 unselectedTextColor = TrajectoryColors.Muted,
                             ),
                             modifier = Modifier.semantics {
-                                contentDescription = "nav.${tab.label.lowercase()}"
+                                contentDescription = "${tab.label} tab"
                             },
                         )
                     }
@@ -437,10 +480,15 @@ private fun StatusCard(
             )
         }
         Spacer(Modifier.height(14.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatusChip("SOCKS", if (status.socksReady) "ready" else "waiting")
-            StatusChip("HTTP", if (status.httpReady) "ready" else "waiting")
-            StatusChip("DNS", resolverSummary(status, profile))
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                StatusChip("SOCKS", if (status.socksReady) "ready" else "waiting")
+                StatusChip("HTTP", if (status.httpReady) "ready" else "waiting")
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                StatusChip("DNS", resolverSummary(status, profile))
+                StatusChip("Mode", modeLabel(profile.transportMode))
+            }
         }
         AnimatedVisibility(notice != null || status.lastError != null || profileErrors.isNotEmpty()) {
             Column(
@@ -526,7 +574,11 @@ private fun RuntimeSteps(status: RuntimeStatusSnapshot) {
         CheckRow("Profile", status.phase != RuntimePhase.DISCONNECTED && status.phase != RuntimePhase.FAILED)
         CheckRow("Resolver admission", status.admittedResolvers > 0 || status.phase.ordinal > RuntimePhase.ADMITTING_RESOLVERS.ordinal)
         CheckRow("SOCKS listener", status.socksReady)
-        CheckRow("HTTP listener", status.httpReady)
+        if (status.mode == RuntimeMode.VPN) {
+            CheckRow("HTTP listener", true, "Optional")
+        } else {
+            CheckRow("HTTP listener", status.httpReady)
+        }
         CheckRow("Android TUN", status.tunReady)
         CheckRow("Packet bridge", status.bridgeReady)
     }
@@ -626,27 +678,10 @@ private fun ResolversScreen(
         }
         Spacer(Modifier.height(10.dp))
         Text("Profile", color = TrajectoryColors.Muted, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier
-                .padding(top = 6.dp)
-                .horizontalScroll(rememberScrollState()),
-        ) {
-            listOf("secure", "velocity", "resilient", "frontier").forEach { mode ->
-                FilterChip(
-                    selected = transportMode == mode,
-                    onClick = { onModeChange(mode) },
-                    label = { Text(mode.uppercase()) },
-                    shape = RoundedCornerShape(8.dp),
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = TrajectoryColors.Ink,
-                        selectedLabelColor = Color.White,
-                        containerColor = TrajectoryColors.Surface,
-                        labelColor = TrajectoryColors.Ink,
-                    ),
-                )
-            }
-        }
+        TransportModeSelector(
+            transportMode = transportMode,
+            onModeChange = onModeChange,
+        )
         AppTextField("Resolver SOCKS gate", resolverGate, "Optional, e.g. 127.0.0.1:11092", onGateChange, icon = Icons.Filled.Router)
         AppTextField("Cohort size", resolverCohortSize, "Auto", onCohortChange, icon = Icons.Filled.Tune)
         AppTextField("Minimum admitted", resolverAdmissionMin, "1", onAdmissionChange, icon = Icons.Filled.NetworkCheck)
@@ -669,6 +704,58 @@ private fun ResolversScreen(
             Text(
                 if (candidates > 0) "$admitted/$candidates admitted" else "Admission runs on connect",
                 color = TrajectoryColors.Muted,
+            )
+        }
+    }
+}
+
+@Composable
+private fun TransportModeSelector(
+    transportMode: String,
+    onModeChange: (String) -> Unit,
+) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier
+            .padding(top = 6.dp)
+            .fillMaxWidth(),
+    ) {
+        transportModeOptions.forEach { mode ->
+            val selected = transportMode == mode.id
+            FilterChip(
+                selected = selected,
+                onClick = { onModeChange(mode.id) },
+                label = {
+                    Column(Modifier.fillMaxWidth()) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(mode.icon, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(mode.label, fontWeight = FontWeight.Bold)
+                        }
+                        Text(
+                            mode.badge,
+                            color = if (selected) Color.White else if (mode.experimental) TrajectoryColors.WarningInk else TrajectoryColors.Muted,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            mode.summary,
+                            color = if (selected) Color.White else TrajectoryColors.Muted,
+                            fontSize = 11.sp,
+                            lineHeight = 14.sp,
+                        )
+                    }
+                },
+                shape = RoundedCornerShape(8.dp),
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = if (mode.experimental) TrajectoryColors.WarningInk else TrajectoryColors.Ink,
+                    selectedLabelColor = Color.White,
+                    containerColor = if (mode.experimental) TrajectoryColors.WarningSurface else TrajectoryColors.Surface,
+                    labelColor = TrajectoryColors.Ink,
+                ),
+                modifier = Modifier.semantics {
+                    contentDescription = "${mode.label} ${if (mode.experimental) "experimental " else ""}mode"
+                },
             )
         }
     }
@@ -753,20 +840,12 @@ private fun SectionTitle(icon: ImageVector, title: String) {
 
 @Composable
 private fun NavMark(icon: ImageVector, selected: Boolean) {
-    Box(
-        modifier = Modifier
-            .size(30.dp)
-            .clip(CircleShape)
-            .background(if (selected) TrajectoryColors.Ink else TrajectoryColors.Subtle),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            tint = if (selected) Color.White else TrajectoryColors.Ink,
-            modifier = Modifier.size(17.dp),
-        )
-    }
+    Icon(
+        icon,
+        contentDescription = null,
+        tint = if (selected) TrajectoryColors.Ink else TrajectoryColors.Muted,
+        modifier = Modifier.size(20.dp),
+    )
 }
 
 @Composable
@@ -787,15 +866,21 @@ private fun StatusDot(phase: RuntimePhase, working: Boolean) {
 
 @Composable
 private fun StatusChip(label: String, value: String) {
-    AssistChip(
-        onClick = {},
-        label = { Text("$label $value") },
-        shape = RoundedCornerShape(999.dp),
-    )
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(TrajectoryColors.Subtle)
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, color = TrajectoryColors.Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.width(5.dp))
+        Text(value, color = TrajectoryColors.Ink, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+    }
 }
 
 @Composable
-private fun CheckRow(label: String, done: Boolean) {
+private fun CheckRow(label: String, done: Boolean, stateLabel: String = if (done) "Ready" else "Pending") {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -810,7 +895,7 @@ private fun CheckRow(label: String, done: Boolean) {
         )
         Spacer(Modifier.width(10.dp))
         Text(label, modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
-        Text(if (done) "Ready" else "Pending", color = TrajectoryColors.Muted)
+        Text(stateLabel, color = TrajectoryColors.Muted)
     }
 }
 
@@ -906,6 +991,11 @@ private fun resolverSummary(status: RuntimeStatusSnapshot, profile: ClientProfil
         profile.resolvers.isNotEmpty() -> profile.resolvers.size.toString()
         else -> "missing"
     }
+
+private fun modeLabel(mode: String): String =
+    transportModeOptions.find { it.id == mode }?.let { option ->
+        if (option.experimental) "${option.label} experimental" else option.label
+    } ?: mode
 
 private fun looksLikeResolver(value: String): Boolean {
     val host = value.substringBefore(":")

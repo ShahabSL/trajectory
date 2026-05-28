@@ -132,7 +132,7 @@ pub fn qname_to_envelope(qname: &str, domain: &str) -> Result<Vec<u8>> {
         encoded.extend(first_chars);
         Some(remainder)
     } else if let Some(first_payload) = first_label.strip_prefix('u') {
-        encoded.extend(first_payload.chars());
+        encoded.push_str(first_payload);
         None
     } else {
         bail!("tunnel label missing known prefix");
@@ -663,10 +663,10 @@ mod tests {
             assert_eq!(qname_to_envelope(&qname, domain).unwrap(), ones);
         }
 
-        envelope_to_compact_qname(&vec![0u8; 155], domain).unwrap();
-        assert!(envelope_to_compact_qname(&vec![0u8; 156], domain).is_err());
-        envelope_to_compact_qname(&vec![0u8; 150], "tun.example.com").unwrap();
-        assert!(envelope_to_compact_qname(&vec![0u8; 151], "tun.example.com").is_err());
+        envelope_to_compact_qname(&[0u8; 155], domain).unwrap();
+        assert!(envelope_to_compact_qname(&[0u8; 156], domain).is_err());
+        envelope_to_compact_qname(&[0u8; 150], "tun.example.com").unwrap();
+        assert!(envelope_to_compact_qname(&[0u8; 151], "tun.example.com").is_err());
     }
 
     #[test]

@@ -68,6 +68,14 @@ Tabs:
 - Diagnostics: logs, counters, scrubbed export
 - Settings: launch at login, updates, advanced transport knobs
 
+Transport modes are user intent contracts:
+
+- `secure`: default conservative baseline
+- `velocity`: stable fast profile for normal networks
+- `resilient`: compatibility-first profile for difficult networks
+- `frontier`: experimental highest-ceiling profile, available in clients but
+  visually separated from stable modes
+
 Default safety:
 
 - bind to `127.0.0.1`
@@ -90,6 +98,8 @@ Desktop proxy MVP:
 - engine lifecycle tests: start, stop, reconnect, invalid key
 - proxy tests for SOCKS5 and HTTP CONNECT
 - Playwright UI tests for all tabs and form states
+- desktop browser-preview smoke tests that render Status/Settings, select
+  Frontier, and upload screenshots
 - OS build matrix: Windows, macOS, Linux
 
 VPN clients:
@@ -98,7 +108,7 @@ VPN clients:
 - Android manifest/static checks for `VpnService`, foreground-service type,
   native bridge packaging, and consent flow
 - Android emulator UI smoke tests that install the APK, launch the main screen,
-  assert the UI tree, and upload screenshots
+  assert the UI tree, select Frontier experimental mode, and upload screenshots
 - platform-specific simulator/device tests
 - permission/entitlement validation
 - route table tests

@@ -140,6 +140,13 @@ button:disabled {
   line-height: 1.15;
 }
 
+.running-profile {
+  margin: 4px 0 0;
+  color: #4b5563;
+  font-size: 13px;
+  font-weight: 650;
+}
+
 .eyeline {
   margin: 0;
   text-transform: uppercase;
@@ -176,6 +183,13 @@ select:focus,
 textarea:focus {
   border-color: #111827;
   box-shadow: 0 0 0 3px rgb(17 24 39 / 0.1);
+}
+
+button:focus-visible,
+.mode-card:focus-within,
+.switch:focus-within {
+  outline: 3px solid rgb(17 24 39 / 0.2);
+  outline-offset: 2px;
 }
 
 .button {
@@ -268,6 +282,13 @@ textarea:focus {
   line-height: 1.55;
 }
 
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -298,6 +319,28 @@ textarea:focus {
 .status-pill.neutral {
   background: #e5e7eb;
   color: #374151;
+}
+
+.mode-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 24px;
+  border: 1px solid #d1d5db;
+  border-radius: 999px;
+  background: #f9fafb;
+  color: #374151;
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.mode-badge.experimental {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #9a3412;
 }
 
 .metric-grid {
@@ -435,6 +478,139 @@ pre {
 
 .form-grid .wide {
   grid-column: 1 / -1;
+}
+
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.mode-card {
+  display: grid;
+  gap: 10px;
+  min-height: 132px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #111827;
+  font-size: 14px;
+  font-weight: 650;
+  padding: 13px;
+  text-transform: none;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.form-grid .mode-card {
+  color: #111827;
+  font-size: 14px;
+  font-weight: 650;
+  text-transform: none;
+}
+
+.mode-card:hover {
+  border-color: #9ca3af;
+  background: #f9fafb;
+}
+
+.mode-card.selected {
+  border-color: #111827;
+  background: #f9fafb;
+  box-shadow: inset 0 0 0 1px #111827;
+}
+
+.mode-card input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mode-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.mode-card-head > div {
+  display: grid;
+  gap: 6px;
+}
+
+.mode-icon {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #111827;
+}
+
+.mode-card strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+.mode-card p {
+  margin: 0;
+  color: #4b5563;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.readiness-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.readiness-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-height: 72px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+  padding: 12px;
+}
+
+.readiness-step > span {
+  width: 11px;
+  height: 11px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: #d1d5db;
+}
+
+.readiness-step.ready > span {
+  background: #16a34a;
+}
+
+.readiness-step strong,
+.readiness-step small {
+  display: block;
+}
+
+.readiness-step strong {
+  color: #111827;
+  font-size: 13px;
+}
+
+.readiness-step small {
+  overflow: hidden;
+  color: #6b7280;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .button-row {
@@ -602,6 +778,8 @@ pre {
   .content-grid.two-column,
   .hero-panel,
   .listener-grid,
+  .mode-grid,
+  .readiness-grid,
   .capability-grid {
     grid-template-columns: 1fr;
   }

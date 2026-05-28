@@ -24,6 +24,8 @@ exposes local SOCKS and HTTP proxy ports on `127.0.0.1`.
 - HTTP listener on `127.0.0.1:7001`
 - resolver list and optional resolver SOCKS gate
 - access key passed through `TRAJECTORY_ACCESS_KEY`, not argv
+- transport mode picker with `secure`, `velocity`, `resilient`, and
+  `frontier`; the Android UI labels `frontier` as experimental
 
 ## What Is Not Claimed Yet
 
@@ -35,6 +37,10 @@ Android VPN mode is real but still intentionally conservative:
   is tested on real devices
 - OEM background restrictions, sleep/wake, network handoff, and Play policy
   review still require device-lab validation
+
+`Frontier` is present in the Android client for experimental performance work.
+It should be treated as a power-user mode until resolver cohort admission and
+scheduler behavior are stable across weak and strong resolver sets.
 
 ## Build
 

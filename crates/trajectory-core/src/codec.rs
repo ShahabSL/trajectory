@@ -1390,7 +1390,7 @@ mod tests {
         let mut legacy = vec![VERSION, PACKET_FLAG_COMPACT_DATA | PACKET_FLAG_COMPACT_FIN];
         put_var_u64(&mut legacy, 1);
         put_var_u64(&mut legacy, 16_384);
-        legacy.extend_from_slice(&vec![7; 123]);
+        legacy.extend_from_slice(&[7; 123]);
 
         assert_eq!(
             decode_packet(

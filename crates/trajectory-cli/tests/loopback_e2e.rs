@@ -402,6 +402,71 @@ async fn raw_tcp_stream_roundtrips_through_dns_udp() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn all_client_modes_echo_through_dns_udp() {
+    let key = ClientAccessKey::generate();
+    let target_addr = free_tcp_addr();
+    let dns_addr = free_udp_addr();
+    let domain = "tun.example.test".to_string();
+
+    let echo = spawn_echo_target(target_addr).await;
+
+    let mut registry = HashMap::new();
+    registry.insert(key.client_id, key.clone());
+    let server = tokio::spawn(run_server(ServerConfig {
+        bind: dns_addr,
+        domain: domain.clone(),
+        target: target_addr,
+        target_mode: ServerTargetMode::Tcp,
+        authorized_clients: Arc::new(registry),
+    }));
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    for mode in [
+        ClientMode::Secure,
+        ClientMode::Velocity,
+        ClientMode::Resilient,
+        ClientMode::Frontier,
+    ] {
+        let local_addr = free_tcp_addr();
+        let client = tokio::spawn(run_client(ClientConfig {
+            listen: local_addr,
+            socks_listen: None,
+            http_listen: None,
+            resolvers: vec![dns_addr],
+            domain: domain.clone(),
+            access_key: key.clone(),
+            resolver_socks_proxy: None,
+            resolver_transport: ResolverTransportMode::Auto,
+            poll_interval: Duration::from_millis(5),
+            dns_max_payload: 1232,
+            admission_report: None,
+            resolver_cohort_size: None,
+            resolver_admission_min: 1,
+            mode,
+        }));
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut app = connect_with_retry(local_addr, Duration::from_secs(30)).await;
+        let payload = format!("trajectory {mode:?} loopback e2e payload").into_bytes();
+        app.write_all(&payload).await.expect("write app payload");
+
+        let mut got = vec![0u8; payload.len()];
+        timeout(Duration::from_secs(10), app.read_exact(&mut got))
+            .await
+            .expect("read echoed payload before timeout")
+            .expect("read echoed payload");
+        assert_eq!(got, payload, "mode {mode:?}");
+
+        client.abort();
+    }
+
+    server.abort();
+    echo.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn socks_handshake_survives_dns_chunking() {
     let key = ClientAccessKey::generate();
     let target_addr = free_tcp_addr();

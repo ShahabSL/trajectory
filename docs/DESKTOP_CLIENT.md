@@ -10,6 +10,8 @@ environment, and exposes local SOCKS5 and HTTP proxy endpoints.
 - Windows, macOS, and Linux desktop shell build path
 - profile editing for domain, access key, resolvers, resolver file, resolver
   SOCKS gate, DNS payload, and admission controls
+- stable `secure`, `velocity`, and `resilient` transport modes plus
+  `frontier` as an explicit experimental mode in Advanced/Settings UI
 - local optimized SOCKS5 listener through `--socks-listen`
 - local HTTP proxy listener through `--http-listen`
 - connect/disconnect lifecycle for `trajectory-client`
@@ -56,6 +58,11 @@ access keys in the OS credential store. Paste your tunnel domain and access key
 in the Profiles tab, verify resolvers in the Resolvers tab, then connect from
 the top bar.
 
+`Frontier` is intentionally available for power users and breakthrough testing,
+but the UI labels it experimental. Use `Velocity` when you want the stable fast
+profile; use `Frontier` when you accept cohort-sensitive behavior while testing
+the highest-ceiling transport profile.
+
 ## Browser Preview
 
 For UI-only development without starting the Rust controller:
@@ -93,6 +100,7 @@ Use `--resolver-file /path/to/dnses.txt` and `--resolver-socks-proxy
 ```sh
 npm --prefix clients/desktop ci
 npm --prefix clients/desktop run build
+npm --prefix clients/desktop run ui:smoke
 npm --prefix clients/desktop run tauri:check
 npm --prefix clients/desktop run tauri:build
 ```
