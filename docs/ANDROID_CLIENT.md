@@ -90,8 +90,9 @@ PATH="$PWD/.tooling/android-sdk/platform-tools:$PATH" \
 
 The CI smoke installs the APK, resolves and launches the activity, captures UI
 trees and screenshots for every tab, scrolls until lower controls such as
-`Check DNS list` are visible, selects `Frontier`, and fails on Android
-crash/ANR dialogs or `AndroidRuntime` crashes.
+`Check DNS list` are visible, selects `Frontier`, runs the packaged
+`libtrajectory_client.so --help`, applies screenshot visual-density checks, and
+fails on Android crash/ANR dialogs or `AndroidRuntime` crashes.
 
 ## Product Boundary
 

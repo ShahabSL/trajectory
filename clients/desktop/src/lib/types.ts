@@ -76,4 +76,5 @@ export interface DesktopApi {
   enableSystemProxy(profileId: string): Promise<RuntimeSnapshot>;
   disableSystemProxy(): Promise<RuntimeSnapshot>;
   markFrontendReady(): Promise<void>;
+  markSmokeStateReady(): Promise<void>;
 }

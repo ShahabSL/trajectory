@@ -100,8 +100,9 @@ Desktop proxy MVP:
 - Playwright UI tests for all tabs and form states
 - desktop browser-preview smoke tests that render Status/Settings, select
   Frontier, and upload screenshots
-- desktop packaged smoke tests that launch the real Tauri bundle and require a
-  frontend readiness callback from the packaged backend
+- desktop packaged smoke tests that inspect installable artifacts, launch the
+  real Tauri bundle/AppImage/MSI-extracted app where the platform allows it, and
+  require frontend plus backend state readiness callbacks
 - OS build matrix: Windows, macOS, Linux
 
 VPN clients:
@@ -111,7 +112,8 @@ VPN clients:
   native bridge packaging, and consent flow
 - Android emulator UI smoke tests that install the APK, launch the main screen,
   assert the UI tree, scroll to lower controls, select Frontier experimental mode,
-  and upload screenshots
+  run the packaged native sidecar with `--help`, apply screenshot visual-density
+  checks, and upload screenshots
 - platform-specific simulator/device tests
 - permission/entitlement validation
 - route table tests
@@ -121,10 +123,14 @@ VPN clients:
 
 Release gates:
 
-- packaged CLI archives are extracted and run through a local DNS loopback
-- desktop bundles must pass UI preview smoke plus packaged frontend readiness
-- Android debug and signed release APKs must install and render on emulator CI
-- release assets must match the expected set and the merged SHA256 manifest
+- packaged CLI archives are extracted and run through raw TCP, SOCKS5, and HTTP
+  CONNECT loopbacks
+- desktop bundles must pass UI preview smoke plus packaged frontend/backend
+  readiness from the distributable app
+- Android debug and signed release APKs must install, run the sidecar, and render
+  visually nonblank screens on emulator CI
+- release assets must match the expected set, per-target SHA256 manifests, and
+  the merged SHA256 manifest
 - no crash on missing server, wrong key, dead resolver, network loss
 - LAN sharing disabled by default
 - all proxy modes pass e2e against a live protected test server

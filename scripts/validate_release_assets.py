@@ -134,6 +134,7 @@ def main() -> None:
 
     if merged_manifests:
         verify_merged_checksums(merged_manifests[0], expected_assets, failures)
+    verify_all_checksum_manifests(files, failures)
     verify_asset_structures(expected_assets, args.release_tag, failures)
 
     if failures:
@@ -193,6 +194,31 @@ def verify_merged_checksums(
         expected = checksums.get(asset.name)
         if expected and actual != expected:
             failures.append(f"checksum mismatch for {asset.name}: expected {expected}, got {actual}")
+
+
+def verify_all_checksum_manifests(files: list[Path], failures: list[str]) -> None:
+    by_name = {path.name: path for path in files}
+    manifests = sorted(path for path in files if path.name.endswith("SHA256SUMS.txt"))
+    for manifest in manifests:
+        for line in manifest.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            parts = stripped.split(None, 1)
+            if len(parts) != 2:
+                failures.append(f"malformed checksum line in {manifest.name}: {line}")
+                continue
+            expected, filename = parts
+            asset_name = Path(filename).name
+            asset = by_name.get(asset_name)
+            if asset is None:
+                failures.append(f"{manifest.name} references missing asset: {asset_name}")
+                continue
+            actual = sha256(asset)
+            if actual != expected:
+                failures.append(
+                    f"checksum mismatch for {asset_name} in {manifest.name}: expected {expected}, got {actual}"
+                )
 
 
 def verify_asset_structures(

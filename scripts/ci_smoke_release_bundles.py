@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import socket
@@ -33,6 +34,41 @@ def archive_paths(artifact_dir: Path) -> list[Path]:
             *artifact_dir.glob("trajectory-v*-cli.zip"),
         ]
     )
+
+
+def checksum_paths(artifact_dir: Path) -> list[Path]:
+    return sorted(artifact_dir.glob("trajectory-v*-SHA256SUMS.txt"))
+
+
+def verify_checksum_manifests(artifact_dir: Path) -> None:
+    manifests = checksum_paths(artifact_dir)
+    if not manifests:
+        raise SystemExit(f"no per-target checksum manifests found in {artifact_dir}")
+    for manifest in manifests:
+        for line in manifest.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            parts = stripped.split(None, 1)
+            if len(parts) != 2:
+                raise SystemExit(f"malformed checksum line in {manifest}: {line}")
+            expected, filename = parts
+            asset = artifact_dir / Path(filename).name
+            if not asset.exists():
+                raise SystemExit(f"{manifest.name} references missing asset {asset.name}")
+            actual = sha256(asset)
+            if actual != expected:
+                raise SystemExit(
+                    f"{asset.name} checksum mismatch in {manifest.name}: expected {expected}, got {actual}"
+                )
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def extract_archive(archive: Path, destination: Path) -> None:
@@ -234,8 +270,139 @@ def smoke_loopback(binaries: dict[str, Path], work_dir: Path) -> None:
         echo_thread.join(timeout=1)
 
 
+def smoke_proxy_modes(binaries: dict[str, Path], work_dir: Path) -> None:
+    client_db = work_dir / "clients-proxy.json"
+    access_key = create_access_key(binaries["trajectory-admin"], client_db)
+    domain = "t.bundle-proxy-smoke"
+    dns_port = free_port()
+    raw_port = free_port()
+    socks_port = free_port()
+    http_port = free_port()
+    target_port = free_port()
+    echo_stop, echo_thread = start_echo_server(("127.0.0.1", target_port))
+    server = None
+    client = None
+    try:
+        server = subprocess.Popen(
+            [
+                str(binaries["trajectory-server"]),
+                "--domain",
+                domain,
+                "--client-db",
+                str(client_db),
+                "--bind",
+                "127.0.0.1",
+                "--dns-listen-port",
+                str(dns_port),
+                "--target-address",
+                "socks5-direct",
+            ],
+            cwd=work_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 25
+        client = subprocess.Popen(
+            [
+                str(binaries["trajectory-client"]),
+                "--listen",
+                f"127.0.0.1:{raw_port}",
+                "--socks-listen",
+                f"127.0.0.1:{socks_port}",
+                "--http-listen",
+                f"127.0.0.1:{http_port}",
+                "--domain",
+                domain,
+                "--access-key",
+                access_key,
+                "--resolver",
+                f"127.0.0.1:{dns_port}",
+                "--resolver-transport",
+                "udp",
+                "--mode",
+                "velocity",
+                "--resolver-admission-min",
+                "1",
+            ],
+            cwd=work_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ, "RUST_BACKTRACE": "1"},
+        )
+        wait_for_tcp(("127.0.0.1", socks_port), deadline)
+        wait_for_tcp(("127.0.0.1", http_port), deadline)
+        smoke_socks5_connect(("127.0.0.1", socks_port), ("127.0.0.1", target_port))
+        smoke_http_connect(("127.0.0.1", http_port), ("127.0.0.1", target_port))
+    except Exception as error:
+        details = []
+        if server:
+            details.append("server " + process_output(server))
+        if client:
+            details.append("client " + process_output(client))
+        raise RuntimeError(f"packaged proxy-mode smoke failed: {error}\n" + "\n".join(details))
+    finally:
+        terminate(client)
+        terminate(server)
+        echo_stop.set()
+        echo_thread.join(timeout=1)
+
+
+def smoke_socks5_connect(proxy: tuple[str, int], target: tuple[str, int]) -> None:
+    payload = b"trajectory packaged socks smoke\n"
+    host = socket.inet_aton(target[0])
+    port = target[1].to_bytes(2, "big")
+    with socket.create_connection(proxy, timeout=10) as stream:
+        stream.settimeout(10)
+        stream.sendall(b"\x05\x01\x00")
+        if stream.recv(2) != b"\x05\x00":
+            raise RuntimeError("SOCKS5 proxy did not accept no-auth greeting")
+        stream.sendall(b"\x05\x01\x00\x01" + host + port)
+        reply = stream.recv(10)
+        if len(reply) < 2 or reply[1] != 0x00:
+            raise RuntimeError(f"SOCKS5 CONNECT failed with reply {reply!r}")
+        stream.sendall(payload)
+        received = stream.recv(len(payload))
+        if received != payload:
+            raise RuntimeError(f"SOCKS5 echo mismatch: {received!r}")
+
+
+def smoke_http_connect(proxy: tuple[str, int], target: tuple[str, int]) -> None:
+    payload = b"trajectory packaged http connect smoke\n"
+    with socket.create_connection(proxy, timeout=10) as stream:
+        stream.settimeout(10)
+        stream.sendall(
+            (
+                f"CONNECT {target[0]}:{target[1]} HTTP/1.1\r\n"
+                f"Host: {target[0]}:{target[1]}\r\n"
+                "Proxy-Connection: keep-alive\r\n\r\n"
+            ).encode("ascii")
+        )
+        header = read_until(stream, b"\r\n\r\n", 4096)
+        if not header.startswith(b"HTTP/1.1 200"):
+            raise RuntimeError(f"HTTP CONNECT failed with response {header!r}")
+        stream.sendall(payload)
+        received = stream.recv(len(payload))
+        if received != payload:
+            raise RuntimeError(f"HTTP CONNECT echo mismatch: {received!r}")
+
+
+def read_until(stream: socket.socket, needle: bytes, limit: int) -> bytes:
+    data = b""
+    while needle not in data:
+        chunk = stream.recv(512)
+        if not chunk:
+            break
+        data += chunk
+        if len(data) > limit:
+            raise RuntimeError(f"response exceeded {limit} bytes before {needle!r}")
+    return data
+
+
 def main() -> None:
     artifact_dir = Path(parse_args().artifact_dir).resolve()
+    verify_checksum_manifests(artifact_dir)
     archives = archive_paths(artifact_dir)
     if not archives:
         raise SystemExit(f"no CLI release archives found in {artifact_dir}")
@@ -251,6 +418,7 @@ def main() -> None:
             for binary_name in EXPECTED_BINARIES:
                 smoke_help(binaries[binary_name])
             smoke_loopback(binaries, extract_dir)
+            smoke_proxy_modes(binaries, extract_dir)
             print(f"smoked {archive.name}")
 
 

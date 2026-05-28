@@ -32,6 +32,46 @@ install_apk() {
   return 1
 }
 
+run_android_sidecar_help() {
+  local package_dump="$artifact_dir/package-after-install.txt"
+  local native_dir
+  local primary_abi
+  local binary
+  timeout 10s adb shell dumpsys package "$package_name" > "$package_dump"
+  native_dir="$(
+    tr -d '\r' < "$package_dump" |
+      awk '
+        /nativeLibraryDir=/ || /legacyNativeLibraryDir=/ {
+          value=$0
+          sub(/^[^=]*=/, "", value)
+          sub(/^[[:space:]]+/, "", value)
+          print value
+          exit
+        }
+      '
+  )"
+  if [[ -z "$native_dir" ]]; then
+    echo "could not find nativeLibraryDir for $package_name" >&2
+    return 1
+  fi
+  primary_abi="$(
+    tr -d '\r' < "$package_dump" |
+      awk '/primaryCpuAbi=/ {
+        value=$0
+        sub(/^[^=]*=/, "", value)
+        sub(/^[[:space:]]+/, "", value)
+        print value
+        exit
+      }'
+  )"
+  binary="$native_dir/libtrajectory_client.so"
+  if ! adb shell "test -x '$binary'" >/dev/null 2>&1 && [[ -n "$primary_abi" && "$primary_abi" != "null" ]]; then
+    binary="$native_dir/$primary_abi/libtrajectory_client.so"
+  fi
+  adb shell "$binary" --help > "$artifact_dir/native-sidecar-help.txt" 2>&1
+  grep -Fq "Usage: trajectory-client" "$artifact_dir/native-sidecar-help.txt"
+}
+
 record_failure_artifacts() {
   set +e
   timeout 10s adb logcat -d > "$artifact_dir/logcat.txt" 2>/dev/null
@@ -56,6 +96,7 @@ adb wait-for-device
 wait_for_boot_completed
 adb uninstall "$package_name" >/dev/null 2>&1 || true
 install_apk
+run_android_sidecar_help
 if adb shell pm grant "$package_name" android.permission.POST_NOTIFICATIONS > "$artifact_dir/notification-permission.txt" 2>&1; then
   echo "POST_NOTIFICATIONS granted by smoke harness" >> "$artifact_dir/notification-permission.txt"
 else
@@ -100,7 +141,102 @@ dump_ui_tree_raw() {
 
 capture_screenshot() {
   local output="$1"
+  local raw="${output%.png}.raw-screencap"
+  local visual_report="${output%.png}.visual.txt"
+  timeout 20s adb exec-out screencap > "$raw"
   timeout 20s adb exec-out screencap -p > "$output"
+  python3 - "$raw" "$visual_report" <<'PY'
+import struct
+import sys
+from pathlib import Path
+
+raw_path = Path(sys.argv[1])
+report_path = Path(sys.argv[2])
+data = raw_path.read_bytes()
+if len(data) < 12:
+    raise SystemExit("raw screencap is too short")
+
+width, height, pixel_format = struct.unpack_from("<III", data, 0)
+if width <= 0 or height <= 0 or width > 10000 or height > 10000:
+    raise SystemExit(f"invalid screencap dimensions: {width}x{height}")
+
+payload = data[12:]
+pixels = width * height
+if pixels == 0:
+    raise SystemExit("screencap contained zero pixels")
+bytes_per_pixel = len(payload) // pixels
+if bytes_per_pixel < 3:
+    raise SystemExit(
+        f"unsupported screencap format={pixel_format} bytes_per_pixel={bytes_per_pixel}"
+    )
+
+step = max(1, pixels // 50000)
+sampled = 0
+non_background = 0
+ink = 0
+edges = 0
+min_luma = 255
+max_luma = 0
+previous_luma = None
+buckets: set[tuple[int, int, int]] = set()
+
+for index in range(0, pixels, step):
+    y = index // width
+    if y < height * 0.05 or y > height * 0.92:
+        continue
+    offset = index * bytes_per_pixel
+    if offset + 2 >= len(payload):
+        break
+    red, green, blue = payload[offset], payload[offset + 1], payload[offset + 2]
+    luma = int((red * 299 + green * 587 + blue * 114) / 1000)
+    chroma = max(red, green, blue) - min(red, green, blue)
+    sampled += 1
+    min_luma = min(min_luma, luma)
+    max_luma = max(max_luma, luma)
+    if luma < 242 or chroma > 8:
+        non_background += 1
+    if luma < 115:
+        ink += 1
+    if previous_luma is not None and abs(luma - previous_luma) > 22:
+        edges += 1
+    previous_luma = luma
+    buckets.add((red // 32, green // 32, blue // 32))
+
+if sampled < 1000:
+    raise SystemExit(f"not enough visual samples: {sampled}")
+
+non_background_ratio = non_background / sampled
+ink_ratio = ink / sampled
+edge_ratio = edges / max(1, sampled - 1)
+contrast = max_luma - min_luma
+report = (
+    f"width={width}\n"
+    f"height={height}\n"
+    f"format={pixel_format}\n"
+    f"sampled={sampled}\n"
+    f"non_background_ratio={non_background_ratio:.5f}\n"
+    f"ink_ratio={ink_ratio:.5f}\n"
+    f"edge_ratio={edge_ratio:.5f}\n"
+    f"contrast={contrast}\n"
+    f"color_buckets={len(buckets)}\n"
+)
+report_path.write_text(report, encoding="utf-8")
+
+failures = []
+if contrast < 35:
+    failures.append(f"contrast too low ({contrast})")
+if non_background_ratio < 0.015:
+    failures.append(f"non-background pixel ratio too low ({non_background_ratio:.5f})")
+if ink_ratio < 0.001:
+    failures.append(f"ink pixel ratio too low ({ink_ratio:.5f})")
+if edge_ratio < 0.0005:
+    failures.append(f"edge ratio too low ({edge_ratio:.5f})")
+if len(buckets) < 6:
+    failures.append(f"too few color buckets ({len(buckets)})")
+if failures:
+    raise SystemExit("; ".join(failures))
+PY
+  rm -f "$raw"
 }
 
 dump_screen() {

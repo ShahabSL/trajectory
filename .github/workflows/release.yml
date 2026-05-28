@@ -172,10 +172,18 @@ jobs:
             wget \
             file \
             xvfb \
+            rpm \
+            cpio \
             libxdo-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev
+
+      - name: Assert desktop target matches runner
+        shell: bash
+        run: |
+          host="$(rustc -vV | awk '/host:/ {print $2}')"
+          test "$host" = "${{ matrix.target }}"
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -395,12 +403,40 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
           script: scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/android-ui"
 
+      - name: Smoke-test signed Android API 33 compact UI
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          target: google_apis
+          arch: x86_64
+          profile: pixel
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
+          script: |
+            adb shell wm size 720x1280
+            adb shell settings put system font_scale 1.25
+            scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/android-ui-api33"
+
+      - name: Smoke-test signed Android min-SDK-era UI
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 28
+          target: google_apis
+          arch: x86_64
+          profile: pixel
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
+          script: scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/android-ui-api28"
+
       - name: Upload Android release UI smoke artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: android-release-ui-smoke
-          path: ${{ runner.temp }}/android-ui
+          path: |
+            ${{ runner.temp }}/android-ui
+            ${{ runner.temp }}/android-ui-api33
+            ${{ runner.temp }}/android-ui-api28
           if-no-files-found: error
           retention-days: 14
 
@@ -510,6 +546,12 @@ jobs:
           path: dist/release
           merge-multiple: true
 
+      - name: Set up Android SDK for publish validation
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android publish validation tools
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
       - name: Merge checksum manifests
         shell: bash
         run: |
@@ -520,6 +562,10 @@ jobs:
       - name: Validate release asset set
         shell: bash
         run: python scripts/validate_release_assets.py dist/release --release-tag "$RELEASE_TAG"
+
+      - name: Validate Android release APK metadata and signature
+        shell: bash
+        run: scripts/validate_android_release_apk.sh "dist/release/trajectory-${RELEASE_TAG}-android.apk" "$RELEASE_TAG"
 
       - name: Ensure GitHub CLI is available
         shell: bash

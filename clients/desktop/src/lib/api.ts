@@ -110,6 +110,7 @@ const mockApi: DesktopApi = {
     };
   },
   async markFrontendReady() {},
+  async markSmokeStateReady() {},
 };
 
 export const desktopApi: DesktopApi = hasTauriRuntime()
@@ -129,5 +130,6 @@ export const desktopApi: DesktopApi = hasTauriRuntime()
         invokeCommand<RuntimeSnapshot>("enable_system_proxy", { profileId }),
       disableSystemProxy: () => invokeCommand<RuntimeSnapshot>("disable_system_proxy"),
       markFrontendReady: () => invokeCommand<void>("mark_frontend_ready"),
+      markSmokeStateReady: () => invokeCommand<void>("mark_smoke_state_ready"),
     }
   : mockApi;

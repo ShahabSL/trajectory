@@ -108,8 +108,9 @@ npm --prefix clients/desktop run package:smoke -- /tmp/trajectory-desktop-packag
 
 `ui:smoke` validates the browser-rendered production UI. `package:smoke`
 validates the distributable Tauri output: it checks expected bundle files,
-verifies the packaged sidecar, launches the real app, and waits for a frontend
-readiness marker written by the packaged backend.
+verifies the packaged sidecar, inspects installable artifacts, launches the real
+app/AppImage/MSI-extracted app where the platform allows it, and waits for
+frontend plus backend state readiness markers written by the packaged backend.
 
 For live tunnel validation, use the existing protected CI workflow documented in
 `docs/CI_E2E.md`. Live secrets must stay in the protected

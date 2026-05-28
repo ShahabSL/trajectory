@@ -147,6 +147,7 @@ export default function App() {
     const loadInitialState = async () => {
       try {
         await desktopApi.markFrontendReady();
+        await desktopApi.markSmokeStateReady();
         const [profileState, runtimeState] = await Promise.all([
           desktopApi.loadProfiles(),
           desktopApi.loadSnapshot(),

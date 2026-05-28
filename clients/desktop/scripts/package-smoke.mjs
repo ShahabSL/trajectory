@@ -49,18 +49,41 @@ async function smokeLinux(files) {
   const sidecar = path.join(appDir, "usr", "bin", "trajectory-client");
   requireExecutable(appRun, "Linux AppDir AppRun");
   requireExecutable(sidecar, "Linux bundled trajectory-client sidecar");
+  requireExecutable(appImage, "Linux AppImage executable");
   runChecked(sidecar, ["--help"], "Linux bundled sidecar --help");
-  runChecked("dpkg-deb", ["-x", deb, path.join(artifactDir, "deb-extract")], "extract Linux .deb");
-  requireOne(
-    await listFiles(path.join(artifactDir, "deb-extract")),
-    /usr[/\\]bin[/\\]trajectory-client$/,
-    "trajectory-client inside .deb",
-  );
+  const debExtract = path.join(artifactDir, "deb-extract");
+  runChecked("dpkg-deb", ["-x", deb, debExtract], "extract Linux .deb");
+  const debFiles = await listFiles(debExtract);
+  requireOne(debFiles, /usr[/\\]bin[/\\]trajectory-client$/, "trajectory-client inside .deb");
+  requireOne(debFiles, /usr[/\\]bin[/\\]trajectory-desktop$/, "trajectory-desktop inside .deb");
+
+  const rpmExtract = path.join(artifactDir, "rpm-extract");
+  if (commandExists("rpm2cpio") && commandExists("cpio")) {
+    await mkdir(rpmExtract, { recursive: true });
+    runChecked(
+      "bash",
+      ["-lc", `rpm2cpio ${shellQuote(rpm)} | cpio -idm --quiet`],
+      "extract Linux .rpm",
+      { cwd: rpmExtract },
+    );
+    const rpmFiles = await listFiles(rpmExtract);
+    requireOne(rpmFiles, /usr[/\\]bin[/\\]trajectory-client$/, "trajectory-client inside .rpm");
+    requireOne(rpmFiles, /usr[/\\]bin[/\\]trajectory-desktop$/, "trajectory-desktop inside .rpm");
+  } else if (process.env.CI) {
+    throw new Error("rpm2cpio and cpio are required for CI Linux RPM package smoke");
+  } else {
+    manifest.push("rpm extraction=skipped locally because rpm2cpio/cpio are unavailable");
+  }
   manifest.push(`deb=${relative(deb)}`, `rpm=${relative(rpm)}`, `appimage=${relative(appImage)}`);
 
   const launcher = commandExists("xvfb-run") ? "xvfb-run" : appRun;
   const args = commandExists("xvfb-run") ? ["-a", appRun] : [];
   await assertLaunches(launcher, args, "Linux AppDir launch smoke");
+  const appImageLauncher = commandExists("xvfb-run") ? "xvfb-run" : appImage;
+  const appImageArgs = commandExists("xvfb-run") ? ["-a", appImage] : [];
+  await assertLaunches(appImageLauncher, appImageArgs, "Linux AppImage launch smoke", {
+    APPIMAGE_EXTRACT_AND_RUN: "1",
+  });
 }
 
 async function smokeMac(files) {
@@ -88,16 +111,17 @@ async function smokeWindows(files) {
   const setup = requireOne(files, new RegExp(`Trajectory_?${escapeRegex(version)}.*\\.exe$`), "Windows setup .exe");
   const targetDir = path.join(artifactDir, "msi-extract");
   runChecked("msiexec.exe", ["/a", msi, "/qn", `TARGETDIR=${targetDir}`], "extract Windows .msi");
-  requireOne(await listFiles(targetDir), /trajectory-client.*\.exe$/i, "trajectory-client inside .msi");
+  const msiFiles = await listFiles(targetDir);
+  const msiSidecar = requireOne(msiFiles, /trajectory-client.*\.exe$/i, "trajectory-client inside .msi");
+  const msiLauncher = requireOne(msiFiles, /(?:Trajectory|trajectory-desktop)\.exe$/i, "Trajectory app inside .msi");
+  runChecked(msiSidecar, ["--help"], "Windows MSI sidecar --help");
 
   const sidecar = path.join(tauriDir, "bin", "trajectory-client-x86_64-pc-windows-msvc.exe");
   requireExecutable(sidecar, "Windows staged trajectory-client sidecar");
   runChecked(sidecar, ["--help"], "Windows staged sidecar --help");
 
-  const launcher = path.join(tauriDir, "target", "release", "trajectory-desktop.exe");
-  requireExecutable(launcher, "Windows release app launcher");
   manifest.push(`msi=${relative(msi)}`, `setup=${relative(setup)}`);
-  await assertLaunches(launcher, [], "Windows release app launch smoke");
+  await assertLaunches(msiLauncher, [], "Windows MSI app launch smoke");
 }
 
 async function listFiles(root) {
@@ -153,9 +177,9 @@ function requireExecutable(file, label) {
   manifest.push(`${label}=${relative(file)}`);
 }
 
-function runChecked(command, args, label) {
+function runChecked(command, args, label, options = {}) {
   const result = spawnSync(command, args, {
-    cwd: repoRoot,
+    cwd: options.cwd ?? repoRoot,
     encoding: "utf8",
     timeout: 30_000,
     windowsHide: true,
@@ -166,16 +190,19 @@ function runChecked(command, args, label) {
   }
 }
 
-async function assertLaunches(command, args, label) {
+async function assertLaunches(command, args, label, extraEnv = {}) {
   const readyFile = path.join(artifactDir, `${safeName(label)}-frontend-ready.txt`);
+  const stateFile = path.join(artifactDir, `${safeName(label)}-state-ready.txt`);
   const child = spawn(command, args, {
     cwd: repoRoot,
     env: {
       ...process.env,
       TRAJECTORY_DESKTOP_SMOKE: "1",
       TRAJECTORY_DESKTOP_SMOKE_READY_FILE: readyFile,
+      TRAJECTORY_DESKTOP_SMOKE_STATE_FILE: stateFile,
       NO_AT_BRIDGE: "1",
       WEBKIT_DISABLE_COMPOSITING_MODE: "1",
+      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -194,20 +221,21 @@ async function assertLaunches(command, args, label) {
     launchError = error.message;
   });
 
-  const ready = await waitForFrontendReady(child, readyFile, 30_000, () => launchError);
+  const ready = await waitForReadyFiles(child, [readyFile, stateFile], 30_000, () => launchError);
   if (!ready.ok) {
     await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
-    throw new Error(`${label} did not prove packaged frontend readiness: ${ready.reason}`);
+    throw new Error(`${label} did not prove packaged frontend/backend readiness: ${ready.reason}`);
   }
   stopProcess(child);
   await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
-  manifest.push(`${label}=frontend ready`);
+  manifest.push(`${label}=frontend and backend ready`);
 }
 
-async function waitForFrontendReady(child, readyFile, ms, launchError) {
+async function waitForReadyFiles(child, readyFiles, ms, launchError) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
-    if (existsSync(readyFile)) {
+    const missing = readyFiles.filter((file) => !existsSync(file));
+    if (missing.length === 0) {
       return { ok: true };
     }
     const error = launchError();
@@ -222,7 +250,8 @@ async function waitForFrontendReady(child, readyFile, ms, launchError) {
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  return { ok: false, reason: `timed out waiting for ${readyFile}` };
+  const missing = readyFiles.filter((file) => !existsSync(file));
+  return { ok: false, reason: `timed out waiting for ${missing.join(", ")}` };
 }
 
 function stopProcess(child) {
@@ -258,6 +287,10 @@ function writeCommandLog(label, result) {
   ].join("\n");
   writeFileSync(path.join(artifactDir, `${safeName(label)}.log`), body);
   manifest.push(`${label}=status ${result.status}`);
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
 function isExecutable(file) {
