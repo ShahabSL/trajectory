@@ -69,7 +69,7 @@ def optional(
 
 def main() -> None:
     args = parse_args()
-    release_dir = Path(args.release_dir)
+    release_dir = Path(args.release_dir).resolve()
     if not release_dir.is_dir():
         raise SystemExit(f"release directory does not exist: {release_dir}")
     if not args.release_tag.startswith("v"):
@@ -263,35 +263,35 @@ def verify_asset_structures(
                         require_archive_member(members, "trajectory-admin", name, failures)
             elif name.endswith(".deb"):
                 require_magic(asset, b"!<arch>\n", name, ".deb ar container", failures)
-                run_if_available(["dpkg-deb", "--info", str(asset)], f"{name} dpkg metadata", failures)
-                run_if_available(["dpkg-deb", "--contents", str(asset)], f"{name} dpkg contents", failures)
+                run_required(["dpkg-deb", "--info", str(asset)], f"{name} dpkg metadata", failures)
+                contents = run_required(["dpkg-deb", "--contents", str(asset)], f"{name} dpkg contents", failures)
+                if contents:
+                    require_payload_members(
+                        contents,
+                        ["trajectory-desktop", "trajectory-client", "Trajectory.desktop"],
+                        name,
+                        failures,
+                    )
             elif name.endswith(".rpm"):
                 require_magic(asset, b"\xed\xab\xee\xdb", name, ".rpm lead", failures)
-                if shutil.which("rpm2cpio") and shutil.which("cpio"):
-                    rpm_path = asset.resolve()
-                    result = subprocess.run(
-                        f"rpm2cpio {shell_quote(str(rpm_path))} | cpio -t",
-                        shell=True,
-                        cwd=asset.parent,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        timeout=30,
+                contents = rpm_payload_contents(asset, name, failures)
+                if contents:
+                    require_payload_members(
+                        contents,
+                        ["trajectory-desktop", "trajectory-client", "Trajectory.desktop"],
+                        name,
+                        failures,
                     )
-                    if result.returncode != 0:
-                        failures.append(f"{name}: rpm2cpio/cpio integrity check failed: {result.stderr.strip()}")
-                    elif "trajectory-client" not in result.stdout:
-                        failures.append(f"{name}: rpm payload is missing trajectory-client")
             elif name.endswith(".AppImage"):
                 require_magic(asset, b"\x7fELF", name, "AppImage ELF header", failures)
                 if version not in name:
                     failures.append(f"{name}: AppImage filename does not include version {version}")
             elif name.endswith(".msi"):
                 require_magic(asset, b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", name, "MSI OLE header", failures)
-                run_if_available(["7z", "t", str(asset)], f"{name} 7z integrity", failures)
+                run_required(["7z", "t", str(asset)], f"{name} 7z integrity", failures)
             elif name.endswith(".exe"):
                 require_magic(asset, b"MZ", name, "Windows executable header", failures)
-                run_if_available(["7z", "t", str(asset)], f"{name} setup archive integrity", failures)
+                run_required(["7z", "t", str(asset)], f"{name} setup archive integrity", failures)
             elif name.endswith(".dmg"):
                 tail = asset.read_bytes()[-512:]
                 if b"koly" not in tail:
@@ -349,9 +349,10 @@ def require_magic(
         failures.append(f"{asset_name}: missing {label}")
 
 
-def run_if_available(args: list[str], label: str, failures: list[str]) -> None:
+def run_required(args: list[str], label: str, failures: list[str]) -> str | None:
     if not shutil.which(args[0]):
-        return
+        failures.append(f"{label} skipped: required tool not found: {args[0]}")
+        return None
     result = subprocess.run(
         args,
         stdout=subprocess.PIPE,
@@ -361,10 +362,59 @@ def run_if_available(args: list[str], label: str, failures: list[str]) -> None:
     )
     if result.returncode != 0:
         failures.append(f"{label} failed: {result.stderr.strip()}")
+        return None
+    return result.stdout
 
 
-def shell_quote(value: str) -> str:
-    return "'" + value.replace("'", "'\\''") + "'"
+def rpm_payload_contents(asset: Path, asset_name: str, failures: list[str]) -> str | None:
+    rpm2cpio = shutil.which("rpm2cpio")
+    cpio = shutil.which("cpio")
+    missing_tools = [tool for tool, path in [("rpm2cpio", rpm2cpio), ("cpio", cpio)] if path is None]
+    if missing_tools:
+        failures.append(
+            f"{asset_name}: rpm payload validation skipped; required tool(s) not found: "
+            + ", ".join(missing_tools)
+        )
+        return None
+
+    rpm_result = subprocess.run(
+        [rpm2cpio, str(asset)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    if rpm_result.returncode != 0:
+        failures.append(
+            f"{asset_name}: rpm2cpio integrity check failed: "
+            + rpm_result.stderr.decode("utf-8", errors="replace").strip()
+        )
+        return None
+
+    cpio_result = subprocess.run(
+        [cpio, "-t"],
+        input=rpm_result.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    if cpio_result.returncode != 0:
+        failures.append(
+            f"{asset_name}: cpio payload listing failed: "
+            + cpio_result.stderr.decode("utf-8", errors="replace").strip()
+        )
+        return None
+    return cpio_result.stdout.decode("utf-8", errors="replace")
+
+
+def require_payload_members(
+    contents: str,
+    needles: list[str],
+    asset_name: str,
+    failures: list[str],
+) -> None:
+    for needle in needles:
+        if needle not in contents:
+            failures.append(f"{asset_name}: payload is missing {needle}")
 
 
 def sha256(path: Path) -> str:
