@@ -134,6 +134,8 @@ fi
 swipe_x=$((screen_width / 2))
 swipe_start_y=$((screen_height * 68 / 100))
 swipe_end_y=$((screen_height * 30 / 100))
+short_swipe_start_y=$((screen_height * 70 / 100))
+short_swipe_end_y=$((screen_height * 55 / 100))
 swipe_restore_start_y=$((screen_height * 30 / 100))
 swipe_restore_end_y=$((screen_height * 68 / 100))
 
@@ -153,33 +155,196 @@ capture_screenshot() {
   local output="$1"
   local raw="${output%.png}.raw-screencap"
   local visual_report="${output%.png}.visual.txt"
+  local png_capture_status=0
   timeout 20s adb exec-out screencap > "$raw"
-  timeout 20s adb exec-out screencap -p > "$output"
-  python3 - "$raw" "$visual_report" <<'PY'
+  if [[ "${TRAJECTORY_ANDROID_SMOKE_FORCE_RAW_SCREENSHOT:-}" == "1" ]]; then
+    : > "$output"
+    png_capture_status=77
+  else
+    timeout 20s adb exec-out screencap -p > "$output" 2> "${output}.stderr" || png_capture_status=$?
+    if [[ ! -s "$output" ]]; then
+      remote_png="/sdcard/trajectory-smoke-${RANDOM}-${RANDOM}.png"
+      if timeout 20s adb shell screencap -p "$remote_png" >/dev/null 2> "${output}.device.stderr"; then
+        timeout 20s adb pull "$remote_png" "$output" >/dev/null 2>> "${output}.device.stderr" || true
+        adb shell rm -f "$remote_png" >/dev/null 2>&1 || true
+      fi
+    fi
+  fi
+  python3 - "$raw" "$visual_report" "$output" "$png_capture_status" <<'PY'
+import binascii
 import struct
 import sys
+import zlib
 from pathlib import Path
 
 raw_path = Path(sys.argv[1])
 report_path = Path(sys.argv[2])
-data = raw_path.read_bytes()
-if len(data) < 12:
-    raise SystemExit("raw screencap is too short")
+png_path = Path(sys.argv[3])
+png_capture_status = int(sys.argv[4])
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
-width, height, pixel_format = struct.unpack_from("<III", data, 0)
-if width <= 0 or height <= 0 or width > 10000 or height > 10000:
-    raise SystemExit(f"invalid screencap dimensions: {width}x{height}")
 
-payload = data[12:]
+def paeth(left: int, up: int, up_left: int) -> int:
+    estimate = left + up - up_left
+    left_distance = abs(estimate - left)
+    up_distance = abs(estimate - up)
+    up_left_distance = abs(estimate - up_left)
+    if left_distance <= up_distance and left_distance <= up_left_distance:
+        return left
+    if up_distance <= up_left_distance:
+        return up
+    return up_left
+
+
+def decode_png(path: Path):
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    if not data.startswith(PNG_SIGNATURE):
+        return None
+
+    offset = len(PNG_SIGNATURE)
+    width = height = bit_depth = color_type = interlace = None
+    idat = bytearray()
+    while offset + 12 <= len(data):
+        length = struct.unpack(">I", data[offset : offset + 4])[0]
+        kind = data[offset + 4 : offset + 8]
+        payload = data[offset + 8 : offset + 8 + length]
+        offset += 12 + length
+        if kind == b"IHDR":
+            width, height, bit_depth, color_type, _, _, interlace = struct.unpack(
+                ">IIBBBBB", payload
+            )
+        elif kind == b"IDAT":
+            idat.extend(payload)
+        elif kind == b"IEND":
+            break
+
+    if (
+        width is None
+        or height is None
+        or bit_depth != 8
+        or color_type not in (2, 6)
+        or interlace != 0
+    ):
+        return None
+
+    channels = 4 if color_type == 6 else 3
+    row_bytes = width * channels
+    compressed = zlib.decompress(bytes(idat))
+    rows = bytearray()
+    previous = bytearray(row_bytes)
+    position = 0
+    for _ in range(height):
+        filter_type = compressed[position]
+        position += 1
+        current = bytearray(compressed[position : position + row_bytes])
+        position += row_bytes
+        for index, value in enumerate(current):
+            left = current[index - channels] if index >= channels else 0
+            up = previous[index]
+            up_left = previous[index - channels] if index >= channels else 0
+            if filter_type == 1:
+                current[index] = (value + left) & 0xFF
+            elif filter_type == 2:
+                current[index] = (value + up) & 0xFF
+            elif filter_type == 3:
+                current[index] = (value + ((left + up) // 2)) & 0xFF
+            elif filter_type == 4:
+                current[index] = (value + paeth(left, up, up_left)) & 0xFF
+            elif filter_type != 0:
+                return None
+        rows.extend(current)
+        previous = current
+    return {
+        "width": width,
+        "height": height,
+        "format": "png",
+        "bytes_per_pixel": channels,
+        "payload": bytes(rows),
+        "source": "png",
+    }
+
+
+def parse_raw(path: Path):
+    data = path.read_bytes()
+    if len(data) < 12:
+        return None
+    width, height, pixel_format = struct.unpack_from("<III", data, 0)
+    if width <= 0 or height <= 0 or width > 10000 or height > 10000:
+        return None
+
+    pixels = width * height
+    payload = data[12:]
+    for candidate_bpp in (4, 3, 2):
+        if len(payload) >= pixels * candidate_bpp:
+            return {
+                "width": width,
+                "height": height,
+                "format": pixel_format,
+                "bytes_per_pixel": candidate_bpp,
+                "payload": payload[: pixels * candidate_bpp],
+                "source": "raw-rgb565" if candidate_bpp == 2 else "raw",
+            }
+    return None
+
+
+source = parse_raw(raw_path) or decode_png(png_path)
+if source is None:
+    raise SystemExit("could not decode PNG screenshot or raw screencap")
+
+width = source["width"]
+height = source["height"]
+pixel_format = source["format"]
+bytes_per_pixel = source["bytes_per_pixel"]
+payload = source["payload"]
 pixels = width * height
 if pixels == 0:
-    raise SystemExit("screencap contained zero pixels")
-bytes_per_pixel = len(payload) // pixels
-if bytes_per_pixel < 3:
-    raise SystemExit(
-        f"unsupported screencap format={pixel_format} bytes_per_pixel={bytes_per_pixel}"
-    )
+    raise SystemExit("screenshot contained zero pixels")
 
+
+def rgb_at(index: int) -> tuple[int, int, int]:
+    offset = index * bytes_per_pixel
+    if bytes_per_pixel == 2:
+        value = payload[offset] | (payload[offset + 1] << 8)
+        red = ((value >> 11) & 0x1F) * 255 // 31
+        green = ((value >> 5) & 0x3F) * 255 // 63
+        blue = (value & 0x1F) * 255 // 31
+        return red, green, blue
+    return payload[offset], payload[offset + 1], payload[offset + 2]
+
+def png_chunk(kind: bytes, payload: bytes) -> bytes:
+    checksum = binascii.crc32(kind)
+    checksum = binascii.crc32(payload, checksum) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
+
+
+def synthesize_png_from_raw() -> str:
+    try:
+        existing = png_path.read_bytes()
+    except FileNotFoundError:
+        existing = b""
+    if existing.startswith(PNG_SIGNATURE) and len(existing) > 32:
+        return "adb-png"
+
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)
+        for x in range(width):
+            rows.extend(rgb_at((y * width) + x))
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    png_path.write_bytes(
+        PNG_SIGNATURE
+        + png_chunk(b"IHDR", ihdr)
+        + png_chunk(b"IDAT", zlib.compress(bytes(rows), level=1))
+        + png_chunk(b"IEND", b"")
+    )
+    return "raw-synthesized"
+
+
+png_source = synthesize_png_from_raw()
 step = max(1, pixels // 50000)
 sampled = 0
 non_background = 0
@@ -194,10 +359,9 @@ for index in range(0, pixels, step):
     y = index // width
     if y < height * 0.05 or y > height * 0.92:
         continue
-    offset = index * bytes_per_pixel
-    if offset + 2 >= len(payload):
+    if (index + 1) * bytes_per_pixel > len(payload):
         break
-    red, green, blue = payload[offset], payload[offset + 1], payload[offset + 2]
+    red, green, blue = rgb_at(index)
     luma = int((red * 299 + green * 587 + blue * 114) / 1000)
     chroma = max(red, green, blue) - min(red, green, blue)
     sampled += 1
@@ -223,6 +387,8 @@ report = (
     f"width={width}\n"
     f"height={height}\n"
     f"format={pixel_format}\n"
+    f"png_capture_status={png_capture_status}\n"
+    f"png_source={png_source}\n"
     f"sampled={sampled}\n"
     f"non_background_ratio={non_background_ratio:.5f}\n"
     f"ink_ratio={ink_ratio:.5f}\n"
@@ -246,6 +412,7 @@ if len(buckets) < 6:
 if failures:
     raise SystemExit("; ".join(failures))
 PY
+  rm -f "${output}.stderr"
   rm -f "$raw"
 }
 
@@ -478,6 +645,11 @@ run_optional_live_proxy_smoke() {
   local access_key="${TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY:-}"
   local http_fetch_url="${TRAJECTORY_ANDROID_SMOKE_FETCH_URL:-http://example.com/}"
   local http_port="${TRAJECTORY_ANDROID_SMOKE_HTTP_PORT:-7001}"
+  if [[ "$http_fetch_url" != http://* ]]; then
+    echo "Android live proxy smoke requires a plain http:// URL; using http://example.com/ instead of $http_fetch_url" \
+      > "$artifact_dir/live-proxy-fetch-url.txt"
+    http_fetch_url="http://example.com/"
+  fi
   local http_host="$http_fetch_url"
   http_host="${http_host#*//}"
   http_host="${http_host%%/*}"
@@ -637,6 +809,8 @@ for tab in Profile Resolvers VPN Diagnostics; do
       echo "Frontier experimental mode was not selectable from the Resolvers screen" >&2
       exit 1
     fi
+    sleep 1
+    adb shell input swipe "$swipe_x" "$short_swipe_start_y" "$swipe_x" "$short_swipe_end_y" 350
     sleep 1
     dump_screen "frontier_selected"
     if ! assert_checked_mode "Frontier experimental mode" "$artifact_dir/frontier_selected.xml"; then

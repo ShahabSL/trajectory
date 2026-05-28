@@ -2,13 +2,13 @@ use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::webview::PageLoadEvent;
 use tauri::State;
 
@@ -229,9 +229,16 @@ fn connect_profile(
     state: State<'_, AppState>,
     profile_id: String,
 ) -> Result<RuntimeSnapshot, String> {
+    connect_profile_state(&state, profile_id)
+}
+
+fn connect_profile_state(
+    state: &State<'_, AppState>,
+    profile_id: String,
+) -> Result<RuntimeSnapshot, String> {
     let profile = load_profile_with_secret(&state.data_dir, &profile_id)?;
     validate_profile_for_connect(&profile)?;
-    stop_child(&state)?;
+    stop_child(state)?;
 
     let binary = find_client_binary()?;
     let mut command = Command::new(&binary);
@@ -383,29 +390,62 @@ fn mark_frontend_ready() -> Result<(), String> {
 
 #[tauri::command]
 fn mark_smoke_state_ready(state: State<'_, AppState>) -> Result<(), String> {
-    if std::env::var_os("TRAJECTORY_DESKTOP_SMOKE_STATE_FILE").is_none() {
+    let state_marker_enabled = std::env::var_os("TRAJECTORY_DESKTOP_SMOKE_STATE_FILE").is_some();
+    let live_marker_enabled = std::env::var_os("TRAJECTORY_DESKTOP_SMOKE_LIVE_FILE").is_some();
+    if !state_marker_enabled && !live_marker_enabled {
         return Ok(());
     }
     let profile_state = profile_store_snapshot(load_profile_store(&state.data_dir)?)?;
     if profile_state.profiles.is_empty() {
         return Err("smoke state check loaded zero profiles".to_string());
     }
-    let runtime_state = refresh_snapshot(&state)?;
+    let runtime_state = if live_marker_enabled {
+        let profile_id = profile_state
+            .selected_profile_id
+            .clone()
+            .or_else(|| {
+                profile_state
+                    .profiles
+                    .first()
+                    .map(|profile| profile.id.clone())
+            })
+            .ok_or_else(|| "desktop live smoke has no selected profile".to_string())?;
+        let _ = connect_profile_state(&state, profile_id)?;
+        let runtime_state = wait_for_connected_smoke(&state, Duration::from_secs(60))?;
+        let fetch_result = smoke_fetch_http_proxy(&runtime_state)?;
+        write_smoke_marker_env(
+            "TRAJECTORY_DESKTOP_SMOKE_LIVE_FILE",
+            format!(
+                "live proxy ready at {}\nhttp_endpoint={}\n{}\n",
+                now_string(),
+                runtime_state.http_endpoint.as_deref().unwrap_or(""),
+                fetch_result,
+            ),
+        )?;
+        let _ = stop_child(&state);
+        runtime_state
+    } else {
+        refresh_snapshot(&state)?
+    };
     if runtime_state.capabilities.os.is_empty() || runtime_state.capabilities.arch.is_empty() {
         return Err("smoke state check loaded incomplete platform capabilities".to_string());
     }
 
-    write_smoke_marker_env(
-        "TRAJECTORY_DESKTOP_SMOKE_STATE_FILE",
-        format!(
-            "state ready at {}\nprofiles={}\nphase={:?}\nos={}\narch={}\n",
-            now_string(),
-            profile_state.profiles.len(),
-            runtime_state.phase,
-            runtime_state.capabilities.os,
-            runtime_state.capabilities.arch,
-        ),
-    )
+    if state_marker_enabled {
+        write_smoke_marker_env(
+            "TRAJECTORY_DESKTOP_SMOKE_STATE_FILE",
+            format!(
+                "state ready at {}\nprofiles={}\nphase={:?}\nos={}\narch={}\n",
+                now_string(),
+                profile_state.profiles.len(),
+                runtime_state.phase,
+                runtime_state.capabilities.os,
+                runtime_state.capabilities.arch,
+            ),
+        )
+    } else {
+        Ok(())
+    }
 }
 
 pub fn run() {
@@ -424,12 +464,7 @@ pub fn run() {
                 "TRAJECTORY_DESKTOP_SMOKE_BACKEND_FILE",
                 format!("backend setup ready at {}\n", now_string()),
             )
-            .map_err(|error| {
-                Box::<dyn std::error::Error>::from(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    error,
-                ))
-            })?;
+            .map_err(|error| Box::<dyn std::error::Error>::from(std::io::Error::other(error)))?;
             Ok(())
         })
         .on_page_load(|_, payload| {
@@ -616,6 +651,96 @@ fn endpoint_ready(endpoint: &str) -> bool {
     addrs.any(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(180)).is_ok())
 }
 
+fn wait_for_connected_smoke(
+    state: &State<'_, AppState>,
+    timeout: Duration,
+) -> Result<RuntimeSnapshot, String> {
+    let deadline = Instant::now() + timeout;
+    let mut last_snapshot = refresh_snapshot(state)?;
+    while Instant::now() < deadline {
+        last_snapshot = refresh_snapshot(state)?;
+        match last_snapshot.phase {
+            ConnectionPhase::Connected => return Ok(last_snapshot),
+            ConnectionPhase::Failed => {
+                return Err(format!(
+                    "desktop live smoke failed before readiness: {}",
+                    last_snapshot.last_error.clone().unwrap_or_default()
+                ));
+            }
+            _ => thread::sleep(Duration::from_millis(250)),
+        }
+    }
+    Err(format!(
+        "timed out waiting for desktop live smoke readiness: {}",
+        last_snapshot
+            .status_detail
+            .clone()
+            .unwrap_or_else(|| "no status detail".to_string())
+    ))
+}
+
+fn smoke_fetch_http_proxy(snapshot: &RuntimeSnapshot) -> Result<String, String> {
+    let endpoint = snapshot
+        .http_endpoint
+        .as_deref()
+        .ok_or_else(|| "desktop live smoke has no HTTP endpoint".to_string())?;
+    let url = std::env::var("TRAJECTORY_DESKTOP_SMOKE_FETCH_URL")
+        .unwrap_or_else(|_| "http://example.com/".to_string());
+    let host = http_url_host(&url)?;
+    let mut addrs = endpoint
+        .to_socket_addrs()
+        .map_err(|error| format!("resolve desktop smoke HTTP endpoint {endpoint}: {error}"))?;
+    let addr = addrs
+        .next()
+        .ok_or_else(|| format!("desktop smoke HTTP endpoint has no addresses: {endpoint}"))?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+        .map_err(|error| format!("connect desktop smoke HTTP proxy {endpoint}: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(25)))
+        .map_err(|error| format!("set desktop smoke read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| format!("set desktop smoke write timeout: {error}"))?;
+    let request = format!("GET {url} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("write desktop smoke HTTP request: {error}"))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|error| format!("read desktop smoke HTTP response: {error}"))?;
+    let status = String::from_utf8_lossy(&response)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let ok = status.starts_with("HTTP/")
+        && status
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse::<u16>().ok())
+            .map(|code| (200..400).contains(&code))
+            .unwrap_or(false);
+    if !ok {
+        return Err(format!(
+            "desktop live smoke HTTP proxy returned non-success status: {status}"
+        ));
+    }
+    Ok(format!("fetch_url={url}\nstatus={status}"))
+}
+
+fn http_url_host(url: &str) -> Result<String, String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| "desktop live smoke fetch URL must be plain http://".to_string())?;
+    let host = rest.split('/').next().unwrap_or_default();
+    if host.is_empty() {
+        return Err("desktop live smoke fetch URL is missing host".to_string());
+    }
+    Ok(host.to_string())
+}
+
 fn startup_detail_from_logs(logs: &[String]) -> String {
     for line in logs.iter().rev() {
         let lower = line.to_ascii_lowercase();
@@ -792,6 +917,9 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 fn store_access_key(profile_id: &str, access_key: &str) -> Result<(), String> {
+    if std::env::var_os("TRAJECTORY_DESKTOP_SMOKE_ACCESS_KEY").is_some() {
+        return Ok(());
+    }
     Entry::new(KEYRING_SERVICE, profile_id)
         .map_err(|error| format!("open OS credential store: {error}"))?
         .set_password(access_key)
@@ -799,6 +927,11 @@ fn store_access_key(profile_id: &str, access_key: &str) -> Result<(), String> {
 }
 
 fn load_access_key(profile_id: &str) -> Result<String, String> {
+    if let Ok(access_key) = std::env::var("TRAJECTORY_DESKTOP_SMOKE_ACCESS_KEY") {
+        if !access_key.trim().is_empty() {
+            return Ok(access_key);
+        }
+    }
     Entry::new(KEYRING_SERVICE, profile_id)
         .map_err(|error| format!("open OS credential store: {error}"))?
         .get_password()
@@ -814,7 +947,7 @@ fn delete_access_key(profile_id: &str) -> Result<(), String> {
 
 fn access_key_exists(profile_id: &str) -> bool {
     if std::env::var_os("TRAJECTORY_DESKTOP_SMOKE").is_some() {
-        return false;
+        return std::env::var_os("TRAJECTORY_DESKTOP_SMOKE_ACCESS_KEY").is_some();
     }
     Entry::new(KEYRING_SERVICE, profile_id)
         .and_then(|entry| entry.get_password().map(|_| ()))
@@ -872,14 +1005,9 @@ fn validate_profile_common(profile: &TrajectoryProfile) -> Result<(), String> {
         profile.transport_mode.as_str(),
         "secure" | "velocity" | "resilient" | "frontier"
     ) {
-        return Err(
-            "transport mode must be secure, velocity, resilient, or frontier".to_string(),
-        );
+        return Err("transport mode must be secure, velocity, resilient, or frontier".to_string());
     }
-    if !matches!(
-        profile.resolver_transport.as_str(),
-        "auto" | "udp" | "tcp"
-    ) {
+    if !matches!(profile.resolver_transport.as_str(), "auto" | "udp" | "tcp") {
         return Err("resolver transport must be auto, udp, or tcp".to_string());
     }
     for endpoint in [&profile.socks, &profile.http] {

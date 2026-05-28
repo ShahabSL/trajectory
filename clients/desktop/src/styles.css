@@ -432,10 +432,9 @@ pre {
 }
 
 .endpoint-row code {
-  overflow: hidden;
   color: #374151;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .definition-grid {

@@ -27,6 +27,8 @@ await writeFile(
 
 const files = await listFiles(bundleRoot);
 const manifest = [`desktop package smoke`, `platform=${process.platform}`, `version=${version}`];
+let desktopLiveSmokeUsed = false;
+let desktopLiveSmokeSkipNoted = false;
 
 if (process.platform === "linux") {
   await smokeLinux(files);
@@ -289,6 +291,10 @@ async function assertLaunches(command, args, label, extraEnv = {}) {
   const pageFile = path.join(artifactDir, `${safeName(label)}-page-ready.txt`);
   const frontendFile = path.join(artifactDir, `${safeName(label)}-frontend-ready.txt`);
   const stateFile = path.join(artifactDir, `${safeName(label)}-state-ready.txt`);
+  const liveEnv = await prepareDesktopLiveSmoke(label);
+  const liveFile = liveEnv.TRAJECTORY_DESKTOP_SMOKE_LIVE_FILE;
+  const readyFiles = [backendFile, pageFile, frontendFile, stateFile];
+  if (liveFile) readyFiles.push(liveFile);
   const child = spawn(command, args, {
     cwd: repoRoot,
     env: {
@@ -300,6 +306,7 @@ async function assertLaunches(command, args, label, extraEnv = {}) {
       TRAJECTORY_DESKTOP_SMOKE_STATE_FILE: stateFile,
       NO_AT_BRIDGE: "1",
       WEBKIT_DISABLE_COMPOSITING_MODE: "1",
+      ...liveEnv,
       ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -321,8 +328,8 @@ async function assertLaunches(command, args, label, extraEnv = {}) {
 
   const ready = await waitForReadyFiles(
     child,
-    [backendFile, pageFile, frontendFile, stateFile],
-    45_000,
+    readyFiles,
+    liveFile ? 90_000 : 45_000,
     () => launchError,
   );
   if (!ready.ok) {
@@ -332,6 +339,82 @@ async function assertLaunches(command, args, label, extraEnv = {}) {
   stopProcess(child);
   await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
   manifest.push(`${label}=backend, page, frontend IPC, and state ready`);
+  if (liveFile) {
+    manifest.push(`${label}=live HTTP proxy smoke ready`);
+  }
+}
+
+async function prepareDesktopLiveSmoke(label) {
+  const domain = process.env.TRAJECTORY_DESKTOP_SMOKE_DOMAIN?.trim();
+  const accessKey = process.env.TRAJECTORY_DESKTOP_SMOKE_ACCESS_KEY?.trim();
+  if (!domain || !accessKey) {
+    if (!desktopLiveSmokeSkipNoted) {
+      manifest.push("desktop live proxy smoke=skipped because domain/access key secrets are absent");
+      desktopLiveSmokeSkipNoted = true;
+    }
+    return {};
+  }
+  if (desktopLiveSmokeUsed) return {};
+  desktopLiveSmokeUsed = true;
+
+  const configDir = path.join(artifactDir, `${safeName(label)}-live-config`);
+  await mkdir(configDir, { recursive: true });
+  const profile = desktopLiveProfile(domain);
+  await writeFile(
+    path.join(configDir, "profiles.json"),
+    `${JSON.stringify({ selectedProfileId: profile.id, profiles: [profile] }, null, 2)}\n`,
+  );
+  manifest.push(`${label}=desktop live proxy smoke configured`);
+  return {
+    TRAJECTORY_DESKTOP_CONFIG_DIR: configDir,
+    TRAJECTORY_DESKTOP_SMOKE_ACCESS_KEY: accessKey,
+    TRAJECTORY_DESKTOP_SMOKE_LIVE_FILE: path.join(artifactDir, `${safeName(label)}-live-proxy.txt`),
+    TRAJECTORY_DESKTOP_SMOKE_FETCH_URL: process.env.TRAJECTORY_DESKTOP_SMOKE_FETCH_URL?.trim() || "http://example.com/",
+  };
+}
+
+function desktopLiveProfile(domain) {
+  const resolvers = (process.env.TRAJECTORY_DESKTOP_SMOKE_RESOLVERS || "1.1.1.1:53,1.0.0.1:53,8.8.8.8:53,8.8.4.4:53")
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const resolverCohortSize = numberEnv("TRAJECTORY_DESKTOP_SMOKE_RESOLVER_COHORT_SIZE");
+  return {
+    id: "smoke-live",
+    name: "Live package smoke",
+    domain,
+    resolvers,
+    resolverFile: null,
+    resolverSocksProxy: process.env.TRAJECTORY_DESKTOP_SMOKE_RESOLVER_SOCKS_PROXY?.trim() || null,
+    resolverTransport: process.env.TRAJECTORY_DESKTOP_SMOKE_RESOLVER_TRANSPORT?.trim() || "auto",
+    transportMode: process.env.TRAJECTORY_DESKTOP_SMOKE_MODE?.trim() || "velocity",
+    socks: {
+      host: "127.0.0.1",
+      port: numberEnv("TRAJECTORY_DESKTOP_SMOKE_SOCKS_PORT") ?? 7000,
+      enabled: true,
+    },
+    http: {
+      host: "127.0.0.1",
+      port: numberEnv("TRAJECTORY_DESKTOP_SMOKE_HTTP_PORT") ?? 7001,
+      enabled: true,
+    },
+    dnsMaxPayload: numberEnv("TRAJECTORY_DESKTOP_SMOKE_DNS_MAX_PAYLOAD") ?? 1232,
+    resolverCohortSize,
+    resolverAdmissionMin: numberEnv("TRAJECTORY_DESKTOP_SMOKE_RESOLVER_ADMISSION_MIN") ?? 1,
+    pollIntervalMs: numberEnv("TRAJECTORY_DESKTOP_SMOKE_POLL_INTERVAL_MS") ?? 25,
+    allowLanWithoutAuth: false,
+    admissionReport: true,
+  };
+}
+
+function numberEnv(name) {
+  const value = process.env[name]?.trim();
+  if (!value) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
 }
 
 async function waitForReadyFiles(child, readyFiles, ms, launchError) {

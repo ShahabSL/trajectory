@@ -185,6 +185,14 @@ jobs:
             "$(basename "$app_path")"
 
       - name: Smoke-test Tauri desktop package
+        env:
+          TRAJECTORY_DESKTOP_SMOKE_DOMAIN: ${{ secrets.TRAJECTORY_E2E_DOMAIN }}
+          TRAJECTORY_DESKTOP_SMOKE_ACCESS_KEY: ${{ secrets.TRAJECTORY_E2E_ACCESS_KEY }}
+          TRAJECTORY_DESKTOP_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
+          TRAJECTORY_DESKTOP_SMOKE_RESOLVER_SOCKS_PROXY: ${{ secrets.TRAJECTORY_E2E_RESOLVER_SOCKS_PROXY }}
+          TRAJECTORY_DESKTOP_SMOKE_FETCH_URL: http://example.com/
+          TRAJECTORY_DESKTOP_SMOKE_DNS_MAX_PAYLOAD: ${{ secrets.TRAJECTORY_E2E_DNS_MAX_PAYLOAD }}
+          TRAJECTORY_DESKTOP_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
         run: npm run package:smoke -- "${{ runner.temp }}/desktop-package"
         working-directory: clients/desktop
 

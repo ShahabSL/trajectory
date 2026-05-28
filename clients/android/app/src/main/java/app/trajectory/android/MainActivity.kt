@@ -233,7 +233,7 @@ private val transportModeOptions = listOf(
         id = "frontier",
         label = "Frontier",
         badge = "Experimental",
-        summary = "Ceiling tests on strong DNS cohorts.",
+        summary = "Strong DNS cohort ceiling tests.",
         icon = Icons.Filled.Explore,
         experimental = true,
     ),
@@ -360,7 +360,7 @@ private fun TrajectoryAndroidApp(
             ) { tab ->
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(16.dp),
+                    contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 96.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     if (tab == AndroidTab.STATUS) {
