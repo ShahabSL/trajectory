@@ -10,13 +10,15 @@ const baseUrl = usePreview ? "http://127.0.0.1:4173" : "http://127.0.0.1:1420";
 
 await mkdir(artifactDir, { recursive: true });
 
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const npm = "npm";
 const serverCommand = usePreview ? "preview" : "dev";
 const serverPort = usePreview ? "4173" : "1420";
 const server = spawn(npm, ["run", serverCommand, "--", "--host", "127.0.0.1", "--port", serverPort, "--strictPort"], {
   cwd: path.resolve(import.meta.dirname, ".."),
   detached: process.platform !== "win32",
+  shell: process.platform === "win32",
   stdio: ["ignore", "pipe", "pipe"],
+  windowsHide: true,
 });
 
 let serverLog = "";
