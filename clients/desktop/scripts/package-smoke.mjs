@@ -245,8 +245,14 @@ async function smokeWindows(files) {
       timeoutMs: 180_000,
     });
     try {
-      const installedLauncher = await findInstalledWindowsLauncher();
-      await assertLaunches(installedLauncher, [], "Windows MSI installed app launch smoke");
+      const installedLaunchers = await findInstalledWindowsLaunchers();
+      for (const installedLauncher of installedLaunchers) {
+        await assertLaunches(
+          installedLauncher,
+          [],
+          `Windows MSI installed app launch smoke ${path.basename(installedLauncher)}`,
+        );
+      }
     } finally {
       runChecked("msiexec.exe", ["/x", msi, "/qn", "/norestart"], "uninstall Windows .msi", {
         timeoutMs: 180_000,
@@ -368,7 +374,7 @@ function rpmPackageField(rpm, field) {
   return result.status === 0 ? result.stdout.trim() : "";
 }
 
-async function findInstalledWindowsLauncher() {
+async function findInstalledWindowsLaunchers() {
   const roots = [
     process.env.ProgramFiles,
     process.env["ProgramFiles(x86)"],
@@ -386,12 +392,16 @@ async function findInstalledWindowsLauncher() {
       );
     }
   }
-  const launchers = candidates.filter((file) => !/trajectory-client/i.test(path.basename(file)));
-  if (launchers.length !== 1) {
-    throw new Error(`Windows installed app launcher: expected one match, found ${launchers.length}`);
+  const launchers = [...new Set(candidates)]
+    .filter((file) => !/trajectory-client/i.test(path.basename(file)))
+    .sort((left, right) => left.localeCompare(right));
+  if (launchers.length === 0) {
+    throw new Error("Windows installed app launcher: expected at least one match, found 0");
   }
-  requireExecutable(launchers[0], "Windows installed MSI launcher");
-  return launchers[0];
+  for (const launcher of launchers) {
+    requireExecutable(launcher, "Windows installed MSI launcher");
+  }
+  return launchers;
 }
 
 async function assertLaunchesMacApp(appBundle, label, extraEnv = {}) {
