@@ -781,12 +781,36 @@ import xml.etree.ElementTree as ET
 
 tree = ET.parse(sys.argv[1])
 needle = sys.argv[2]
+parent = {
+    child: node
+    for node in tree.iter("node")
+    for child in list(node)
+}
+
+def bounds(node):
+    match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds", ""))
+    if not match:
+        return None
+    return tuple(map(int, match.groups()))
+
+def tap_target(node):
+    current = node
+    while current is not None:
+        if (
+            current.attrib.get("clickable") == "true"
+            and current.attrib.get("enabled", "true") != "false"
+            and bounds(current)
+        ):
+            return current
+        current = parent.get(current)
+    return node
+
 for node in tree.iter("node"):
     if node.attrib.get("content-desc") == needle or node.attrib.get("text") == needle:
-        bounds = node.attrib.get("bounds", "")
-        match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
-        if match:
-            x1, y1, x2, y2 = map(int, match.groups())
+        target = tap_target(node)
+        current_bounds = bounds(target)
+        if current_bounds:
+            x1, y1, x2, y2 = current_bounds
             print((x1 + x2) // 2, (y1 + y2) // 2)
             raise SystemExit(0)
 raise SystemExit(1)
@@ -1265,14 +1289,20 @@ assert_clean_proxy_shutdown() {
   local marker="${3:-$artifact_dir/live-proxy-clean-shutdown.txt}"
   local http_port="${TRAJECTORY_ANDROID_SMOKE_HTTP_PORT:-7001}"
   local socks_port="${TRAJECTORY_ANDROID_SMOKE_SOCKS_PORT:-7000}"
-  tap_control "Stop Trajectory" "$source_xml" "live_proxy_stop" || true
+  tap_control "Stop Trajectory" "$source_xml" "live_proxy_stop" ||
+    echo "${shutdown_label} initial stop-control tap failed; retrying from observed UI" > "${marker}.tap-warning"
   for pass in $(seq 1 15); do
     sleep 1
-    adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 500 >/dev/null 2>&1 || true
-    adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 500 >/dev/null 2>&1 || true
     dump_screen "live_proxy_stopped_${pass}"
     assert_no_android_crash "$artifact_dir/live-proxy-stop-logcat-${pass}.txt"
-    if grep -Fq "status.phase.disconnected" "$artifact_dir/live_proxy_stopped_${pass}.xml" &&
+    local observed_xml="$artifact_dir/live_proxy_stopped_${pass}.xml"
+    if ! grep -Fq "status.phase.disconnected" "$observed_xml"; then
+      adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 500 >/dev/null 2>&1 || true
+      adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 500 >/dev/null 2>&1 || true
+      dump_screen "live_proxy_stopped_${pass}_top"
+      observed_xml="$artifact_dir/live_proxy_stopped_${pass}_top.xml"
+    fi
+    if grep -Fq "status.phase.disconnected" "$observed_xml" &&
       port_is_closed "$http_port" &&
       port_is_closed "$socks_port" &&
       ! adb shell ps -A | grep -E 'trajectory_client|libtrajectory_client' > "$artifact_dir/live-proxy-sidecar-processes.txt"; then
@@ -1282,6 +1312,7 @@ assert_clean_proxy_shutdown() {
       echo "${shutdown_label} stopped cleanly after ${pass}s" > "$marker"
       return 0
     fi
+    tap_control "Stop Trajectory" "$observed_xml" "live_proxy_stop_retry_${pass}" || true
   done
   echo "Android ${shutdown_label} smoke did not prove clean shutdown" >&2
   return 1

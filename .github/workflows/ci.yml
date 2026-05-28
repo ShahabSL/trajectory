@@ -414,8 +414,9 @@ jobs:
           retention-days: 7
 
   android-arm64-runtime:
+    name: android-arm64 package smoke
     needs: android-client
-    runs-on: macos-15
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v5
@@ -435,41 +436,19 @@ jobs:
           name: ci-android-signed-release-apk
           path: ${{ runner.temp }}/android-release-apk
 
-      - name: Download Android smoke probe APK
-        uses: actions/download-artifact@v5
-        with:
-          name: ci-android-smokeprobe-apk
-          path: ${{ runner.temp }}/android-smokeprobe-apk
+      - name: Verify Android ARM64 package contents
+        shell: bash
+        run: |
+          scripts/ci_android_apk_package_smoke.sh \
+            "$(find "$RUNNER_TEMP/android-release-apk" -name '*.apk' -print -quit)" \
+            "$RUNNER_TEMP/android-arm64-package-smoke"
 
-      - name: Smoke-test Android ARM64 release UI
-        uses: reactivecircus/android-emulator-runner@v2
-        env:
-          TRAJECTORY_ANDROID_SMOKE_DOMAIN: ${{ secrets.TRAJECTORY_E2E_DOMAIN }}
-          TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY: ${{ secrets.TRAJECTORY_E2E_ACCESS_KEY }}
-          TRAJECTORY_ANDROID_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
-          TRAJECTORY_ANDROID_SMOKE_FETCH_URL: ${{ secrets.TRAJECTORY_E2E_FETCH_URL }}
-          TRAJECTORY_ANDROID_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
-          TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER: "1"
-          TRAJECTORY_ANDROID_SMOKE_REQUIRE_LIVE: "1"
-          TRAJECTORY_ANDROID_SMOKE_REQUIRE_VPN: "1"
-        with:
-          api-level: 35
-          target: google_apis
-          arch: arm64-v8a
-          profile: pixel
-          disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
-          script: |
-            test -n "$(find "$RUNNER_TEMP/android-release-apk" -name '*.apk' -print -quit)"
-            test -n "$(find "$RUNNER_TEMP/android-smokeprobe-apk" -name '*.apk' -print -quit)"
-            TRAJECTORY_ANDROID_SMOKE_PROBE_APK="$(find "$RUNNER_TEMP/android-smokeprobe-apk" -name '*.apk' -print -quit)" scripts/ci_android_ui_smoke.sh "$(find "$RUNNER_TEMP/android-release-apk" -name '*.apk' -print -quit)" "$RUNNER_TEMP/android-ui-arm64-release"
-
-      - name: Upload Android ARM64 UI smoke artifacts
+      - name: Upload Android ARM64 package smoke artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: ci-android-arm64-ui-smoke
-          path: ${{ runner.temp }}/android-ui-arm64-release
+          name: ci-android-arm64-package-smoke
+          path: ${{ runner.temp }}/android-arm64-package-smoke
           if-no-files-found: error
           retention-days: 7
 

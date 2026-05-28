@@ -57,6 +57,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -417,6 +418,7 @@ private fun TrajectoryAndroidApp(
                                 notice = notice,
                                 profileErrors = profileErrors,
                                 onDismissNotice = { notice = null },
+                                onStop = onStop,
                             )
                         }
                         item {
@@ -566,6 +568,7 @@ private fun StatusCard(
     notice: String?,
     profileErrors: List<String>,
     onDismissNotice: () -> Unit,
+    onStop: () -> Unit,
 ) {
     val dnsReady = status.admittedResolvers > 0 ||
         status.phase.ordinal > RuntimePhase.ADMITTING_RESOLVERS.ordinal
@@ -591,6 +594,21 @@ private fun StatusCard(
                     lineHeight = 19.sp,
                     maxLines = 2,
                 )
+            }
+            if (isWorking) {
+                Spacer(Modifier.width(8.dp))
+                IconButton(
+                    onClick = onStop,
+                    modifier = Modifier.semantics {
+                        contentDescription = "Stop Trajectory"
+                    },
+                ) {
+                    Icon(
+                        Icons.Filled.StopCircle,
+                        contentDescription = null,
+                        tint = TrajectoryColors.WarningInk,
+                    )
+                }
             }
         }
         AnimatedVisibility(isWorking) {
