@@ -580,6 +580,12 @@ jobs:
           path: dist/release
           merge-multiple: true
 
+      - name: Set up Java for Android publish validation
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
       - name: Set up Android SDK for publish validation
         uses: android-actions/setup-android@v3
 
