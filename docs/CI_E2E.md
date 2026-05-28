@@ -98,15 +98,23 @@ SOCKS5-capable egress target.
 
 Normal CI also builds the Android APK, runs JVM unit tests, and checks that the
 APK contains both `arm64-v8a` and `x86_64` native libraries for
-`trajectory-client` and `trajectory_vpn_bridge`. CI now also installs the APK
-on an Android emulator, launches the main activity, asserts the UI tree contains
-the expected product/configuration controls, captures screenshots, and uploads
-the UI smoke artifacts.
+`trajectory-client` and `trajectory_vpn_bridge`. CI now also builds a separate
+debug-only `app.trajectory.smokeprobe` APK used only by the emulator smoke
+harness.
 
-GitHub-hosted runners can prove build packaging, static Android VPN wiring, APK
-installability, and basic launch/render behavior. They cannot prove user
-consent, OEM background behavior, always-on lockdown, DNS leaks, sleep/wake, or
-arbitrary app capture without a real device lab. Those tests must run on trusted
+The Android emulator smoke installs the release APK, launches the main activity,
+asserts the expected UI tree, captures screenshots for each major screen, starts
+a local Trajectory server, proves HTTP and SOCKS proxy fetches over the tunnel,
+then starts VPN mode. The VPN proof checks Android connectivity state for the
+Trajectory VPN network, verifies the smokeprobe app UID is included in the VPN
+UID ranges, and starts the smokeprobe app to fetch a local HTTP marker through
+the VPN data path.
+
+GitHub-hosted runners can prove build packaging, APK installability, emulator
+launch/render behavior, packaged proxy behavior, and emulator VPN packet-path
+capture for a separate app. They still cannot prove OEM background behavior,
+always-on lockdown, sleep/wake, network handoff, Play policy review, or leak
+behavior across arbitrary physical devices. Those tests must run on trusted
 device runners with secrets scoped to a protected environment.
 
 ## Android Release Signing

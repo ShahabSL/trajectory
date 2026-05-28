@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "TrajectoryAndroid"
 include(":app")
+include(":smokeprobe")

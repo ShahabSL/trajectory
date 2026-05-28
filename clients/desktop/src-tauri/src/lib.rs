@@ -381,10 +381,33 @@ fn disable_system_proxy(state: State<'_, AppState>) -> Result<RuntimeSnapshot, S
 }
 
 #[tauri::command]
-fn mark_frontend_ready() -> Result<(), String> {
+fn mark_frontend_ready(visible_text: Option<String>) -> Result<(), String> {
+    let visible_text = visible_text.unwrap_or_default();
+    if std::env::var_os("TRAJECTORY_DESKTOP_SMOKE_READY_FILE").is_some() {
+        for required in [
+            "Trajectory",
+            "Status",
+            "Proxy",
+            "Resolvers",
+            "Disconnected",
+            "Connection Readiness",
+            "Connect Apps",
+            "Tunnel Target",
+        ] {
+            if !visible_text.contains(required) {
+                return Err(format!(
+                    "desktop packaged frontend smoke did not render expected text: {required}"
+                ));
+            }
+        }
+    }
     write_smoke_marker_env(
         "TRAJECTORY_DESKTOP_SMOKE_READY_FILE",
-        format!("frontend ready at {}\n", now_string()),
+        format!(
+            "frontend ready at {}\nvisible_text_len={}\n",
+            now_string(),
+            visible_text.len(),
+        ),
     )
 }
 
@@ -412,17 +435,24 @@ fn mark_smoke_state_ready(state: State<'_, AppState>) -> Result<(), String> {
             .ok_or_else(|| "desktop live smoke has no selected profile".to_string())?;
         let _ = connect_profile_state(&state, profile_id)?;
         let runtime_state = wait_for_connected_smoke(&state, Duration::from_secs(60))?;
-        let fetch_result = smoke_fetch_http_proxy(&runtime_state)?;
+        let http_fetch_result = smoke_fetch_http_proxy(&runtime_state)?;
+        let socks_fetch_result = smoke_fetch_socks_proxy(&runtime_state)?;
+        let socks_endpoint = runtime_state.socks_endpoint.clone();
+        let http_endpoint = runtime_state.http_endpoint.clone();
+        stop_child(&state)?;
+        let shutdown_result = wait_for_shutdown_smoke(socks_endpoint.as_deref(), http_endpoint.as_deref())?;
         write_smoke_marker_env(
             "TRAJECTORY_DESKTOP_SMOKE_LIVE_FILE",
             format!(
-                "live proxy ready at {}\nhttp_endpoint={}\n{}\n",
+                "live proxy ready at {}\nhttp_endpoint={}\nsocks_endpoint={}\n{}{}\n{}\n",
                 now_string(),
                 runtime_state.http_endpoint.as_deref().unwrap_or(""),
-                fetch_result,
+                runtime_state.socks_endpoint.as_deref().unwrap_or(""),
+                http_fetch_result,
+                socks_fetch_result,
+                shutdown_result,
             ),
         )?;
-        let _ = stop_child(&state);
         runtime_state
     } else {
         refresh_snapshot(&state)?
@@ -686,7 +716,7 @@ fn smoke_fetch_http_proxy(snapshot: &RuntimeSnapshot) -> Result<String, String> 
         .ok_or_else(|| "desktop live smoke has no HTTP endpoint".to_string())?;
     let url = std::env::var("TRAJECTORY_DESKTOP_SMOKE_FETCH_URL")
         .unwrap_or_else(|_| "http://example.com/".to_string());
-    let host = http_url_host(&url)?;
+    let target = http_url_target(&url)?;
     let mut addrs = endpoint
         .to_socket_addrs()
         .map_err(|error| format!("resolve desktop smoke HTTP endpoint {endpoint}: {error}"))?;
@@ -701,7 +731,10 @@ fn smoke_fetch_http_proxy(snapshot: &RuntimeSnapshot) -> Result<String, String> 
     stream
         .set_write_timeout(Some(Duration::from_secs(10)))
         .map_err(|error| format!("set desktop smoke write timeout: {error}"))?;
-    let request = format!("GET {url} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    let request = format!(
+        "GET {url} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        target.authority
+    );
     stream
         .write_all(request.as_bytes())
         .map_err(|error| format!("write desktop smoke HTTP request: {error}"))?;
@@ -715,6 +748,7 @@ fn smoke_fetch_http_proxy(snapshot: &RuntimeSnapshot) -> Result<String, String> 
         .unwrap_or_default()
         .trim()
         .to_string();
+    let response_text = String::from_utf8_lossy(&response);
     let ok = status.starts_with("HTTP/")
         && status
             .split_whitespace()
@@ -727,18 +761,194 @@ fn smoke_fetch_http_proxy(snapshot: &RuntimeSnapshot) -> Result<String, String> 
             "desktop live smoke HTTP proxy returned non-success status: {status}"
         ));
     }
-    Ok(format!("fetch_url={url}\nstatus={status}"))
+    let expected_body = std::env::var("TRAJECTORY_DESKTOP_SMOKE_EXPECT_BODY")
+        .unwrap_or_default();
+    if !expected_body.is_empty() && !response_text.contains(&expected_body) {
+        return Err("desktop live smoke HTTP proxy response missed expected body marker".to_string());
+    }
+    Ok(format!(
+        "fetch_url={url}\nstatus={status}\nbody_marker={}\n",
+        if expected_body.is_empty() { "not-required" } else { "matched" }
+    ))
 }
 
-fn http_url_host(url: &str) -> Result<String, String> {
+fn smoke_fetch_socks_proxy(snapshot: &RuntimeSnapshot) -> Result<String, String> {
+    let endpoint = snapshot
+        .socks_endpoint
+        .as_deref()
+        .ok_or_else(|| "desktop live smoke has no SOCKS endpoint".to_string())?;
+    let url = std::env::var("TRAJECTORY_DESKTOP_SMOKE_FETCH_URL")
+        .unwrap_or_else(|_| "http://example.com/".to_string());
+    let target = http_url_target(&url)?;
+    let mut addrs = endpoint
+        .to_socket_addrs()
+        .map_err(|error| format!("resolve desktop smoke SOCKS endpoint {endpoint}: {error}"))?;
+    let addr = addrs
+        .next()
+        .ok_or_else(|| format!("desktop smoke SOCKS endpoint has no addresses: {endpoint}"))?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+        .map_err(|error| format!("connect desktop smoke SOCKS proxy {endpoint}: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(25)))
+        .map_err(|error| format!("set desktop smoke SOCKS read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| format!("set desktop smoke SOCKS write timeout: {error}"))?;
+    stream
+        .write_all(&[0x05, 0x01, 0x00])
+        .map_err(|error| format!("write desktop smoke SOCKS greeting: {error}"))?;
+    let mut greeting = [0_u8; 2];
+    stream
+        .read_exact(&mut greeting)
+        .map_err(|error| format!("read desktop smoke SOCKS greeting: {error}"))?;
+    if greeting != [0x05, 0x00] {
+        return Err(format!(
+            "desktop live smoke SOCKS greeting rejected: {greeting:?}"
+        ));
+    }
+
+    let host_bytes = target.host.as_bytes();
+    if host_bytes.len() > u8::MAX as usize {
+        return Err("desktop live smoke SOCKS host name is too long".to_string());
+    }
+    let mut connect = Vec::with_capacity(7 + host_bytes.len());
+    connect.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host_bytes.len() as u8]);
+    connect.extend_from_slice(host_bytes);
+    connect.extend_from_slice(&target.port.to_be_bytes());
+    stream
+        .write_all(&connect)
+        .map_err(|error| format!("write desktop smoke SOCKS connect: {error}"))?;
+    let mut header = [0_u8; 4];
+    stream
+        .read_exact(&mut header)
+        .map_err(|error| format!("read desktop smoke SOCKS connect header: {error}"))?;
+    if header[0] != 0x05 || header[1] != 0x00 {
+        return Err(format!(
+            "desktop live smoke SOCKS CONNECT failed: {header:?}"
+        ));
+    }
+    match header[3] {
+        0x01 => {
+            let mut rest = [0_u8; 6];
+            stream
+                .read_exact(&mut rest)
+                .map_err(|error| format!("read desktop smoke SOCKS IPv4 bind: {error}"))?;
+        }
+        0x03 => {
+            let mut len = [0_u8; 1];
+            stream
+                .read_exact(&mut len)
+                .map_err(|error| format!("read desktop smoke SOCKS domain bind length: {error}"))?;
+            let mut rest = vec![0_u8; len[0] as usize + 2];
+            stream
+                .read_exact(&mut rest)
+                .map_err(|error| format!("read desktop smoke SOCKS domain bind: {error}"))?;
+        }
+        0x04 => {
+            let mut rest = [0_u8; 18];
+            stream
+                .read_exact(&mut rest)
+                .map_err(|error| format!("read desktop smoke SOCKS IPv6 bind: {error}"))?;
+        }
+        atyp => {
+            return Err(format!("desktop live smoke SOCKS CONNECT returned unknown ATYP {atyp}"));
+        }
+    }
+
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        target.path, target.authority
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("write desktop smoke SOCKS HTTP request: {error}"))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|error| format!("read desktop smoke SOCKS HTTP response: {error}"))?;
+    let status = String::from_utf8_lossy(&response)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let response_text = String::from_utf8_lossy(&response);
+    let ok = status.starts_with("HTTP/")
+        && status
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse::<u16>().ok())
+            .map(|code| (200..400).contains(&code))
+            .unwrap_or(false);
+    if !ok {
+        return Err(format!(
+            "desktop live smoke SOCKS fetch returned non-success status: {status}"
+        ));
+    }
+    let expected_body = std::env::var("TRAJECTORY_DESKTOP_SMOKE_EXPECT_BODY")
+        .unwrap_or_default();
+    if !expected_body.is_empty() && !response_text.contains(&expected_body) {
+        return Err("desktop live smoke SOCKS response missed expected body marker".to_string());
+    }
+    Ok(format!(
+        "socks_fetch_url={url}\nsocks_status={status}\nsocks_body_marker={}\n",
+        if expected_body.is_empty() { "not-required" } else { "matched" }
+    ))
+}
+
+fn wait_for_shutdown_smoke(
+    socks_endpoint: Option<&str>,
+    http_endpoint: Option<&str>,
+) -> Result<String, String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let socks_closed = socks_endpoint.map(|endpoint| !endpoint_ready(endpoint)).unwrap_or(true);
+        let http_closed = http_endpoint.map(|endpoint| !endpoint_ready(endpoint)).unwrap_or(true);
+        if socks_closed && http_closed {
+            return Ok("shutdown=clean".to_string());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!(
+        "desktop live smoke did not prove listener shutdown: socks_closed={} http_closed={}",
+        socks_endpoint.map(|endpoint| !endpoint_ready(endpoint)).unwrap_or(true),
+        http_endpoint.map(|endpoint| !endpoint_ready(endpoint)).unwrap_or(true),
+    ))
+}
+
+struct HttpSmokeTarget {
+    authority: String,
+    host: String,
+    port: u16,
+    path: String,
+}
+
+fn http_url_target(url: &str) -> Result<HttpSmokeTarget, String> {
     let rest = url
         .strip_prefix("http://")
         .ok_or_else(|| "desktop live smoke fetch URL must be plain http://".to_string())?;
-    let host = rest.split('/').next().unwrap_or_default();
-    if host.is_empty() {
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (rest, "/".to_string()),
+    };
+    if authority.is_empty() {
         return Err("desktop live smoke fetch URL is missing host".to_string());
     }
-    Ok(host.to_string())
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => {
+            let port = port
+                .parse::<u16>()
+                .map_err(|error| format!("desktop live smoke URL has invalid port: {error}"))?;
+            (host.to_string(), port)
+        }
+        _ => (authority.to_string(), 80),
+    };
+    Ok(HttpSmokeTarget {
+        authority: authority.to_string(),
+        host,
+        port,
+        path,
+    })
 }
 
 fn startup_detail_from_logs(logs: &[String]) -> String {
@@ -1057,10 +1267,12 @@ fn find_client_binary() -> Result<PathBuf, String> {
         }
     }
 
-    let current_dir = std::env::current_dir().map_err(|error| error.to_string())?;
-    for ancestor in current_dir.ancestors() {
-        candidates.push(ancestor.join("target").join("release").join(binary));
-        candidates.push(ancestor.join("target").join("debug").join(binary));
+    if std::env::var_os("TRAJECTORY_DESKTOP_SMOKE").is_none() {
+        let current_dir = std::env::current_dir().map_err(|error| error.to_string())?;
+        for ancestor in current_dir.ancestors() {
+            candidates.push(ancestor.join("target").join("release").join(binary));
+            candidates.push(ancestor.join("target").join("debug").join(binary));
+        }
     }
 
     candidates

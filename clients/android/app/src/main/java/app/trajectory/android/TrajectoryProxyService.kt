@@ -58,8 +58,8 @@ class TrajectoryProxyService : Service() {
 
     override fun onDestroy() {
         stopRuntime(resetStatus = false)
-        controlExecutor.shutdownNow()
-        logExecutor.shutdownNow()
+        controlExecutor.shutdown()
+        logExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -113,7 +113,12 @@ class TrajectoryProxyService : Service() {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (RuntimeStatusCenter.isPortOpen(port)) return true
-            Thread.sleep(100)
+            try {
+                Thread.sleep(100)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
         }
         return false
     }

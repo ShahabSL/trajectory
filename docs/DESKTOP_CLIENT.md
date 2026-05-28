@@ -111,8 +111,10 @@ validates the distributable Tauri output: it checks expected bundle files,
 verifies the packaged sidecar, inspects installable artifacts, launches the real
 app/AppImage/MSI-extracted app where the platform allows it, and waits for
 backend setup, webview page-load, frontend IPC, and backend state readiness
-markers written by the packaged app. Browser-preview smoke remains the rendered
-React UI gate.
+markers written by the packaged app. In live-smoke mode it also starts a local
+Trajectory server and local HTTP origin, configures the packaged app, proves
+HTTP and SOCKS proxy fetches through the packaged tunnel, and verifies clean
+shutdown. Browser-preview smoke remains the rendered React UI gate.
 
 For live tunnel validation, use the existing protected CI workflow documented in
 `docs/CI_E2E.md`. Live secrets must stay in the protected

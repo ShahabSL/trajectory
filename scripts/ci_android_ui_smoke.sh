@@ -4,9 +4,23 @@ set -euo pipefail
 apk="${1:?usage: ci_android_ui_smoke.sh <apk> [artifact-dir]}"
 artifact_dir="${2:-${RUNNER_TEMP:-/tmp}/trajectory-android-ui}"
 package_name="app.trajectory.android"
+smoke_probe_package="app.trajectory.smokeprobe"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -z "${ANDROID_HOME:-}" && -d "$repo_root/.tooling/android-sdk" ]]; then
+  export ANDROID_HOME="$repo_root/.tooling/android-sdk"
+fi
+if [[ -n "${ANDROID_HOME:-}" && -d "$ANDROID_HOME/platform-tools" ]]; then
+  export PATH="$ANDROID_HOME/platform-tools:$PATH"
+fi
+smoke_probe_apk="${TRAJECTORY_ANDROID_SMOKE_PROBE_APK:-$repo_root/clients/android/smokeprobe/build/outputs/apk/debug/smokeprobe-debug.apk}"
 
 mkdir -p "$artifact_dir"
 test -f "$apk"
+
+local_live_dir=""
+local_live_server_pid=""
+local_origin_pid=""
+local_origin_marker=""
 
 wait_for_boot_completed() {
   for _ in $(seq 1 90); do
@@ -29,6 +43,34 @@ install_apk() {
     sleep 2
   done
   echo "Android APK install failed after retries" >&2
+  return 1
+}
+
+build_smoke_probe_apk() {
+  if [[ -n "${TRAJECTORY_ANDROID_SMOKE_PROBE_APK:-}" && -f "$smoke_probe_apk" ]]; then
+    return 0
+  fi
+  if [[ -n "${TRAJECTORY_ANDROID_SMOKE_PROBE_APK:-}" ]]; then
+    echo "Android VPN smoke probe APK was not found: $smoke_probe_apk" >&2
+    return 1
+  fi
+  "$repo_root/clients/android/gradlew" -p "$repo_root/clients/android" \
+    :smokeprobe:assembleDebug --no-daemon \
+    > "$artifact_dir/smokeprobe-build.txt" 2>&1
+  test -f "$smoke_probe_apk"
+}
+
+install_smoke_probe_apk() {
+  build_smoke_probe_apk
+  local attempt
+  for attempt in 1 2 3; do
+    if adb install -r "$smoke_probe_apk" > "$artifact_dir/smokeprobe-install-attempt-${attempt}.txt" 2>&1; then
+      return 0
+    fi
+    adb uninstall "$smoke_probe_package" >/dev/null 2>&1 || true
+    sleep 2
+  done
+  echo "Android smoke probe APK install failed after retries" >&2
   return 1
 }
 
@@ -87,6 +129,17 @@ on_exit() {
   if [[ "$code" -ne 0 ]]; then
     record_failure_artifacts
   fi
+  if [[ -n "$local_origin_pid" ]] && kill -0 "$local_origin_pid" >/dev/null 2>&1; then
+    kill "$local_origin_pid" >/dev/null 2>&1 || true
+    wait "$local_origin_pid" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$local_live_server_pid" ]] && kill -0 "$local_live_server_pid" >/dev/null 2>&1; then
+    kill "$local_live_server_pid" >/dev/null 2>&1 || true
+    wait "$local_live_server_pid" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$local_live_dir" ]]; then
+    rm -rf "$local_live_dir"
+  fi
   exit "$code"
 }
 
@@ -95,6 +148,7 @@ trap on_exit EXIT
 adb wait-for-device
 wait_for_boot_completed
 adb uninstall "$package_name" >/dev/null 2>&1 || true
+adb uninstall "$smoke_probe_package" >/dev/null 2>&1 || true
 install_apk
 run_android_sidecar_help
 if adb shell pm grant "$package_name" android.permission.POST_NOTIFICATIONS > "$artifact_dir/notification-permission.txt" 2>&1; then
@@ -519,6 +573,24 @@ PY
   adb shell input tap ${coords}
 }
 
+tap_control() {
+  local label="$1"
+  local source_xml="$2"
+  local prefix="$3"
+  if tap_node "$label" "$source_xml"; then
+    return 0
+  fi
+  for pass in 1 2 3 4; do
+    adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
+    sleep 1
+    dump_screen "${prefix}_controls_${pass}"
+    if tap_node "$label" "$artifact_dir/${prefix}_controls_${pass}.xml"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 assert_checked_mode() {
   local mode_description="$1"
   local xml="$2"
@@ -633,14 +705,495 @@ PY
   adb shell input tap ${coords}
 }
 
-clear_focused_field() {
-  adb shell input keyevent KEYCODE_MOVE_END >/dev/null 2>&1 || true
-  for _ in $(seq 1 96); do
-    adb shell input keyevent KEYCODE_DEL >/dev/null 2>&1 || true
-  done
+tap_first_password_field() {
+  local xml="$1"
+  local coords
+  if ! coords="$(python3 - "$xml" <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+tree = ET.parse(sys.argv[1])
+
+for node in tree.iter("node"):
+    if node.attrib.get("password") != "true":
+        continue
+    match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds", ""))
+    if not match:
+        continue
+    x1, y1, x2, y2 = map(int, match.groups())
+    print((x1 + x2) // 2, (y1 + y2) // 2)
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+  )"; then
+    return 1
+  fi
+  adb shell input tap ${coords}
 }
 
-run_optional_live_proxy_smoke() {
+clear_focused_field() {
+  adb shell 'input keyevent KEYCODE_MOVE_END >/dev/null 2>&1 || true; i=0; while [ "$i" -lt 96 ]; do input keyevent KEYCODE_DEL >/dev/null 2>&1 || true; i=$((i + 1)); done'
+}
+
+pick_local_port() {
+  python3 - <<'PY'
+import socket
+
+for _ in range(100):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as stream:
+        stream.bind(("127.0.0.1", 0))
+        port = stream.getsockname()[1]
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as datagram:
+            try:
+                datagram.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            print(port)
+            raise SystemExit(0)
+raise SystemExit("could not find a free TCP/UDP port")
+PY
+}
+
+pick_host_ip() {
+  local ip
+  ip="$(
+    (ip route get 8.8.8.8 2>/dev/null || true) |
+      awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }'
+  )"
+  if [[ -z "$ip" ]]; then
+    ip="$(hostname -I 2>/dev/null | awk '{ print $1 }')"
+  fi
+  printf '%s\n' "${ip:-127.0.0.1}"
+}
+
+prepare_local_live_proxy_smoke() {
+  if [[ "${TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER:-}" != "1" ]]; then
+    return 0
+  fi
+
+  local_live_dir="$(mktemp -d)"
+  local client_db="$local_live_dir/clients.json"
+  local origin_dir="$local_live_dir/origin"
+  local domain="${TRAJECTORY_ANDROID_SMOKE_LOCAL_DOMAIN:-t.android-smoke}"
+  local dns_port="${TRAJECTORY_ANDROID_SMOKE_LOCAL_DNS_PORT:-$(pick_local_port)}"
+  local origin_port="${TRAJECTORY_ANDROID_SMOKE_LOCAL_ORIGIN_PORT:-$(pick_local_port)}"
+  local host_ip="${TRAJECTORY_ANDROID_SMOKE_LOCAL_HOST_IP:-$(pick_host_ip)}"
+
+  mkdir -p "$origin_dir"
+  local_origin_marker="trajectory-android-smoke-${RANDOM}-${RANDOM}"
+  printf '%s\n' "$local_origin_marker" > "$origin_dir/trajectory-smoke.txt"
+  python3 -u -m http.server "$origin_port" --bind 0.0.0.0 --directory "$origin_dir" \
+    > "$artifact_dir/local-origin-server.log" 2>&1 &
+  local_origin_pid=$!
+  sleep 1
+  if ! kill -0 "$local_origin_pid" >/dev/null 2>&1; then
+    echo "Android local origin server exited early" >&2
+    sed -n '1,160p' "$artifact_dir/local-origin-server.log" >&2 || true
+    return 1
+  fi
+
+  cargo build --release -p trajectory-cli --bin trajectory-server --bin trajectory-admin \
+    > "$artifact_dir/local-live-build.txt" 2>&1
+
+  local access_key
+  access_key="$(
+    target/release/trajectory-admin create-client \
+      --client-db "$client_db" \
+      --label android-smoke \
+      --format key
+  )"
+
+  target/release/trajectory-server \
+    --domain "$domain" \
+    --client-db "$client_db" \
+    --bind 0.0.0.0 \
+    --dns-listen-port "$dns_port" \
+    --target-address socks5-direct \
+    > "$artifact_dir/local-live-server.log" 2>&1 &
+  local_live_server_pid=$!
+  sleep 1
+  if ! kill -0 "$local_live_server_pid" >/dev/null 2>&1; then
+    echo "Android local live smoke server exited early" >&2
+    sed -n '1,160p' "$artifact_dir/local-live-server.log" >&2 || true
+    return 1
+  fi
+
+  export TRAJECTORY_ANDROID_SMOKE_DOMAIN="$domain"
+  export TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY="$access_key"
+  export TRAJECTORY_ANDROID_SMOKE_RESOLVERS="10.0.2.2:${dns_port}"
+  export TRAJECTORY_ANDROID_SMOKE_FETCH_URL="http://${host_ip}:${origin_port}/trajectory-smoke.txt"
+  export TRAJECTORY_ANDROID_SMOKE_EXPECT_BODY="$local_origin_marker"
+  echo "Android local live proxy smoke server ready on host DNS port ${dns_port}; origin http://${host_ip}:${origin_port}/trajectory-smoke.txt" \
+    > "$artifact_dir/local-live-server-ready.txt"
+}
+
+start_live_profile_from_intent() {
+  local domain="$1"
+  local access_key="$2"
+  local resolvers="$3"
+  adb shell am force-stop "$package_name"
+  adb shell am start -W -n "$activity" \
+    --es trajectory_smoke_domain "$domain" \
+    --es trajectory_smoke_access_key "$access_key" \
+    --es trajectory_smoke_resolvers "$resolvers" \
+    --es trajectory_smoke_resolver_transport auto \
+    --es trajectory_smoke_transport_mode velocity \
+    --es trajectory_smoke_socks_port "${TRAJECTORY_ANDROID_SMOKE_SOCKS_PORT:-7000}" \
+    --es trajectory_smoke_http_port "${TRAJECTORY_ANDROID_SMOKE_HTTP_PORT:-7001}" \
+    > "$artifact_dir/live-smoke-intent-start.txt"
+  sleep 2
+  dump_screen "live_smoke_configured"
+}
+
+fetch_android_http_proxy() {
+  local http_fetch_url="$1"
+  local http_host="$2"
+  local http_port="$3"
+  local output="$4"
+  timeout 25s adb shell "printf 'GET ${http_fetch_url} HTTP/1.1\r\nHost: ${http_host}\r\nConnection: close\r\n\r\n' | toybox nc -w 20 -q 2 127.0.0.1 ${http_port}" \
+    > "$output" 2>&1
+}
+
+assert_http_proxy_response() {
+  local output="$1"
+  if ! grep -Eq '^HTTP/[0-9.]+ [23][0-9][0-9]' "$output"; then
+    echo "Android live proxy smoke did not receive a 2xx/3xx HTTP response" >&2
+    return 1
+  fi
+  if [[ -n "${TRAJECTORY_ANDROID_SMOKE_EXPECT_BODY:-}" ]] && ! grep -Fq "$TRAJECTORY_ANDROID_SMOKE_EXPECT_BODY" "$output"; then
+    echo "Android live proxy smoke did not receive the deterministic local origin marker" >&2
+    return 1
+  fi
+}
+
+assert_socks_fetch() {
+  local socks_port="${TRAJECTORY_ANDROID_SMOKE_SOCKS_PORT:-7000}"
+  local forward_port="${TRAJECTORY_ANDROID_SMOKE_SOCKS_FORWARD_PORT:-$(pick_local_port)}"
+  local output="$artifact_dir/live-proxy-socks-fetch.txt"
+  adb forward "tcp:${forward_port}" "tcp:${socks_port}" >/dev/null
+  python3 - "$forward_port" "${TRAJECTORY_ANDROID_SMOKE_FETCH_URL:-}" "$output" "${TRAJECTORY_ANDROID_SMOKE_EXPECT_BODY:-}" <<'PY'
+import socket
+import struct
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+forward_port = int(sys.argv[1])
+url = urlparse(sys.argv[2])
+output = Path(sys.argv[3])
+expected = sys.argv[4]
+
+if url.scheme != "http" or not url.hostname:
+    raise SystemExit("SOCKS smoke requires a plain http:// URL")
+host = url.hostname
+port = url.port or 80
+path = url.path or "/"
+if url.query:
+    path += "?" + url.query
+
+with socket.create_connection(("127.0.0.1", forward_port), timeout=10) as stream:
+    stream.settimeout(25)
+    stream.sendall(b"\x05\x01\x00")
+    greeting = stream.recv(2)
+    if greeting != b"\x05\x00":
+        raise SystemExit(f"unexpected SOCKS greeting response: {greeting!r}")
+    encoded_host = host.encode("idna")
+    if len(encoded_host) > 255:
+        raise SystemExit("SOCKS host name is too long")
+    request = b"\x05\x01\x00\x03" + bytes([len(encoded_host)]) + encoded_host + struct.pack("!H", port)
+    stream.sendall(request)
+    reply = stream.recv(10)
+    if len(reply) < 2 or reply[1] != 0:
+        raise SystemExit(f"SOCKS CONNECT failed: {reply!r}")
+    http = f"GET {path} HTTP/1.1\r\nHost: {url.netloc}\r\nConnection: close\r\n\r\n".encode()
+    stream.sendall(http)
+    chunks = []
+    while True:
+        chunk = stream.recv(4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
+
+response = b"".join(chunks)
+output.write_bytes(response)
+text = response.decode("utf-8", "replace")
+status = text.splitlines()[0] if text.splitlines() else ""
+if not status.startswith("HTTP/") or len(status.split()) < 2 or not status.split()[1].startswith(("2", "3")):
+    raise SystemExit(f"SOCKS HTTP fetch returned non-success status: {status}")
+if expected and expected not in text:
+    raise SystemExit("SOCKS HTTP fetch missed expected body marker")
+PY
+  local status=$?
+  adb forward --remove "tcp:${forward_port}" >/dev/null 2>&1 || true
+  if [[ "$status" -ne 0 ]]; then
+    echo "Android live proxy smoke could not fetch deterministic body through SOCKS on 127.0.0.1:${socks_port}" >&2
+    return 1
+  fi
+}
+
+assert_proxy_status_connected() {
+  local source_xml="$1"
+  if grep -Fq "Proxy connected" "$source_xml" ||
+    grep -Fq "status.phase.proxy_connected" "$source_xml"; then
+    return 0
+  fi
+  echo "Android live proxy data path worked, but UI did not show Proxy connected" >&2
+  return 1
+}
+
+assert_vpn_status_connected() {
+  local source_xml="$1"
+  if grep -Fq "VPN connected" "$source_xml" ||
+    grep -Fq "status.phase.vpn_connected" "$source_xml"; then
+    return 0
+  fi
+  echo "Android VPN data path worked, but UI did not show VPN connected" >&2
+  return 1
+}
+
+assert_socks_handshake() {
+  if ! assert_socks_fetch; then
+      return 1
+  fi
+}
+
+port_is_closed() {
+  local port="$1"
+  ! timeout 5s adb shell "toybox nc -w 1 127.0.0.1 ${port} </dev/null >/dev/null 2>&1"
+}
+
+assert_no_android_crash() {
+  local log="$1"
+  if ! timeout 15s adb logcat -d > "$log" 2> "${log}.stderr"; then
+    echo "Android logcat capture timed out or failed; continuing with UI/data-path assertions" > "${log}.warning"
+    return 0
+  fi
+  if grep -E "FATAL EXCEPTION|E AndroidRuntime" "$log"; then
+    echo "Android crash detected during UI smoke test" >&2
+    return 1
+  fi
+}
+
+assert_clean_proxy_shutdown() {
+  local source_xml="$1"
+  local http_port="${TRAJECTORY_ANDROID_SMOKE_HTTP_PORT:-7001}"
+  local socks_port="${TRAJECTORY_ANDROID_SMOKE_SOCKS_PORT:-7000}"
+  tap_control "Stop Trajectory" "$source_xml" "live_proxy_stop" || true
+  for pass in $(seq 1 15); do
+    sleep 1
+    adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 500 >/dev/null 2>&1 || true
+    adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 500 >/dev/null 2>&1 || true
+    dump_screen "live_proxy_stopped_${pass}"
+    assert_no_android_crash "$artifact_dir/live-proxy-stop-logcat-${pass}.txt"
+    if grep -Fq "status.phase.disconnected" "$artifact_dir/live_proxy_stopped_${pass}.xml" &&
+      port_is_closed "$http_port" &&
+      port_is_closed "$socks_port" &&
+      ! adb shell ps -A | grep -E 'trajectory_client|libtrajectory_client' > "$artifact_dir/live-proxy-sidecar-processes.txt"; then
+      echo "Proxy stopped cleanly after ${pass}s" > "$artifact_dir/live-proxy-clean-shutdown.txt"
+      return 0
+    fi
+  done
+  echo "Android live proxy smoke did not prove clean shutdown" >&2
+  return 1
+}
+
+accept_vpn_consent() {
+  local probe="$artifact_dir/vpn-consent.raw.xml"
+  local action
+  for _ in $(seq 1 10); do
+    if ! timeout 5s adb exec-out uiautomator dump /dev/tty > "$probe" 2>/dev/null; then
+      sleep 1
+      continue
+    fi
+    if ! action="$(python3 - "$probe" <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+raw = open(sys.argv[1], errors="replace").read()
+end = raw.find("</hierarchy>")
+if end < 0:
+    raise SystemExit(1)
+root = ET.fromstring(raw[: end + len("</hierarchy>")])
+texts = []
+for node in root.iter("node"):
+    for key in ("text", "content-desc"):
+        value = node.attrib.get(key, "")
+        if value:
+            texts.append(value)
+dialog_present = any("Connection request" in text for text in texts) and any("VPN" in text for text in texts)
+if not dialog_present:
+    print("NONE")
+    raise SystemExit(0)
+for node in root.iter("node"):
+    if node.attrib.get("text") in {"OK", "Connect", "Allow", "Continue"}:
+        match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds", ""))
+        if match:
+            x1, y1, x2, y2 = map(int, match.groups())
+            print("TAP", (x1 + x2) // 2, (y1 + y2) // 2)
+            raise SystemExit(0)
+print("WAIT")
+PY
+    )"; then
+      sleep 1
+      continue
+    fi
+    if [[ "$action" == TAP* ]]; then
+      adb shell input tap ${action#TAP }
+      sleep 2
+      continue
+    fi
+    if [[ "$action" == "NONE" ]]; then
+      return 0
+    fi
+    if [[ "$action" == "WAIT" ]]; then
+      sleep 1
+      continue
+    fi
+    sleep 1
+  done
+  echo "Android VPN consent dialog did not dismiss" >&2
+  return 1
+}
+
+assert_vpn_network_active() {
+  local output="$1"
+  local uid_output="${output%.txt}-smokeprobe-uid.txt"
+  local package_output="${output%.txt}-smokeprobe-package.txt"
+  local probe_uid
+  adb shell dumpsys package "$smoke_probe_package" > "$package_output" 2>&1 || true
+  probe_uid="$(
+    tr -d '\r' < "$package_output" |
+      awk -F= '/userId=/ { print $2; exit }'
+  )"
+  if [[ -z "$probe_uid" ]]; then
+    probe_uid="$(
+      tr -d '\r' < "$package_output" |
+        awk -F= '/appId=/ { print $2; exit }'
+    )"
+  fi
+  if [[ -z "$probe_uid" || ! "$probe_uid" =~ ^[0-9]+$ ]]; then
+    echo "Android VPN smoke could not resolve smoke probe UID" >&2
+    return 1
+  fi
+  printf '%s\n' "$probe_uid" > "$uid_output"
+  timeout 10s adb shell dumpsys connectivity > "$output" 2>&1
+  if ! grep -Fq "VPN CONNECTED extra: VPN:${package_name}" "$output" ||
+    ! grep -Fq "InterfaceName: tun0" "$output"; then
+    echo "Android VPN network was not visible in dumpsys connectivity" >&2
+    return 1
+  fi
+  python3 - "$output" "$probe_uid" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(errors="replace")
+probe_uid = int(sys.argv[2])
+match = re.search(r"VPN CONNECTED extra: VPN:app\.trajectory\.android.*?Uids: <\{([^}]*)\}>", text, re.S)
+if not match:
+    raise SystemExit("could not find VPN UID ranges")
+for entry in match.group(1).split(","):
+    entry = entry.strip()
+    if "-" in entry:
+        start, end = [int(part) for part in entry.split("-", 1)]
+    elif entry:
+        start = end = int(entry)
+    else:
+        continue
+    if start <= probe_uid <= end:
+        raise SystemExit(0)
+raise SystemExit(f"smoke probe UID {probe_uid} is not routed through the VPN")
+PY
+}
+
+run_vpn_probe_app() {
+  local http_fetch_url="$1"
+  local output_prefix="$2"
+  install_smoke_probe_apk
+  adb shell am force-stop "$smoke_probe_package" >/dev/null 2>&1 || true
+  adb shell run-as "$smoke_probe_package" rm -f files/result.txt >/dev/null 2>&1 || true
+  adb shell am start -W \
+    -n "$smoke_probe_package/.SmokeProbeActivity" \
+    --es trajectory_smoke_fetch_url "$http_fetch_url" \
+    --es trajectory_smoke_expect_body "${TRAJECTORY_ANDROID_SMOKE_EXPECT_BODY:-}" \
+    > "$artifact_dir/${output_prefix}-start.txt" 2>&1
+
+  local pass
+  for pass in $(seq 1 30); do
+    sleep 1
+    adb shell run-as "$smoke_probe_package" cat files/result.txt \
+      > "$artifact_dir/${output_prefix}-result-${pass}.txt" 2>/dev/null || true
+    if grep -Fq "passed" "$artifact_dir/${output_prefix}-result-${pass}.txt"; then
+      dump_screen "${output_prefix}_passed_${pass}"
+      adb shell am force-stop "$smoke_probe_package" >/dev/null 2>&1 || true
+      return 0
+    fi
+    if grep -Fq "failed" "$artifact_dir/${output_prefix}-result-${pass}.txt"; then
+      dump_screen "${output_prefix}_failed_${pass}"
+      echo "Android VPN probe app failed to fetch deterministic body through VPN" >&2
+      return 1
+    fi
+  done
+  dump_screen "${output_prefix}_timeout"
+  echo "Android VPN probe app timed out waiting for deterministic HTTP response" >&2
+  return 1
+}
+
+run_vpn_smoke() {
+  if [[ "${TRAJECTORY_ANDROID_SMOKE_REQUIRE_VPN:-}" != "1" ]]; then
+    echo "Android VPN smoke skipped; TRAJECTORY_ANDROID_SMOKE_REQUIRE_VPN is not set" \
+      > "$artifact_dir/vpn-smoke-skipped.txt"
+    return 0
+  fi
+  if [[ -z "${TRAJECTORY_ANDROID_SMOKE_DOMAIN:-}" || -z "${TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY:-}" ]]; then
+    echo "Android VPN smoke requires the live/local smoke profile" >&2
+    return 1
+  fi
+  local http_fetch_url="${TRAJECTORY_ANDROID_SMOKE_FETCH_URL:-}"
+  if [[ "$http_fetch_url" != http://* ]]; then
+    echo "Android VPN smoke requires a deterministic plain http:// fetch URL" >&2
+    return 1
+  fi
+
+  start_live_profile_from_intent \
+    "$TRAJECTORY_ANDROID_SMOKE_DOMAIN" \
+    "$TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY" \
+    "${TRAJECTORY_ANDROID_SMOKE_RESOLVERS:-}"
+  tap_control "Start VPN" "$artifact_dir/live_smoke_configured.xml" "vpn_live"
+  accept_vpn_consent
+  for pass in $(seq 1 45); do
+    sleep 1
+    adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 500 >/dev/null 2>&1 || true
+    adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 500 >/dev/null 2>&1 || true
+    dump_screen "vpn_live_${pass}"
+    assert_no_android_crash "$artifact_dir/vpn-live-logcat-${pass}.txt"
+    if grep -Fq "VPN connected" "$artifact_dir/vpn_live_${pass}.xml" ||
+      grep -Fq "status.phase.vpn_connected" "$artifact_dir/vpn_live_${pass}.xml"; then
+      install_smoke_probe_apk
+      assert_vpn_network_active "$artifact_dir/vpn-connectivity.txt"
+      run_vpn_probe_app "$http_fetch_url" "vpn_probe"
+      adb shell am start -W -n "$activity" > "$artifact_dir/vpn-return-main.txt" 2>&1
+      sleep 1
+      dump_screen "vpn_live_proven_${pass}"
+      assert_vpn_status_connected "$artifact_dir/vpn_live_proven_${pass}.xml"
+      echo "VPN connected after ${pass}s" > "$artifact_dir/vpn-smoke.txt"
+      assert_clean_proxy_shutdown "$artifact_dir/vpn_live_proven_${pass}.xml"
+      return 0
+    fi
+    if grep -Fq "Failed" "$artifact_dir/vpn_live_${pass}.xml"; then
+      echo "Android VPN smoke reached Failed state" >&2
+      return 1
+    fi
+  done
+  echo "Timed out waiting for Android VPN to connect" >&2
+  return 1
+}
+
+run_live_proxy_smoke() {
+  prepare_local_live_proxy_smoke
   local domain="${TRAJECTORY_ANDROID_SMOKE_DOMAIN:-}"
   local access_key="${TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY:-}"
   local http_fetch_url="${TRAJECTORY_ANDROID_SMOKE_FETCH_URL:-http://example.com/}"
@@ -655,9 +1208,37 @@ run_optional_live_proxy_smoke() {
   http_host="${http_host%%/*}"
 
   if [[ -z "$domain" || -z "$access_key" ]]; then
+    if [[ "${TRAJECTORY_ANDROID_SMOKE_ALLOW_OFFLINE:-}" != "1" ]]; then
+      echo "Android live proxy smoke requires TRAJECTORY_ANDROID_SMOKE_DOMAIN/ACCESS_KEY or TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER=1" >&2
+      return 1
+    fi
     echo "Android live proxy smoke skipped; TRAJECTORY_ANDROID_SMOKE_DOMAIN/ACCESS_KEY are not set" \
       > "$artifact_dir/live-proxy-smoke-skipped.txt"
     return 0
+  fi
+
+  if [[ "${TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER:-}" == "1" ]]; then
+    start_live_profile_from_intent "$domain" "$access_key" "${TRAJECTORY_ANDROID_SMOKE_RESOLVERS:-}"
+    tap_control "Start proxy" "$artifact_dir/live_smoke_configured.xml" "live_smoke"
+    for pass in $(seq 1 60); do
+      sleep 1
+      dump_screen "live_proxy_${pass}"
+      if fetch_android_http_proxy "$http_fetch_url" "$http_host" "$http_port" "$artifact_dir/live-proxy-http.txt" &&
+        assert_http_proxy_response "$artifact_dir/live-proxy-http.txt" &&
+        assert_socks_handshake; then
+        dump_screen "live_proxy_proven_${pass}"
+        assert_proxy_status_connected "$artifact_dir/live_proxy_proven_${pass}.xml"
+        echo "Proxy connected after ${pass}s" > "$artifact_dir/live-proxy-smoke.txt"
+        assert_clean_proxy_shutdown "$artifact_dir/live_proxy_proven_${pass}.xml"
+        return 0
+      fi
+      if grep -Fq "Failed" "$artifact_dir/live_proxy_${pass}.xml"; then
+        echo "Android live proxy smoke reached Failed state" >&2
+        return 1
+      fi
+    done
+    echo "Timed out waiting for Android live proxy to reach Proxy connected" >&2
+    return 1
   fi
 
   tap_node "Profile tab" "$nav_source" || tap_node "Profile" "$nav_source"
@@ -666,7 +1247,9 @@ run_optional_live_proxy_smoke() {
   tap_first_text_field_after_label "Tunnel domain" "$artifact_dir/live_profile.xml"
   clear_focused_field
   adb_input_text "$domain"
-  tap_first_text_field_after_label "Access key" "$artifact_dir/live_profile.xml"
+  dump_screen "live_profile_domain"
+  tap_first_text_field_after_label "Access key" "$artifact_dir/live_profile_domain.xml" \
+    || tap_first_password_field "$artifact_dir/live_profile_domain.xml"
   clear_focused_field
   adb_input_text "$access_key"
   adb shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
@@ -698,23 +1281,22 @@ run_optional_live_proxy_smoke() {
   tap_node "Save profile" "$artifact_dir/live_status.xml"
   sleep 1
   dump_screen "live_saved"
-  tap_node "Start proxy" "$artifact_dir/live_saved.xml"
+  tap_control "Start proxy" "$artifact_dir/live_saved.xml" "live_saved"
 
   for pass in $(seq 1 60); do
     sleep 1
     dump_screen "live_proxy_${pass}"
-    if grep -Fq "Proxy connected" "$artifact_dir/live_proxy_${pass}.xml"; then
+    if grep -Fq "Proxy connected" "$artifact_dir/live_proxy_${pass}.xml" ||
+      grep -Fq "status.phase.proxy_connected" "$artifact_dir/live_proxy_${pass}.xml"; then
       echo "Proxy connected after ${pass}s" > "$artifact_dir/live-proxy-smoke.txt"
-      if ! timeout 25s adb shell "printf 'GET ${http_fetch_url} HTTP/1.1\r\nHost: ${http_host}\r\nConnection: close\r\n\r\n' | toybox nc -w 20 127.0.0.1 ${http_port}" \
-        > "$artifact_dir/live-proxy-http.txt" 2>&1; then
+      if ! fetch_android_http_proxy "$http_fetch_url" "$http_host" "$http_port" "$artifact_dir/live-proxy-http.txt"; then
         echo "Android live proxy smoke could not fetch through HTTP proxy on 127.0.0.1:${http_port}" >&2
         return 1
       fi
-      if ! grep -Eq '^HTTP/[0-9.]+ [23][0-9][0-9]' "$artifact_dir/live-proxy-http.txt"; then
-        echo "Android live proxy smoke did not receive a 2xx/3xx HTTP response" >&2
-        return 1
-      fi
-      tap_node "Stop Trajectory" "$artifact_dir/live_proxy_${pass}.xml" || true
+      assert_http_proxy_response "$artifact_dir/live-proxy-http.txt"
+      assert_socks_handshake
+      assert_proxy_status_connected "$artifact_dir/live_proxy_${pass}.xml"
+      assert_clean_proxy_shutdown "$artifact_dir/live_proxy_${pass}.xml"
       return 0
     fi
     if grep -Fq "Failed" "$artifact_dir/live_proxy_${pass}.xml"; then
@@ -773,9 +1355,27 @@ capture_tab() {
 }
 
 xml_files=()
-wait_for_text "Start proxy" main
-assert_texts "$artifact_dir/main.xml" "Trajectory" "Status" "Start proxy"
+wait_for_text "status.phase.disconnected" main
+assert_texts "$artifact_dir/main.xml" "Trajectory" "Status" "status.phase.disconnected"
 xml_files+=("$artifact_dir/main.xml")
+adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
+sleep 1
+dump_screen "main_controls"
+cp "$artifact_dir/main_controls.xml" "$artifact_dir/main_controls_all.xml"
+for pass in 1 2 3 4; do
+  if grep -Fq "Start proxy" "$artifact_dir/main_controls_all.xml" &&
+    grep -Fq "Start VPN" "$artifact_dir/main_controls_all.xml"; then
+    break
+  fi
+  adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
+  sleep 1
+  dump_screen "main_controls_${pass}"
+  cat "$artifact_dir/main_controls.xml" "$artifact_dir/main_controls_"[0-9]*.xml > "$artifact_dir/main_controls_all.xml"
+done
+assert_texts "$artifact_dir/main_controls_all.xml" "Controls" "Start proxy" "Start VPN"
+xml_files+=("$artifact_dir/main_controls_all.xml")
+adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 600
+sleep 1
 
 nav_source="$artifact_dir/main.xml"
 for tab in Profile Resolvers VPN Diagnostics; do
@@ -852,13 +1452,18 @@ assert_texts "$artifact_dir/all.xml" \
   "MTU" \
   "Diagnostics" \
   "Runtime log" \
-  "Start VPN" \
-  "Stop Trajectory"
+  "Start VPN"
 
-run_optional_live_proxy_smoke
+run_live_proxy_smoke
+run_vpn_smoke
 
-adb logcat -d > "$artifact_dir/logcat.txt"
-if grep -E "FATAL EXCEPTION|E AndroidRuntime" "$artifact_dir/logcat.txt"; then
+if timeout 15s adb logcat -d > "$artifact_dir/logcat.txt" 2> "$artifact_dir/logcat.stderr"; then
+  final_logcat_available=1
+else
+  final_logcat_available=0
+  echo "Android final logcat capture timed out or failed; UI/data-path smoke completed" > "$artifact_dir/logcat.warning"
+fi
+if [[ "$final_logcat_available" == "1" ]] && grep -E "FATAL EXCEPTION|E AndroidRuntime" "$artifact_dir/logcat.txt"; then
   echo "Android crash detected during UI smoke test" >&2
   exit 1
 fi

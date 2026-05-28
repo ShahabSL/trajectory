@@ -48,7 +48,7 @@ scheduler behavior are stable across weak and strong resolver sets.
 ANDROID_HOME="$PWD/.tooling/android-sdk" \
 ANDROID_SDK_ROOT="$PWD/.tooling/android-sdk" \
 ANDROID_NDK_HOME="$PWD/.tooling/android-sdk/ndk/29.0.14206865" \
-  ./clients/android/gradlew -p clients/android :app:assembleDebug :app:assembleRelease --no-daemon
+  ./clients/android/gradlew -p clients/android :app:assembleDebug :app:assembleRelease :smokeprobe:assembleDebug --no-daemon
 ```
 
 The APKs are written to:
@@ -92,7 +92,11 @@ The CI smoke installs the APK, resolves and launches the activity, captures UI
 trees and screenshots for every tab, scrolls until lower controls such as
 `Check DNS list` are visible, selects `Frontier`, runs the packaged
 `libtrajectory_client.so --help`, applies screenshot visual-density checks, and
-fails on Android crash/ANR dialogs or `AndroidRuntime` crashes.
+fails on Android crash/ANR dialogs or `AndroidRuntime` crashes. In live mode it
+starts a local Trajectory server and HTTP origin, proves HTTP and SOCKS proxy
+fetches over the tunnel, starts VPN mode, verifies the separate smokeprobe app
+UID is routed through the Android VPN network, and makes that app fetch through
+the VPN data path.
 
 ## Product Boundary
 

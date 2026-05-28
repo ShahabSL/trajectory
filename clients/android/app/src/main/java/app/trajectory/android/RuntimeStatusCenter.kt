@@ -136,7 +136,7 @@ object RuntimeStatusCenter {
             mode = RuntimeMode.VPN,
             phase = RuntimePhase.VPN_CONNECTED,
             title = "VPN connected",
-            detail = "TUN is established, local SOCKS is accepting connections, and the bridge is running.",
+            detail = "TUN is established, local SOCKS is accepting connections, and the bridge passed startup guard.",
             tunReady = true,
             bridgeReady = true,
         )
@@ -219,7 +219,19 @@ object RuntimeStatusCenter {
             return
         }
 
-        if (lower.contains("failed") || lower.contains("timed out") || lower.contains("error")) {
+        val isRecoveredTransportFallback =
+            (lower.contains("failed") || lower.contains("timed out")) &&
+                (lower.contains("retrying over tcp") || lower.contains("retrying udp"))
+        val isBenignLocalProbe =
+            (lower.contains("http proxy stream") &&
+                lower.contains("client closed before sending headers")) ||
+                (lower.contains("socks proxy stream") &&
+                    lower.contains("read socks greeting") &&
+                    lower.contains("early eof"))
+        if (!isRecoveredTransportFallback &&
+            !isBenignLocalProbe &&
+            (lower.contains("failed") || lower.contains("timed out") || lower.contains("error"))
+        ) {
             if (current.phase == RuntimePhase.PROXY_CONNECTED || current.phase == RuntimePhase.VPN_CONNECTED) {
                 update(
                     mode = mode,

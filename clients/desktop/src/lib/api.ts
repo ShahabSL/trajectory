@@ -129,7 +129,8 @@ export const desktopApi: DesktopApi = hasTauriRuntime()
       enableSystemProxy: (profileId) =>
         invokeCommand<RuntimeSnapshot>("enable_system_proxy", { profileId }),
       disableSystemProxy: () => invokeCommand<RuntimeSnapshot>("disable_system_proxy"),
-      markFrontendReady: () => invokeCommand<void>("mark_frontend_ready"),
+      markFrontendReady: (visibleText) =>
+        invokeCommand<void>("mark_frontend_ready", { visibleText }),
       markSmokeStateReady: () => invokeCommand<void>("mark_smoke_state_ready"),
     }
   : mockApi;

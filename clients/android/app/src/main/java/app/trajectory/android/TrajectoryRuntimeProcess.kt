@@ -3,8 +3,10 @@ package app.trajectory.android
 import android.content.Context
 import java.io.BufferedReader
 import java.io.File
+import java.io.IOException
 import java.io.InputStreamReader
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.TimeUnit
 
 class TrajectoryRuntimeProcess(
     private val context: Context,
@@ -13,7 +15,8 @@ class TrajectoryRuntimeProcess(
     private val onOutputLine: (String) -> Unit = {},
     private val onExit: () -> Unit = {},
 ) {
-    private var process: Process? = null
+    @Volatile private var process: Process? = null
+    @Volatile private var stoppingProcess: Process? = null
 
     fun start(profile: ClientProfile): Boolean {
         if (process != null) return true
@@ -24,23 +27,58 @@ class TrajectoryRuntimeProcess(
         val builder = ProcessBuilder(buildArgs(binary.absolutePath, profile))
             .redirectErrorStream(true)
         builder.environment()["TRAJECTORY_ACCESS_KEY"] = profile.accessKey
-        process = builder.start()
+        val child = builder.start()
+        process = child
+        stoppingProcess = null
         executor.execute {
-            process?.inputStream?.use { stream ->
-                BufferedReader(InputStreamReader(stream)).forEachLine { line ->
-                    val safeLine = redact(line)
-                    android.util.Log.i(logTag, safeLine)
-                    onOutputLine(safeLine)
+            try {
+                child.inputStream.use { stream ->
+                    BufferedReader(InputStreamReader(stream)).forEachLine { line ->
+                        val safeLine = redact(line)
+                        android.util.Log.i(logTag, safeLine)
+                        onOutputLine(safeLine)
+                    }
+                }
+            } catch (error: IOException) {
+                if (stoppingProcess !== child) {
+                    android.util.Log.w(logTag, "trajectory-client output stream closed unexpectedly", error)
+                    onOutputLine("trajectory-client output stream closed unexpectedly")
+                }
+            } finally {
+                val stopped = stoppingProcess === child
+                try {
+                    child.waitFor()
+                } catch (error: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+                if (process === child) {
+                    process = null
+                }
+                if (stoppingProcess === child) {
+                    stoppingProcess = null
+                }
+                if (!stopped) {
+                    onExit()
                 }
             }
-            process = null
-            onExit()
         }
         return true
     }
 
     fun stop() {
-        process?.destroy()
+        process?.let { child ->
+            stoppingProcess = child
+            child.destroy()
+            try {
+                if (!child.waitFor(1500, TimeUnit.MILLISECONDS)) {
+                    child.destroyForcibly()
+                    child.waitFor(1500, TimeUnit.MILLISECONDS)
+                }
+            } catch (error: InterruptedException) {
+                Thread.currentThread().interrupt()
+                child.destroyForcibly()
+            }
+        }
         process = null
     }
 

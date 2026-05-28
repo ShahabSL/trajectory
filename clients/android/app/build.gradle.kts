@@ -149,8 +149,8 @@ android {
         applicationId = "app.trajectory.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 21
-        versionName = "0.1.21"
+        versionCode = 22
+        versionName = "0.1.22"
 
         ndk {
             abiFilters += "arm64-v8a"

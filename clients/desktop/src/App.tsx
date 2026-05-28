@@ -146,8 +146,6 @@ export default function App() {
     let alive = true;
     const loadInitialState = async () => {
       try {
-        await desktopApi.markFrontendReady();
-        await desktopApi.markSmokeStateReady();
         const [profileState, runtimeState] = await Promise.all([
           desktopApi.loadProfiles(),
           desktopApi.loadSnapshot(),
@@ -155,6 +153,19 @@ export default function App() {
         if (alive) {
           applyProfileState(profileState);
           setSnapshot(runtimeState);
+          window.setTimeout(async () => {
+            if (!alive) {
+              return;
+            }
+            try {
+              await desktopApi.markFrontendReady(document.body.innerText);
+              await desktopApi.markSmokeStateReady();
+            } catch (error) {
+              if (alive) {
+                setUiError(String(error));
+              }
+            }
+          }, 100);
         }
       } catch (error) {
         if (alive) {

@@ -246,6 +246,8 @@ jobs:
           TRAJECTORY_DESKTOP_SMOKE_FETCH_URL: http://example.com/
           TRAJECTORY_DESKTOP_SMOKE_DNS_MAX_PAYLOAD: ${{ secrets.TRAJECTORY_E2E_DNS_MAX_PAYLOAD }}
           TRAJECTORY_DESKTOP_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
+          TRAJECTORY_DESKTOP_SMOKE_LOCAL_SERVER: "1"
+          TRAJECTORY_DESKTOP_SMOKE_REQUIRE_LIVE: "1"
         run: npm run package:smoke -- "${{ runner.temp }}/desktop-package"
         working-directory: clients/desktop
 
@@ -371,7 +373,7 @@ jobs:
           TRAJECTORY_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.TRAJECTORY_ANDROID_KEYSTORE_PASSWORD }}
           TRAJECTORY_ANDROID_KEY_ALIAS: ${{ secrets.TRAJECTORY_ANDROID_KEY_ALIAS }}
           TRAJECTORY_ANDROID_KEY_PASSWORD: ${{ secrets.TRAJECTORY_ANDROID_KEY_PASSWORD }}
-        run: ./gradlew :app:assembleRelease --no-daemon
+        run: ./gradlew :app:assembleRelease :smokeprobe:assembleDebug --no-daemon
         working-directory: clients/android
 
       - name: Verify Android release APK
@@ -408,6 +410,9 @@ jobs:
           TRAJECTORY_ANDROID_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
           TRAJECTORY_ANDROID_SMOKE_FETCH_URL: ${{ secrets.TRAJECTORY_E2E_FETCH_URL }}
           TRAJECTORY_ANDROID_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
+          TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER: "1"
+          TRAJECTORY_ANDROID_SMOKE_REQUIRE_LIVE: "1"
+          TRAJECTORY_ANDROID_SMOKE_REQUIRE_VPN: "1"
         with:
           api-level: 35
           target: google_apis
@@ -429,6 +434,9 @@ jobs:
           TRAJECTORY_ANDROID_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
           TRAJECTORY_ANDROID_SMOKE_FETCH_URL: ${{ secrets.TRAJECTORY_E2E_FETCH_URL }}
           TRAJECTORY_ANDROID_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
+          TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER: "1"
+          TRAJECTORY_ANDROID_SMOKE_REQUIRE_LIVE: "1"
+          TRAJECTORY_ANDROID_SMOKE_REQUIRE_VPN: "1"
         with:
           api-level: 33
           target: google_apis
@@ -453,6 +461,9 @@ jobs:
           TRAJECTORY_ANDROID_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
           TRAJECTORY_ANDROID_SMOKE_FETCH_URL: ${{ secrets.TRAJECTORY_E2E_FETCH_URL }}
           TRAJECTORY_ANDROID_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
+          TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER: "1"
+          TRAJECTORY_ANDROID_SMOKE_REQUIRE_LIVE: "1"
+          TRAJECTORY_ANDROID_SMOKE_REQUIRE_VPN: "1"
         with:
           api-level: 28
           target: google_apis

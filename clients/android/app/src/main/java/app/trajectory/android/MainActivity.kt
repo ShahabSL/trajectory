@@ -121,9 +121,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val initialProfile = applySmokeProfileIntent() ?: ProfileStore.load(this, includeSecret = false)
         setContent {
             TrajectoryAndroidApp(
-                initialProfile = ProfileStore.load(this, includeSecret = false),
+                initialProfile = initialProfile,
                 onSaveProfile = ::saveProfile,
                 onStartProxy = ::startProxy,
                 onStartVpn = ::startVpnWithConsent,
@@ -132,11 +133,49 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun applySmokeProfileIntent(): ClientProfile? {
+        val domain = intent.getStringExtra("trajectory_smoke_domain")?.trim().orEmpty()
+        val accessKey = intent.getStringExtra("trajectory_smoke_access_key")?.trim().orEmpty()
+        if (domain.isBlank() || accessKey.isBlank()) return null
+
+        val resolvers = intent.getStringExtra("trajectory_smoke_resolvers")
+            ?.lineSequence()
+            ?.flatMap { it.split(',').asSequence() }
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?.toList()
+            ?.takeIf { it.isNotEmpty() }
+            ?: ProfileStore.defaultResolvers().lines()
+        val storedProfile = ProfileStore.load(this)
+        val profile = storedProfile.copy(
+            domain = domain,
+            accessKey = accessKey,
+            accessKeySaved = true,
+            resolvers = resolvers,
+            resolverSocksProxy = "",
+            resolverTransport = intent.getStringExtra("trajectory_smoke_resolver_transport") ?: "auto",
+            transportMode = intent.getStringExtra("trajectory_smoke_transport_mode") ?: "velocity",
+            socksPort = intent.getStringExtra("trajectory_smoke_socks_port")?.toIntOrNull()
+                ?: storedProfile.socksPort,
+            httpPort = intent.getStringExtra("trajectory_smoke_http_port")?.toIntOrNull()
+                ?: storedProfile.httpPort,
+            resolverAdmissionMin = 1,
+        )
+        if (profile.validate().isEmpty()) {
+            ProfileStore.save(this, profile)
+            return profile.copy(accessKey = "", accessKeySaved = true)
+        }
+        return null
+    }
+
     private fun saveProfile(profile: ClientProfile): List<String> {
         val errors = profile.validate()
         if (errors.isEmpty()) {
             ProfileStore.save(this, profile)
-            RuntimeStatusCenter.reset("Profile saved. Trajectory is not connected yet.")
+            val status = RuntimeStatusCenter.snapshot()
+            if (status.mode == RuntimeMode.NONE || status.phase == RuntimePhase.FAILED) {
+                RuntimeStatusCenter.reset("Profile saved. Trajectory is not connected yet.")
+            }
         }
         return errors
     }
@@ -302,8 +341,11 @@ private fun TrajectoryAndroidApp(
         RuntimePhase.STARTING_SIDECAR,
         RuntimePhase.ADMITTING_RESOLVERS,
         RuntimePhase.LISTENERS_READY,
+        RuntimePhase.PROXY_CONNECTED,
         RuntimePhase.ESTABLISHING_TUN,
         RuntimePhase.BRIDGE_STARTING,
+        RuntimePhase.VPN_CONNECTED,
+        RuntimePhase.DEGRADED,
         RuntimePhase.STOPPING,
     )
 
@@ -365,8 +407,19 @@ private fun TrajectoryAndroidApp(
                 ) {
                     if (tab == AndroidTab.STATUS) {
                         item {
+                            StatusCard(
+                                status = status,
+                                isWorking = isWorking,
+                                profile = currentProfile,
+                                notice = notice,
+                                profileErrors = profileErrors,
+                                onDismissNotice = { notice = null },
+                            )
+                        }
+                        item {
                             ActionStrip(
-                                canStart = profileErrors.isEmpty(),
+                                canStart = profileErrors.isEmpty() && !isWorking,
+                                isWorking = isWorking,
                                 onSave = {
                                     val errors = onSaveProfile(currentProfile)
                                     notice = if (errors.isEmpty()) "Profile saved. Status remains disconnected until a service proves readiness."
@@ -381,16 +434,6 @@ private fun TrajectoryAndroidApp(
                                     notice = errors.takeIf { it.isNotEmpty() }?.joinToString("\n")
                                 },
                                 onStop = onStop,
-                            )
-                        }
-                        item {
-                            StatusCard(
-                                status = status,
-                                isWorking = isWorking,
-                                profile = currentProfile,
-                                notice = notice,
-                                profileErrors = profileErrors,
-                                onDismissNotice = { notice = null },
                             )
                         }
                     } else {
@@ -591,6 +634,7 @@ private fun StatusCard(
 @Composable
 private fun ActionStrip(
     canStart: Boolean,
+    isWorking: Boolean,
     onSave: () -> Unit,
     onStartProxy: () -> Unit,
     onStartVpn: () -> Unit,
@@ -600,25 +644,28 @@ private fun ActionStrip(
         SectionTitle(Icons.Filled.PlayArrow, "Controls")
         Spacer(Modifier.height(12.dp))
         Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            Button(onClick = onStartProxy, enabled = canStart, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
-                Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("Start proxy")
-            }
-            Button(onClick = onStartVpn, enabled = canStart, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
-                Icon(Icons.Filled.VpnKey, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("Start VPN")
+            if (isWorking) {
+                Button(onClick = onStop, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
+                    Icon(Icons.Filled.StopCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Stop Trajectory")
+                }
+            } else {
+                Button(onClick = onStartProxy, enabled = canStart, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
+                    Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Start proxy")
+                }
+                Button(onClick = onStartVpn, enabled = canStart, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
+                    Icon(Icons.Filled.VpnKey, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Start VPN")
+                }
             }
             OutlinedButton(onClick = onSave, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
                 Icon(Icons.Filled.Save, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("Save profile")
-            }
-            OutlinedButton(onClick = onStop, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
-                Icon(Icons.Filled.StopCircle, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("Stop Trajectory")
             }
         }
     }

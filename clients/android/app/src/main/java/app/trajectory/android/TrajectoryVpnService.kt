@@ -19,7 +19,7 @@ class TrajectoryVpnService : VpnService() {
     private val processExecutor = Executors.newSingleThreadExecutor()
     private val bridgeExecutor = Executors.newSingleThreadExecutor()
     private lateinit var runtime: TrajectoryRuntimeProcess
-    private var running = false
+    @Volatile private var running = false
     @Volatile private var requestedStop = false
 
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
@@ -64,9 +64,9 @@ class TrajectoryVpnService : VpnService() {
 
     override fun onDestroy() {
         stopRuntime(resetStatus = false)
-        controlExecutor.shutdownNow()
-        bridgeExecutor.shutdownNow()
-        processExecutor.shutdownNow()
+        controlExecutor.shutdown()
+        bridgeExecutor.shutdown()
+        processExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -122,8 +122,18 @@ class TrajectoryVpnService : VpnService() {
         RuntimeStatusCenter.markTunEstablished()
         startVpnForeground("VPN bridge starting via SOCKS 127.0.0.1:${profile.socksPort}")
         bridgeExecutor.execute {
-            RuntimeStatusCenter.markVpnConnected()
-            startVpnForeground("VPN connected via SOCKS 127.0.0.1:${profile.socksPort}")
+            val readinessMarker = Thread {
+                try {
+                    Thread.sleep(750)
+                    if (running) {
+                        RuntimeStatusCenter.markVpnConnected()
+                        startVpnForeground("VPN connected via SOCKS 127.0.0.1:${profile.socksPort}")
+                    }
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            }
+            readinessMarker.start()
             val code = TrajectoryVpnBridge.run(
                 rawFd,
                 profile.socksPort,
@@ -194,8 +204,16 @@ class TrajectoryVpnService : VpnService() {
                     socket.connect(InetSocketAddress("127.0.0.1", port), 250)
                     return true
                 }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
             } catch (_: Exception) {
-                Thread.sleep(100)
+                try {
+                    Thread.sleep(100)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return false
+                }
             }
         }
         return false
