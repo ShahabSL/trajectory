@@ -1311,8 +1311,9 @@ def uid_in_ranges(block: str, uid: int) -> bool:
 def owned_by_trajectory(block: str) -> bool:
     owner_matches = re.search(rf"\bOwnerUid:\s*{app_uid}\b", block) is not None
     admin_matches = re.search(rf"\bAdminUids:\s*\[[^\]]*\b{app_uid}\b", block) is not None
+    establishing_matches = re.search(rf"\bEstablishingAppUid:\s*{app_uid}\b", block) is not None
     session_matches = "sessionId=Trajectory" in block
-    return owner_matches or admin_matches or session_matches
+    return owner_matches or admin_matches or establishing_matches or session_matches
 
 
 vpn_blocks = [
@@ -1333,12 +1334,14 @@ for block in trajectory_blocks:
     routes_probe = uid_in_ranges(block, probe_uid)
     validated = "VALIDATED" in block
     owner = re.search(r"\bOwnerUid:\s*([0-9]+)", block)
+    establishing = re.search(r"\bEstablishingAppUid:\s*([0-9]+)", block)
     network = re.search(r"network\{([^}]+)\}", block)
     summary_path.write_text(
         "trajectory vpn candidate\n"
         f"network={network.group(1) if network else 'unknown'}\n"
         f"app_uid={app_uid}\n"
         f"owner_uid={owner.group(1) if owner else 'unknown'}\n"
+        f"establishing_app_uid={establishing.group(1) if establishing else 'unknown'}\n"
         f"probe_uid={probe_uid}\n"
         f"has_tun={has_tun}\n"
         f"routes_probe_uid={routes_probe}\n"
@@ -1404,8 +1407,9 @@ def uid_in_ranges(block: str, uid: int) -> bool:
 def owned_by_trajectory(block: str) -> bool:
     owner_matches = re.search(rf"\bOwnerUid:\s*{app_uid}\b", block) is not None
     admin_matches = re.search(rf"\bAdminUids:\s*\[[^\]]*\b{app_uid}\b", block) is not None
+    establishing_matches = re.search(rf"\bEstablishingAppUid:\s*{app_uid}\b", block) is not None
     session_matches = "sessionId=Trajectory" in block
-    return owner_matches or admin_matches or session_matches
+    return owner_matches or admin_matches or establishing_matches or session_matches
 
 
 remaining = []
