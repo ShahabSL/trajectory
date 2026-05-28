@@ -51,10 +51,16 @@ try {
   } else {
     throw new Error(`unsupported desktop package smoke platform: ${process.platform}`);
   }
-  } finally {
-    await stopDesktopLocalServer();
-    await stopDesktopLocalOrigin();
-  }
+} catch (error) {
+  await writeFile(
+    path.join(artifactDir, "package-smoke-error.txt"),
+    `${formatError(error)}\n`,
+  );
+  throw error;
+} finally {
+  await stopDesktopLocalServer();
+  await stopDesktopLocalOrigin();
+}
 
 await writeFile(path.join(artifactDir, "package-smoke.txt"), `${manifest.join("\n")}\n`);
 
@@ -979,6 +985,13 @@ function writeCommandLog(label, result) {
   ].join("\n");
   writeFileSync(path.join(artifactDir, `${safeName(label)}.log`), body);
   manifest.push(`${label}=status ${result.status}`);
+}
+
+function formatError(error) {
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message}\n${error.stack ?? ""}`;
+  }
+  return String(error);
 }
 
 function shellQuote(value) {

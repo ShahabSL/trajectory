@@ -4,7 +4,6 @@ import {
   saveProfiles,
   saveSelectedProfileId,
 } from "./profile-store";
-import { invoke, isTauri } from "@tauri-apps/api/core";
 import type {
   DesktopApi,
   ProfileStoreSnapshot,
@@ -12,10 +11,56 @@ import type {
   TrajectoryProfile,
 } from "./types";
 
-const hasTauriRuntime = () => typeof window !== "undefined" && isTauri();
+class NoTauriRuntimeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NoTauriRuntimeError";
+  }
+}
+
+let tauriCore: Promise<typeof import("@tauri-apps/api/core")> | undefined;
+
+const loadTauriCore = () => {
+  tauriCore ??= import("@tauri-apps/api/core");
+  return tauriCore;
+};
+
+function isMissingTauriRuntime(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("__TAURI_INTERNALS__") ||
+    message.includes("__TAURI__") ||
+    /Cannot read properties of undefined/i.test(message) ||
+    /is not defined/i.test(message) ||
+    /is not a function/i.test(message)
+  );
+}
 
 async function invokeCommand<T>(command: string, args?: Record<string, unknown>) {
-  return invoke<T>(command, args);
+  try {
+    const { invoke } = await loadTauriCore();
+    return await invoke<T>(command, args);
+  } catch (error) {
+    if (isMissingTauriRuntime(error)) {
+      throw new NoTauriRuntimeError(String(error));
+    }
+    throw error;
+  }
+}
+
+async function invokeOrMock<T>(
+  command: string,
+  args: Record<string, unknown> | undefined,
+  fallback: () => Promise<T>,
+) {
+  try {
+    return await invokeCommand<T>(command, args);
+  } catch (error) {
+    if (error instanceof NoTauriRuntimeError) {
+      return fallback();
+    }
+    throw error;
+  }
 }
 
 const mockSnapshot: RuntimeSnapshot = {
@@ -121,39 +166,79 @@ const mockApi: DesktopApi = {
   async markSmokeFrontendError() {},
 };
 
-export const desktopApi: DesktopApi = hasTauriRuntime()
-  ? {
-      loadSnapshot: () => invokeCommand<RuntimeSnapshot>("load_snapshot"),
-      loadProfiles: () => invokeCommand<ProfileStoreSnapshot>("load_profiles"),
-      saveProfile: (profile) =>
-        invokeCommand<ProfileStoreSnapshot>("save_profile", { profile }),
-      deleteProfile: (profileId) =>
-        invokeCommand<ProfileStoreSnapshot>("delete_profile", { profileId }),
-      setSelectedProfile: (profileId) =>
-        invokeCommand<ProfileStoreSnapshot>("set_selected_profile", { profileId }),
-      connect: (profileId) =>
-        invokeCommand<RuntimeSnapshot>("connect_profile", { profileId }),
-      disconnect: () => invokeCommand<RuntimeSnapshot>("disconnect_profile"),
-      enableSystemProxy: (profileId) =>
-        invokeCommand<RuntimeSnapshot>("enable_system_proxy", { profileId }),
-      disableSystemProxy: () => invokeCommand<RuntimeSnapshot>("disable_system_proxy"),
-      markFrontendReady: (visibleText, visualReport) =>
-        invokeCommand<void>("mark_frontend_ready", { visibleText, visualReport }),
-      markSmokeStateReady: () => invokeCommand<void>("mark_smoke_state_ready"),
-      smokeUiFlowEnabled: () => invokeCommand<boolean>("smoke_ui_flow_enabled"),
-      markSmokeUiFlowReady: (
+export async function markSmokeFrontendErrorBestEffort(message: string) {
+  try {
+    await invokeCommand<void>("mark_smoke_frontend_error", { message });
+  } catch {
+    // Browser preview and early startup failures may not have Tauri IPC yet.
+  }
+}
+
+export const desktopApi: DesktopApi = {
+  loadSnapshot: () =>
+    invokeOrMock<RuntimeSnapshot>("load_snapshot", undefined, mockApi.loadSnapshot),
+  loadProfiles: () =>
+    invokeOrMock<ProfileStoreSnapshot>("load_profiles", undefined, mockApi.loadProfiles),
+  saveProfile: (profile) =>
+    invokeOrMock<ProfileStoreSnapshot>("save_profile", { profile }, () =>
+      mockApi.saveProfile(profile),
+    ),
+  deleteProfile: (profileId) =>
+    invokeOrMock<ProfileStoreSnapshot>("delete_profile", { profileId }, () =>
+      mockApi.deleteProfile(profileId),
+    ),
+  setSelectedProfile: (profileId) =>
+    invokeOrMock<ProfileStoreSnapshot>("set_selected_profile", { profileId }, () =>
+      mockApi.setSelectedProfile(profileId),
+    ),
+  connect: (profileId) =>
+    invokeOrMock<RuntimeSnapshot>("connect_profile", { profileId }, () =>
+      mockApi.connect(profileId),
+    ),
+  disconnect: () =>
+    invokeOrMock<RuntimeSnapshot>("disconnect_profile", undefined, mockApi.disconnect),
+  enableSystemProxy: (profileId) =>
+    invokeOrMock<RuntimeSnapshot>("enable_system_proxy", { profileId }, () =>
+      mockApi.enableSystemProxy(profileId),
+    ),
+  disableSystemProxy: () =>
+    invokeOrMock<RuntimeSnapshot>(
+      "disable_system_proxy",
+      undefined,
+      mockApi.disableSystemProxy,
+    ),
+  markFrontendReady: (visibleText, visualReport) =>
+    invokeOrMock<void>("mark_frontend_ready", { visibleText, visualReport }, () =>
+      mockApi.markFrontendReady(visibleText, visualReport),
+    ),
+  markSmokeStateReady: () =>
+    invokeOrMock<void>("mark_smoke_state_ready", undefined, mockApi.markSmokeStateReady),
+  smokeUiFlowEnabled: () =>
+    invokeOrMock<boolean>("smoke_ui_flow_enabled", undefined, mockApi.smokeUiFlowEnabled),
+  markSmokeUiFlowReady: (
+    connectedText,
+    connectedVisualReport,
+    disconnectedText,
+    disconnectedVisualReport,
+  ) =>
+    invokeOrMock<void>(
+      "mark_smoke_ui_flow_ready",
+      {
         connectedText,
         connectedVisualReport,
         disconnectedText,
         disconnectedVisualReport,
-      ) =>
-        invokeCommand<void>("mark_smoke_ui_flow_ready", {
+      },
+      () =>
+        mockApi.markSmokeUiFlowReady(
           connectedText,
           connectedVisualReport,
           disconnectedText,
           disconnectedVisualReport,
-        }),
-      markSmokeFrontendError: (message) =>
-        invokeCommand<void>("mark_smoke_frontend_error", { message }),
-    }
-  : mockApi;
+        ),
+    ),
+  markSmokeFrontendError: (message) =>
+    invokeOrMock<void>("mark_smoke_frontend_error", { message }, () =>
+      mockApi.markSmokeFrontendError(message),
+    ),
+};

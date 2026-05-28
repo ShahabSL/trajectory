@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import logoUrl from "./assets/trajectory-logo.png";
-import { desktopApi } from "./lib/api";
+import { desktopApi, markSmokeFrontendErrorBestEffort } from "./lib/api";
 import { createDefaultProfile, scrubProfile } from "./lib/profile-store";
 import type {
   CapabilityState,
@@ -179,6 +179,7 @@ export default function App() {
           }, 100);
         }
       } catch (error) {
+        await markSmokeFrontendErrorBestEffort(String(error));
         if (alive) {
           setUiError(String(error));
         }
