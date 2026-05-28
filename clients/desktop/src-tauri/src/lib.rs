@@ -757,6 +757,9 @@ fn delete_access_key(profile_id: &str) -> Result<(), String> {
 }
 
 fn access_key_exists(profile_id: &str) -> bool {
+    if std::env::var_os("TRAJECTORY_DESKTOP_SMOKE").is_some() {
+        return false;
+    }
     Entry::new(KEYRING_SERVICE, profile_id)
         .and_then(|entry| entry.get_password().map(|_| ()))
         .is_ok()
