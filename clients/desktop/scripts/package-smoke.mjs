@@ -37,6 +37,7 @@ const manifest = [`desktop package smoke`, `platform=${process.platform}`, `vers
 let desktopLiveSmokeSkipNoted = false;
 let desktopLocalServer = null;
 let desktopLocalOrigin = null;
+let macOpenEnvSupport;
 
 process.once("exit", () => {
   if (desktopLocalServer?.process && !desktopLocalServer.process.killed) {
@@ -456,8 +457,6 @@ function shouldForwardMacSmokeEnv(key) {
     key === "RUST_LOG"
   );
 }
-
-let macOpenEnvSupport;
 
 function macOpenSupportsEnv() {
   if (process.platform !== "darwin") return false;
