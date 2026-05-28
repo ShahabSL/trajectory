@@ -114,7 +114,15 @@ adb shell logcat -c
 adb shell am start -W -n "$activity" > "$artifact_dir/start.txt"
 sleep 2
 
-screen_size="$(adb shell wm size | tr -d '\r' | awk '/Physical size/ {print $3; exit}')"
+screen_size="$(
+  adb shell wm size |
+    tr -d '\r' |
+    awk '
+      /Override size/ { size = $3 }
+      /Physical size/ && size == "" { size = $3 }
+      END { print size }
+    '
+)"
 if [[ "$screen_size" =~ ^[0-9]+x[0-9]+$ ]]; then
   screen_width="${screen_size%x*}"
   screen_height="${screen_size#*x}"
@@ -124,8 +132,10 @@ else
 fi
 
 swipe_x=$((screen_width / 2))
-swipe_start_y=$((screen_height * 78 / 100))
-swipe_end_y=$((screen_height * 28 / 100))
+swipe_start_y=$((screen_height * 68 / 100))
+swipe_end_y=$((screen_height * 30 / 100))
+swipe_restore_start_y=$((screen_height * 30 / 100))
+swipe_restore_end_y=$((screen_height * 68 / 100))
 
 dump_ui_tree_raw() {
   local output="$1"
@@ -342,6 +352,33 @@ PY
   adb shell input tap ${coords}
 }
 
+assert_checked_mode() {
+  local mode_description="$1"
+  local xml="$2"
+  python3 - "$xml" "$mode_description" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+tree = ET.parse(sys.argv[1])
+mode_description = sys.argv[2]
+
+def contains_description(node):
+    if node.attrib.get("content-desc") == mode_description:
+        return True
+    return any(contains_description(child) for child in list(node))
+
+for node in tree.iter("node"):
+    if (
+        node.attrib.get("checkable") == "true"
+        and node.attrib.get("checked") == "true"
+        and contains_description(node)
+    ):
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
 xml_has_text() {
   local text="$1"
   shift
@@ -370,6 +407,152 @@ scroll_until_text() {
   done
 
   xml_has_text "$text" "$artifact_dir/${prefix}_top.xml" "$artifact_dir/${prefix}_bottom.xml" "$artifact_dir/${prefix}_lower.xml" "$artifact_dir/${prefix}_scroll_"*.xml
+}
+
+adb_input_text() {
+  local value="$1"
+  value="${value//%/%25}"
+  value="${value// /%s}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  adb shell input text "$value"
+}
+
+tap_first_text_field_after_label() {
+  local label="$1"
+  local xml="$2"
+  local coords
+  if ! coords="$(python3 - "$xml" "$label" <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+tree = ET.parse(sys.argv[1])
+label = sys.argv[2]
+nodes = list(tree.iter("node"))
+
+def bounds(node):
+    match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds", ""))
+    if not match:
+        return None
+    return tuple(map(int, match.groups()))
+
+label_bounds = None
+for node in nodes:
+    if node.attrib.get("text") == label or node.attrib.get("content-desc") == label:
+        label_bounds = bounds(node)
+        break
+
+if not label_bounds:
+    raise SystemExit(1)
+
+lx1, ly1, lx2, ly2 = label_bounds
+for node in nodes:
+    if "EditText" not in node.attrib.get("class", ""):
+        continue
+    current = bounds(node)
+    if not current:
+        continue
+    x1, y1, x2, y2 = current
+    if y1 <= ly1 <= y2 or (abs(y1 - ly1) < 120 and x1 <= lx1 <= x2):
+        print((x1 + x2) // 2, (y1 + y2) // 2)
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+  )"; then
+    return 1
+  fi
+  adb shell input tap ${coords}
+}
+
+clear_focused_field() {
+  adb shell input keyevent KEYCODE_MOVE_END >/dev/null 2>&1 || true
+  for _ in $(seq 1 96); do
+    adb shell input keyevent KEYCODE_DEL >/dev/null 2>&1 || true
+  done
+}
+
+run_optional_live_proxy_smoke() {
+  local domain="${TRAJECTORY_ANDROID_SMOKE_DOMAIN:-}"
+  local access_key="${TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY:-}"
+  local http_fetch_url="${TRAJECTORY_ANDROID_SMOKE_FETCH_URL:-http://example.com/}"
+  local http_port="${TRAJECTORY_ANDROID_SMOKE_HTTP_PORT:-7001}"
+  local http_host="$http_fetch_url"
+  http_host="${http_host#*//}"
+  http_host="${http_host%%/*}"
+
+  if [[ -z "$domain" || -z "$access_key" ]]; then
+    echo "Android live proxy smoke skipped; TRAJECTORY_ANDROID_SMOKE_DOMAIN/ACCESS_KEY are not set" \
+      > "$artifact_dir/live-proxy-smoke-skipped.txt"
+    return 0
+  fi
+
+  tap_node "Profile tab" "$nav_source" || tap_node "Profile" "$nav_source"
+  sleep 1
+  dump_screen "live_profile"
+  tap_first_text_field_after_label "Tunnel domain" "$artifact_dir/live_profile.xml"
+  clear_focused_field
+  adb_input_text "$domain"
+  tap_first_text_field_after_label "Access key" "$artifact_dir/live_profile.xml"
+  clear_focused_field
+  adb_input_text "$access_key"
+  adb shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
+  sleep 1
+
+  if [[ -n "${TRAJECTORY_ANDROID_SMOKE_RESOLVERS:-}" ]]; then
+    local first_resolver
+    first_resolver="$(
+      printf '%s\n' "$TRAJECTORY_ANDROID_SMOKE_RESOLVERS" |
+        tr ', ' '\n' |
+        awk 'NF { print; exit }'
+    )"
+    tap_node "Resolvers tab" "$artifact_dir/live_profile.xml" || tap_node "Resolvers" "$artifact_dir/live_profile.xml"
+    sleep 1
+    dump_screen "live_resolvers_top"
+    adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
+    sleep 1
+    dump_screen "live_resolvers_form"
+    tap_first_text_field_after_label "DNS resolvers" "$artifact_dir/live_resolvers_form.xml"
+    clear_focused_field
+    adb_input_text "$first_resolver"
+    adb shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
+    sleep 1
+  fi
+
+  tap_node "Status tab" "$artifact_dir/live_profile.xml" || tap_node "Status" "$artifact_dir/live_profile.xml"
+  sleep 1
+  dump_screen "live_status"
+  tap_node "Save profile" "$artifact_dir/live_status.xml"
+  sleep 1
+  dump_screen "live_saved"
+  tap_node "Start proxy" "$artifact_dir/live_saved.xml"
+
+  for pass in $(seq 1 60); do
+    sleep 1
+    dump_screen "live_proxy_${pass}"
+    if grep -Fq "Proxy connected" "$artifact_dir/live_proxy_${pass}.xml"; then
+      echo "Proxy connected after ${pass}s" > "$artifact_dir/live-proxy-smoke.txt"
+      if ! timeout 25s adb shell "printf 'GET ${http_fetch_url} HTTP/1.1\r\nHost: ${http_host}\r\nConnection: close\r\n\r\n' | toybox nc -w 20 127.0.0.1 ${http_port}" \
+        > "$artifact_dir/live-proxy-http.txt" 2>&1; then
+        echo "Android live proxy smoke could not fetch through HTTP proxy on 127.0.0.1:${http_port}" >&2
+        return 1
+      fi
+      if ! grep -Eq '^HTTP/[0-9.]+ [23][0-9][0-9]' "$artifact_dir/live-proxy-http.txt"; then
+        echo "Android live proxy smoke did not receive a 2xx/3xx HTTP response" >&2
+        return 1
+      fi
+      tap_node "Stop Trajectory" "$artifact_dir/live_proxy_${pass}.xml" || true
+      return 0
+    fi
+    if grep -Fq "Failed" "$artifact_dir/live_proxy_${pass}.xml"; then
+      echo "Android live proxy smoke reached Failed state" >&2
+      return 1
+    fi
+  done
+
+  echo "Timed out waiting for Android live proxy to reach Proxy connected" >&2
+  return 1
 }
 
 wait_for_text() {
@@ -431,11 +614,33 @@ for tab in Profile Resolvers VPN Diagnostics; do
   sleep 1
   dump_screen "${tab,,}_bottom"
   if [[ "$tab" == "Resolvers" ]]; then
-    if tap_node "Frontier experimental mode" "$artifact_dir/${tab,,}_bottom.xml" || tap_node "Frontier" "$artifact_dir/${tab,,}_bottom.xml"; then
+    frontier_selected=0
+    for frontier_xml in "$artifact_dir/${tab,,}_top.xml" "$artifact_dir/${tab,,}_bottom.xml"; do
+      if tap_node "Frontier experimental mode" "$frontier_xml" || tap_node "Frontier" "$frontier_xml"; then
+        frontier_selected=1
+        break
+      fi
+    done
+    for pass in 1 2 3 4 5 6 7 8; do
+      if [[ "$frontier_selected" -eq 1 ]]; then
+        break
+      fi
+      adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
       sleep 1
-      dump_screen "frontier_selected"
-    else
+      dump_screen "${tab,,}_frontier_scroll_${pass}"
+      if tap_node "Frontier experimental mode" "$artifact_dir/${tab,,}_frontier_scroll_${pass}.xml" || tap_node "Frontier" "$artifact_dir/${tab,,}_frontier_scroll_${pass}.xml"; then
+        frontier_selected=1
+        break
+      fi
+    done
+    if [[ "$frontier_selected" -ne 1 ]]; then
       echo "Frontier experimental mode was not selectable from the Resolvers screen" >&2
+      exit 1
+    fi
+    sleep 1
+    dump_screen "frontier_selected"
+    if ! assert_checked_mode "Frontier experimental mode" "$artifact_dir/frontier_selected.xml"; then
+      echo "Frontier experimental mode was visible but not checked after tap" >&2
       exit 1
     fi
   fi
@@ -454,8 +659,8 @@ for tab in Profile Resolvers VPN Diagnostics; do
   if [[ "$tab" == "Resolvers" ]]; then
     xml_files+=("$artifact_dir/frontier_selected.xml")
   fi
-  adb shell input swipe "$swipe_x" "$swipe_end_y" "$swipe_x" "$swipe_start_y" 600
-  adb shell input swipe "$swipe_x" "$swipe_end_y" "$swipe_x" "$swipe_start_y" 600
+  adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 600
+  adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 600
   sleep 1
   dump_screen "nav_${tab,,}"
   nav_source="$artifact_dir/nav_${tab,,}.xml"
@@ -475,6 +680,8 @@ assert_texts "$artifact_dir/all.xml" \
   "Runtime log" \
   "Start VPN" \
   "Stop Trajectory"
+
+run_optional_live_proxy_smoke
 
 adb logcat -d > "$artifact_dir/logcat.txt"
 if grep -E "FATAL EXCEPTION|E AndroidRuntime" "$artifact_dir/logcat.txt"; then

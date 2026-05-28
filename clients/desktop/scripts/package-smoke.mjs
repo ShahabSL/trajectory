@@ -103,15 +103,11 @@ async function smokeMac(files) {
   const dmg = findOptional(files, new RegExp(`Trajectory_?${escapeRegex(version)}.*\\.dmg$`), "macOS .dmg");
   let appArchive = findOptional(files, /\.app\.tar\.gz$/, "macOS app tarball");
   const appBundle = path.join(bundleRoot, "macos", "Trajectory.app");
-  const macosDir = path.join(appBundle, "Contents", "MacOS");
-  const executables = (await listFiles(macosDir)).filter(isExecutable);
-  const sidecar = executables.find((file) => path.basename(file).startsWith("trajectory-client"));
-  const launcher = executables.find((file) => !path.basename(file).startsWith("trajectory-client"));
-  if (!sidecar) throw new Error("missing macOS bundled trajectory-client sidecar");
-  if (!launcher) throw new Error("missing macOS app launcher executable");
+  const { sidecar, launcher } = await inspectMacApp(appBundle, "macOS bundled app");
   runChecked(sidecar, ["--help"], "macOS bundled sidecar --help");
   if (dmg) {
     runChecked("hdiutil", ["verify", dmg], "macOS dmg verification");
+    await smokeMountedDmg(dmg);
     manifest.push(`dmg=${relative(dmg)}`);
   } else {
     manifest.push("dmg=not emitted by this Tauri build");
@@ -130,15 +126,41 @@ async function smokeMac(files) {
   await mkdir(appArchiveExtract, { recursive: true });
   runChecked("tar", ["-xzf", appArchive, "-C", appArchiveExtract], "extract macOS app tarball");
   const extractedApp = path.join(appArchiveExtract, "Trajectory.app");
-  const extractedMacosDir = path.join(extractedApp, "Contents", "MacOS");
-  const extractedExecutables = (await listFiles(extractedMacosDir)).filter(isExecutable);
-  const extractedSidecar = extractedExecutables.find((file) => path.basename(file).startsWith("trajectory-client"));
-  const extractedLauncher = extractedExecutables.find((file) => !path.basename(file).startsWith("trajectory-client"));
-  if (!extractedSidecar) throw new Error("missing trajectory-client sidecar in macOS app tarball");
-  if (!extractedLauncher) throw new Error("missing app launcher executable in macOS app tarball");
+  const { sidecar: extractedSidecar, launcher: extractedLauncher } = await inspectMacApp(
+    extractedApp,
+    "macOS app tarball",
+  );
   manifest.push(`app_tar=${relative(appArchive)}`);
   runChecked(extractedSidecar, ["--help"], "macOS app tarball sidecar --help");
   await assertLaunches(extractedLauncher, [], "macOS app tarball launch smoke");
+}
+
+async function inspectMacApp(appBundle, label) {
+  const macosDir = path.join(appBundle, "Contents", "MacOS");
+  const executables = (await listFiles(macosDir)).filter(isExecutable);
+  const sidecar = executables.find((file) => path.basename(file).startsWith("trajectory-client"));
+  const launcher = executables.find((file) => !path.basename(file).startsWith("trajectory-client"));
+  if (!sidecar) throw new Error(`missing trajectory-client sidecar in ${label}`);
+  if (!launcher) throw new Error(`missing app launcher executable in ${label}`);
+  return { sidecar, launcher };
+}
+
+async function smokeMountedDmg(dmg) {
+  const mountPoint = path.join(artifactDir, "dmg-mount");
+  await mkdir(mountPoint, { recursive: true });
+  runChecked(
+    "hdiutil",
+    ["attach", "-nobrowse", "-readonly", "-mountpoint", mountPoint, dmg],
+    "macOS dmg attach",
+  );
+  try {
+    const mountedApp = path.join(mountPoint, "Trajectory.app");
+    const { sidecar, launcher } = await inspectMacApp(mountedApp, "mounted macOS dmg");
+    runChecked(sidecar, ["--help"], "macOS mounted dmg sidecar --help");
+    await assertLaunches(launcher, [], "macOS mounted dmg launch smoke");
+  } finally {
+    runChecked("hdiutil", ["detach", mountPoint], "macOS dmg detach");
+  }
 }
 
 async function smokeWindows(files) {
@@ -156,6 +178,14 @@ async function smokeWindows(files) {
   runChecked(sidecar, ["--help"], "Windows staged sidecar --help");
   if (commandExists("7z")) {
     runChecked("7z", ["t", setup], "test Windows setup archive");
+    const setupExtract = path.join(artifactDir, "setup-extract");
+    await mkdir(setupExtract, { recursive: true });
+    runChecked("7z", ["x", "-y", `-o${setupExtract}`, setup], "extract Windows setup archive");
+    const setupFiles = await expandWindowsSetupPayload(setupExtract);
+    const setupSidecar = requireOne(setupFiles, /trajectory-client.*\.exe$/i, "trajectory-client inside Windows setup");
+    const setupLauncher = requireOne(setupFiles, /(?:Trajectory|trajectory-desktop)\.exe$/i, "Trajectory app inside Windows setup");
+    runChecked(setupSidecar, ["--help"], "Windows setup sidecar --help");
+    await assertLaunches(setupLauncher, [], "Windows setup payload launch smoke");
   } else if (process.env.CI) {
     throw new Error("7z is required for CI Windows setup package smoke");
   } else {
@@ -164,6 +194,28 @@ async function smokeWindows(files) {
 
   manifest.push(`msi=${relative(msi)}`, `setup=${relative(setup)}`);
   await assertLaunches(msiLauncher, [], "Windows MSI app launch smoke");
+}
+
+async function expandWindowsSetupPayload(setupExtract) {
+  const setupFiles = await listFiles(setupExtract);
+  if (
+    setupFiles.some((file) => /trajectory-client.*\.exe$/i.test(file)) &&
+    setupFiles.some((file) => /(?:Trajectory|trajectory-desktop)\.exe$/i.test(file))
+  ) {
+    return setupFiles;
+  }
+
+  const nestedArchives = setupFiles.filter((file) => file.toLowerCase().endsWith(".7z"));
+  if (nestedArchives.length === 0) {
+    return setupFiles;
+  }
+
+  const payloadExtract = path.join(artifactDir, "setup-payload-extract");
+  await mkdir(payloadExtract, { recursive: true });
+  for (const archive of nestedArchives) {
+    runChecked("7z", ["x", "-y", `-o${payloadExtract}`, archive], `extract nested Windows setup payload ${path.basename(archive)}`);
+  }
+  return [...setupFiles, ...(await listFiles(payloadExtract))];
 }
 
 async function listFiles(root) {

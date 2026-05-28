@@ -7,6 +7,8 @@ import argparse
 import fnmatch
 import hashlib
 import re
+import shutil
+import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
@@ -243,10 +245,56 @@ def verify_asset_structures(
                     members = bundle.getnames()
                     if name.endswith(".app.tar.gz"):
                         require_archive_member(members, "Trajectory.app/Contents/MacOS", name, failures)
+                        require_archive_member(members, "trajectory-client", name, failures)
+                        require_archive_member_predicate(
+                            members,
+                            lambda member: (
+                                "Trajectory.app/Contents/MacOS/" in member
+                                and not Path(member).name.startswith("trajectory-client")
+                                and Path(member).name not in {"", "MacOS"}
+                            ),
+                            "app launcher under Trajectory.app/Contents/MacOS",
+                            name,
+                            failures,
+                        )
                     else:
                         require_archive_member(members, "trajectory-client", name, failures)
                         require_archive_member(members, "trajectory-server", name, failures)
                         require_archive_member(members, "trajectory-admin", name, failures)
+            elif name.endswith(".deb"):
+                require_magic(asset, b"!<arch>\n", name, ".deb ar container", failures)
+                run_if_available(["dpkg-deb", "--info", str(asset)], f"{name} dpkg metadata", failures)
+                run_if_available(["dpkg-deb", "--contents", str(asset)], f"{name} dpkg contents", failures)
+            elif name.endswith(".rpm"):
+                require_magic(asset, b"\xed\xab\xee\xdb", name, ".rpm lead", failures)
+                if shutil.which("rpm2cpio") and shutil.which("cpio"):
+                    result = subprocess.run(
+                        f"rpm2cpio {shell_quote(str(asset))} | cpio -t",
+                        shell=True,
+                        cwd=asset.parent,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=30,
+                    )
+                    if result.returncode != 0:
+                        failures.append(f"{name}: rpm2cpio/cpio integrity check failed: {result.stderr.strip()}")
+                    elif "trajectory-client" not in result.stdout:
+                        failures.append(f"{name}: rpm payload is missing trajectory-client")
+            elif name.endswith(".AppImage"):
+                require_magic(asset, b"\x7fELF", name, "AppImage ELF header", failures)
+                if version not in name:
+                    failures.append(f"{name}: AppImage filename does not include version {version}")
+            elif name.endswith(".msi"):
+                require_magic(asset, b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", name, "MSI OLE header", failures)
+                run_if_available(["7z", "t", str(asset)], f"{name} 7z integrity", failures)
+            elif name.endswith(".exe"):
+                require_magic(asset, b"MZ", name, "Windows executable header", failures)
+                run_if_available(["7z", "t", str(asset)], f"{name} setup archive integrity", failures)
+            elif name.endswith(".dmg"):
+                tail = asset.read_bytes()[-512:]
+                if b"koly" not in tail:
+                    failures.append(f"{name}: missing UDIF koly trailer")
             elif name.endswith(".apk"):
                 with zipfile.ZipFile(asset) as apk:
                     bad = apk.testzip()
@@ -276,6 +324,46 @@ def require_archive_member(
 ) -> None:
     if not any(needle in member for member in members):
         failures.append(f"{asset_name}: missing archive member containing {needle}")
+
+
+def require_archive_member_predicate(
+    members: list[str],
+    predicate,
+    label: str,
+    asset_name: str,
+    failures: list[str],
+) -> None:
+    if not any(predicate(member) for member in members):
+        failures.append(f"{asset_name}: missing archive member matching {label}")
+
+
+def require_magic(
+    path: Path,
+    magic: bytes,
+    asset_name: str,
+    label: str,
+    failures: list[str],
+) -> None:
+    if path.read_bytes()[: len(magic)] != magic:
+        failures.append(f"{asset_name}: missing {label}")
+
+
+def run_if_available(args: list[str], label: str, failures: list[str]) -> None:
+    if not shutil.which(args[0]):
+        return
+    result = subprocess.run(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        failures.append(f"{label} failed: {result.stderr.strip()}")
+
+
+def shell_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\\''") + "'"
 
 
 def sha256(path: Path) -> str:

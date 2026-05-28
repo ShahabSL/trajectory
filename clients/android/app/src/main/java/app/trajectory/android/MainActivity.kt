@@ -13,7 +13,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,7 +28,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -192,12 +190,12 @@ class MainActivity : ComponentActivity() {
 
 }
 
-private enum class AndroidTab(val label: String, val icon: ImageVector) {
-    STATUS("Status", Icons.Filled.Home),
-    PROFILE("Profile", Icons.Filled.Key),
-    RESOLVERS("Resolvers", Icons.Filled.Dns),
-    VPN("VPN", Icons.Filled.VpnKey),
-    DIAGNOSTICS("Diagnostics", Icons.Filled.BugReport),
+private enum class AndroidTab(val label: String, val navLabel: String, val icon: ImageVector) {
+    STATUS("Status", "Status", Icons.Filled.Home),
+    PROFILE("Profile", "Profile", Icons.Filled.Key),
+    RESOLVERS("Resolvers", "DNS", Icons.Filled.Dns),
+    VPN("VPN", "VPN", Icons.Filled.VpnKey),
+    DIAGNOSTICS("Diagnostics", "Logs", Icons.Filled.BugReport),
 }
 
 private data class TransportModeOption(
@@ -335,7 +333,8 @@ private fun TrajectoryAndroidApp(
                             selected = selectedTab == tab,
                             onClick = { selectedTab = tab },
                             icon = { NavMark(tab.icon, selectedTab == tab) },
-                            label = { Text(tab.label, maxLines = 1) },
+                            label = { Text(tab.navLabel, maxLines = 1, fontSize = 10.sp) },
+                            alwaysShowLabel = false,
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = TrajectoryColors.Ink,
                                 selectedTextColor = TrajectoryColors.Ink,
@@ -366,16 +365,6 @@ private fun TrajectoryAndroidApp(
                 ) {
                     if (tab == AndroidTab.STATUS) {
                         item {
-                            StatusCard(
-                                status = status,
-                                isWorking = isWorking,
-                                profile = currentProfile,
-                                notice = notice,
-                                profileErrors = profileErrors,
-                                onDismissNotice = { notice = null },
-                            )
-                        }
-                        item {
                             ActionStrip(
                                 canStart = profileErrors.isEmpty(),
                                 onSave = {
@@ -392,6 +381,16 @@ private fun TrajectoryAndroidApp(
                                     notice = errors.takeIf { it.isNotEmpty() }?.joinToString("\n")
                                 },
                                 onStop = onStop,
+                            )
+                        }
+                        item {
+                            StatusCard(
+                                status = status,
+                                isWorking = isWorking,
+                                profile = currentProfile,
+                                notice = notice,
+                                profileErrors = profileErrors,
+                                onDismissNotice = { notice = null },
                             )
                         }
                     } else {
@@ -500,18 +499,14 @@ private fun CompactStatusCard(
                 trackColor = TrajectoryColors.Border,
             )
         }
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            StatusChip("Mode", modeLabel(profile.transportMode))
-            StatusChip("DNS", resolverSummary(status, profile))
-        }
         if (profileErrors.isNotEmpty() || status.lastError != null) {
             Text(
                 text = status.lastError ?: profileErrors.first(),
-                modifier = Modifier.padding(top = 8.dp),
+                modifier = Modifier.padding(top = 6.dp),
                 color = TrajectoryColors.WarningInk,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
             )
         }
     }
@@ -535,7 +530,13 @@ private fun StatusCard(
             StatusDot(status.phase, isWorking)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(status.title, fontSize = 28.sp, fontWeight = FontWeight.Black)
+                Text(
+                    status.title,
+                    fontSize = 22.sp,
+                    lineHeight = 24.sp,
+                    fontWeight = FontWeight.Black,
+                    maxLines = 2,
+                )
                 Text(
                     status.detail,
                     color = TrajectoryColors.Muted,
@@ -555,14 +556,10 @@ private fun StatusCard(
         }
         Spacer(Modifier.height(14.dp))
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StatusChip("SOCKS", if (status.socksReady) "ready" else "waiting")
-                StatusChip("HTTP", if (status.httpReady) "ready" else "waiting")
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StatusChip("DNS", resolverSummary(status, profile))
-                StatusChip("Mode", modeLabel(profile.transportMode))
-            }
+            StatusChip("SOCKS", if (status.socksReady) "ready" else "waiting", Modifier.fillMaxWidth())
+            StatusChip("HTTP", if (status.httpReady) "ready" else "waiting", Modifier.fillMaxWidth())
+            StatusChip("DNS", resolverSummary(status, profile), Modifier.fillMaxWidth())
+            StatusChip("Mode", modeLabel(profile.transportMode), Modifier.fillMaxWidth())
         }
         AnimatedVisibility(notice != null || status.lastError != null || profileErrors.isNotEmpty()) {
             Column(
@@ -602,36 +599,23 @@ private fun ActionStrip(
     CardShell {
         SectionTitle(Icons.Filled.PlayArrow, "Controls")
         Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            Button(
-                onClick = onStartProxy,
-                enabled = canStart,
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(8.dp),
-            ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            Button(onClick = onStartProxy, enabled = canStart, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
                 Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("Start proxy")
             }
-            Button(
-                onClick = onStartVpn,
-                enabled = canStart,
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(8.dp),
-            ) {
+            Button(onClick = onStartVpn, enabled = canStart, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
                 Icon(Icons.Filled.VpnKey, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("Start VPN")
             }
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(onClick = onSave, modifier = Modifier.weight(1f), shape = RoundedCornerShape(8.dp)) {
+            OutlinedButton(onClick = onSave, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
                 Icon(Icons.Filled.Save, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("Save profile")
             }
-            OutlinedButton(onClick = onStop, modifier = Modifier.weight(1f), shape = RoundedCornerShape(8.dp)) {
+            OutlinedButton(onClick = onStop, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
                 Icon(Icons.Filled.StopCircle, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("Stop Trajectory")
@@ -733,13 +717,13 @@ private fun ResolversScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier
                 .padding(top = 6.dp)
-                .horizontalScroll(rememberScrollState()),
+                .fillMaxWidth(),
         ) {
             listOf("auto", "udp", "tcp").forEach { mode ->
                 FilterChip(
                     selected = resolverTransport == mode,
                     onClick = { onTransportChange(mode) },
-                    label = { Text(mode.uppercase()) },
+                    label = { Text(mode.uppercase(), fontSize = 12.sp, maxLines = 1) },
                     shape = RoundedCornerShape(8.dp),
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = TrajectoryColors.Ink,
@@ -747,6 +731,7 @@ private fun ResolversScreen(
                         containerColor = TrajectoryColors.Surface,
                         labelColor = TrajectoryColors.Ink,
                     ),
+                    modifier = Modifier.weight(1f),
                 )
             }
         }
@@ -794,55 +779,50 @@ private fun TransportModeSelector(
             .padding(top = 6.dp)
             .fillMaxWidth(),
     ) {
-        transportModeOptions.chunked(2).forEach { rowModes ->
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                rowModes.forEach { mode ->
-                    val selected = transportMode == mode.id
-                    FilterChip(
-                        selected = selected,
-                        onClick = { onModeChange(mode.id) },
-                        label = {
-                            Column(Modifier.fillMaxWidth()) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(mode.icon, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text(mode.label, fontWeight = FontWeight.Bold, maxLines = 1)
-                                }
-                                Text(
-                                    mode.badge,
-                                    color = if (selected) Color.White else if (mode.experimental) TrajectoryColors.WarningInk else TrajectoryColors.Muted,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                )
-                                Text(
-                                    mode.summary,
-                                    color = if (selected) Color.White else TrajectoryColors.Muted,
-                                    fontSize = 11.sp,
-                                    lineHeight = 14.sp,
-                                    maxLines = 2,
-                                )
-                            }
-                        },
-                        shape = RoundedCornerShape(8.dp),
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = if (mode.experimental) TrajectoryColors.WarningInk else TrajectoryColors.Ink,
-                            selectedLabelColor = Color.White,
-                            containerColor = if (mode.experimental) TrajectoryColors.WarningSurface else TrajectoryColors.Surface,
-                            labelColor = TrajectoryColors.Ink,
-                        ),
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = 108.dp)
-                            .semantics {
-                                contentDescription = "${mode.label} ${if (mode.experimental) "experimental " else ""}mode"
-                            },
-                    )
-                }
-                if (rowModes.size == 1) {
-                    Spacer(Modifier.weight(1f))
-                }
-            }
+        transportModeOptions.forEach { mode ->
+            val selected = transportMode == mode.id
+            FilterChip(
+                selected = selected,
+                onClick = { onModeChange(mode.id) },
+                label = {
+                    Column(Modifier.fillMaxWidth()) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(mode.icon, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(mode.label, fontWeight = FontWeight.Bold, maxLines = 1)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                mode.badge,
+                                color = if (selected) Color.White else if (mode.experimental) TrajectoryColors.WarningInk else TrajectoryColors.Muted,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                            )
+                        }
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            mode.summary,
+                            color = if (selected) Color.White else TrajectoryColors.Muted,
+                            fontSize = 11.sp,
+                            lineHeight = 14.sp,
+                            maxLines = 2,
+                        )
+                    }
+                },
+                shape = RoundedCornerShape(8.dp),
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = if (mode.experimental) TrajectoryColors.WarningInk else TrajectoryColors.Ink,
+                    selectedLabelColor = Color.White,
+                    containerColor = if (mode.experimental) TrajectoryColors.WarningSurface else TrajectoryColors.Surface,
+                    labelColor = TrajectoryColors.Ink,
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 84.dp)
+                    .semantics {
+                        contentDescription = "${mode.label} ${if (mode.experimental) "experimental " else ""}mode"
+                    },
+            )
         }
     }
 }
@@ -951,9 +931,9 @@ private fun StatusDot(phase: RuntimePhase, working: Boolean) {
 }
 
 @Composable
-private fun StatusChip(label: String, value: String) {
+private fun StatusChip(label: String, value: String, modifier: Modifier = Modifier) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(999.dp))
             .background(TrajectoryColors.Subtle)
             .padding(horizontal = 10.dp, vertical = 7.dp),
@@ -961,7 +941,14 @@ private fun StatusChip(label: String, value: String) {
     ) {
         Text(label, color = TrajectoryColors.Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.width(5.dp))
-        Text(value, color = TrajectoryColors.Ink, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Text(
+            value,
+            modifier = Modifier.weight(1f, fill = false),
+            color = TrajectoryColors.Ink,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+        )
     }
 }
 

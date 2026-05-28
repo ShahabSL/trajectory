@@ -276,6 +276,12 @@ jobs:
 
       - name: Smoke-test Android UI
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          TRAJECTORY_ANDROID_SMOKE_DOMAIN: ${{ secrets.TRAJECTORY_E2E_DOMAIN }}
+          TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY: ${{ secrets.TRAJECTORY_E2E_ACCESS_KEY }}
+          TRAJECTORY_ANDROID_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
+          TRAJECTORY_ANDROID_SMOKE_FETCH_URL: ${{ secrets.TRAJECTORY_E2E_FETCH_URL }}
+          TRAJECTORY_ANDROID_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
         with:
           api-level: 35
           target: google_apis
@@ -293,6 +299,12 @@ jobs:
 
       - name: Smoke-test Android API 33 notification-era UI
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          TRAJECTORY_ANDROID_SMOKE_DOMAIN: ${{ secrets.TRAJECTORY_E2E_DOMAIN }}
+          TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY: ${{ secrets.TRAJECTORY_E2E_ACCESS_KEY }}
+          TRAJECTORY_ANDROID_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
+          TRAJECTORY_ANDROID_SMOKE_FETCH_URL: ${{ secrets.TRAJECTORY_E2E_FETCH_URL }}
+          TRAJECTORY_ANDROID_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
         with:
           api-level: 33
           target: google_apis
@@ -311,6 +323,12 @@ jobs:
 
       - name: Smoke-test Android min-SDK-era release UI
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          TRAJECTORY_ANDROID_SMOKE_DOMAIN: ${{ secrets.TRAJECTORY_E2E_DOMAIN }}
+          TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY: ${{ secrets.TRAJECTORY_E2E_ACCESS_KEY }}
+          TRAJECTORY_ANDROID_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
+          TRAJECTORY_ANDROID_SMOKE_FETCH_URL: ${{ secrets.TRAJECTORY_E2E_FETCH_URL }}
+          TRAJECTORY_ANDROID_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
         with:
           api-level: 28
           target: google_apis
