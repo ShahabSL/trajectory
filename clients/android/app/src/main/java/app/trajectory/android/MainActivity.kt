@@ -622,6 +622,20 @@ private fun StatusCard(
                 Modifier.fillMaxWidth(),
                 if (dnsReady) "status.dns.admitted" else "status.dns.waiting",
             )
+            if (status.mode == RuntimeMode.VPN) {
+                StatusChip(
+                    "TUN",
+                    if (status.tunReady) "ready" else "waiting",
+                    Modifier.fillMaxWidth(),
+                    if (status.tunReady) "status.tun.ready" else "status.tun.waiting",
+                )
+                StatusChip(
+                    "Bridge",
+                    if (status.bridgeReady) "ready" else "waiting",
+                    Modifier.fillMaxWidth(),
+                    if (status.bridgeReady) "status.bridge.ready" else "status.bridge.waiting",
+                )
+            }
             StatusChip("Mode", modeLabel(profile.transportMode), Modifier.fillMaxWidth())
         }
         AnimatedVisibility(notice != null || status.lastError != null || profileErrors.isNotEmpty()) {

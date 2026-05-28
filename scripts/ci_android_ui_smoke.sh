@@ -310,7 +310,9 @@ dump_ui_tree_raw() {
   local seconds="${2:-10}"
   for _ in 1 2 3 4; do
     if timeout "${seconds}s" adb exec-out uiautomator dump /dev/tty > "$output"; then
-      return 0
+      if grep -Fq "</hierarchy>" "$output"; then
+        return 0
+      fi
     fi
     adb_wait_ready || true
     sleep 1
