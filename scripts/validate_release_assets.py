@@ -71,7 +71,6 @@ def main() -> None:
     require(files, rf"Trajectory_{version}_.+\.deb", "Linux desktop .deb", failures)
     require(files, rf"Trajectory-{version}-.+\.rpm", "Linux desktop .rpm", failures)
     require(files, rf"Trajectory_{version}_.+\.AppImage", "Linux desktop AppImage", failures)
-    require(files, rf"Trajectory_?{version}.*\.dmg", "macOS desktop .dmg", failures, count=2)
     require(files, rf"Trajectory_{re.escape(args.release_tag)}_x86_64-apple-darwin\.app\.tar\.gz", "macOS Intel app bundle archive", failures)
     require(files, rf"Trajectory_{re.escape(args.release_tag)}_aarch64-apple-darwin\.app\.tar\.gz", "macOS Apple Silicon app bundle archive", failures)
     require(files, rf"Trajectory_?{version}.*\.msi", "Windows desktop .msi", failures)

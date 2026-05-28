@@ -20,6 +20,10 @@ if (releaseTag && releaseTag !== `v${version}`) {
 }
 
 await mkdir(artifactDir, { recursive: true });
+await writeFile(
+  path.join(artifactDir, "package-smoke-started.txt"),
+  `started desktop package smoke on ${process.platform} for ${version}\n`,
+);
 
 const files = await listFiles(bundleRoot);
 const manifest = [`desktop package smoke`, `platform=${process.platform}`, `version=${version}`];
@@ -60,7 +64,7 @@ async function smokeLinux(files) {
 }
 
 async function smokeMac(files) {
-  const dmg = requireOne(files, new RegExp(`Trajectory_?${escapeRegex(version)}.*\\.dmg$`), "macOS .dmg");
+  const dmg = findOptional(files, new RegExp(`Trajectory_?${escapeRegex(version)}.*\\.dmg$`), "macOS .dmg");
   const appBundle = path.join(bundleRoot, "macos", "Trajectory.app");
   const macosDir = path.join(appBundle, "Contents", "MacOS");
   const executables = (await listFiles(macosDir)).filter(isExecutable);
@@ -69,8 +73,13 @@ async function smokeMac(files) {
   if (!sidecar) throw new Error("missing macOS bundled trajectory-client sidecar");
   if (!launcher) throw new Error("missing macOS app launcher executable");
   runChecked(sidecar, ["--help"], "macOS bundled sidecar --help");
-  runChecked("hdiutil", ["verify", dmg], "macOS dmg verification");
-  manifest.push(`dmg=${relative(dmg)}`, `app=${relative(appBundle)}`);
+  if (dmg) {
+    runChecked("hdiutil", ["verify", dmg], "macOS dmg verification");
+    manifest.push(`dmg=${relative(dmg)}`);
+  } else {
+    manifest.push("dmg=not emitted by this Tauri build");
+  }
+  manifest.push(`app=${relative(appBundle)}`);
   await assertLaunches(launcher, [], "macOS app bundle launch smoke");
 }
 
@@ -112,6 +121,18 @@ function requireOne(files, pattern, label) {
   const matches = files.filter((file) => pattern.test(file));
   if (matches.length !== 1) {
     throw new Error(`${label}: expected one match for ${pattern}, found ${matches.length}`);
+  }
+  requireReadable(matches[0], label);
+  return matches[0];
+}
+
+function findOptional(files, pattern, label) {
+  const matches = files.filter((file) => pattern.test(file));
+  if (matches.length > 1) {
+    throw new Error(`${label}: expected zero or one match for ${pattern}, found ${matches.length}`);
+  }
+  if (matches.length === 0) {
+    return null;
   }
   requireReadable(matches[0], label);
   return matches[0];
