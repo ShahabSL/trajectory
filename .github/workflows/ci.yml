@@ -141,6 +141,16 @@ jobs:
         run: npm run tauri:build
         working-directory: clients/desktop
 
+      - name: Archive macOS app bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app_path="clients/desktop/src-tauri/target/release/bundle/macos/Trajectory.app"
+          test -d "$app_path"
+          tar -C "$(dirname "$app_path")" \
+            -czf "clients/desktop/src-tauri/target/release/bundle/macos/Trajectory_${{ matrix.os }}.app.tar.gz" \
+            "$(basename "$app_path")"
+
       - name: Upload desktop CI bundles
         uses: actions/upload-artifact@v4
         with:
