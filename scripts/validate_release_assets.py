@@ -268,8 +268,9 @@ def verify_asset_structures(
             elif name.endswith(".rpm"):
                 require_magic(asset, b"\xed\xab\xee\xdb", name, ".rpm lead", failures)
                 if shutil.which("rpm2cpio") and shutil.which("cpio"):
+                    rpm_path = asset.resolve()
                     result = subprocess.run(
-                        f"rpm2cpio {shell_quote(str(asset))} | cpio -t",
+                        f"rpm2cpio {shell_quote(str(rpm_path))} | cpio -t",
                         shell=True,
                         cwd=asset.parent,
                         stdout=subprocess.PIPE,
