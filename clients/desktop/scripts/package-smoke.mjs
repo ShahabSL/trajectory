@@ -120,7 +120,21 @@ async function smokeLinux(files) {
   } else {
     manifest.push("Linux deb install launch=skipped outside CI or without sudo");
   }
-  manifest.push("Linux rpm launch=covered by extracted payload sidecar checks on this runner");
+  if (process.env.CI && commandExists("sudo") && commandExists("rpm")) {
+    const rpmPackageName = rpmPackageField(rpm, "NAME") || "trajectory-desktop";
+    runChecked("sudo", ["rpm", "-i", "--nodeps", "--replacepkgs", rpm], "install Linux .rpm", {
+      timeoutMs: 120_000,
+    });
+    try {
+      await assertLaunches("/usr/bin/trajectory-desktop", [], "Linux rpm installed app launch smoke");
+    } finally {
+      runChecked("sudo", ["rpm", "-e", rpmPackageName], "uninstall Linux .rpm", {
+        timeoutMs: 120_000,
+      });
+    }
+  } else {
+    manifest.push("Linux rpm install launch=skipped outside CI or without sudo/rpm");
+  }
   await assertLaunches(appImage, [], "Linux AppImage launch smoke", {
     APPIMAGE_EXTRACT_AND_RUN: "1",
   });
@@ -226,6 +240,21 @@ async function smokeWindows(files) {
   }
 
   manifest.push(`msi=${relative(msi)}`, `setup=${relative(setup)}`);
+  if (process.env.CI) {
+    runChecked("msiexec.exe", ["/i", msi, "/qn", "/norestart"], "install Windows .msi", {
+      timeoutMs: 180_000,
+    });
+    try {
+      const installedLauncher = await findInstalledWindowsLauncher();
+      await assertLaunches(installedLauncher, [], "Windows MSI installed app launch smoke");
+    } finally {
+      runChecked("msiexec.exe", ["/x", msi, "/qn", "/norestart"], "uninstall Windows .msi", {
+        timeoutMs: 180_000,
+      });
+    }
+  } else {
+    manifest.push("Windows MSI install launch=skipped outside CI");
+  }
   await assertLaunches(msiLauncher, [], "Windows MSI app launch smoke");
 }
 
@@ -326,6 +355,43 @@ function packageField(deb, field) {
   });
   writeCommandLog(`read Linux deb ${field}`, result);
   return result.status === 0 ? result.stdout.trim() : "";
+}
+
+function rpmPackageField(rpm, field) {
+  const result = spawnSync("rpm", ["-qp", "--queryformat", `%{${field}}`, rpm], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  writeCommandLog(`read Linux rpm ${field}`, result);
+  return result.status === 0 ? result.stdout.trim() : "";
+}
+
+async function findInstalledWindowsLauncher() {
+  const roots = [
+    process.env.ProgramFiles,
+    process.env["ProgramFiles(x86)"],
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Programs"),
+  ].filter(Boolean);
+  const candidates = [];
+  for (const root of roots) {
+    for (const dirname of ["Trajectory", "trajectory", "Trajectory Desktop", "trajectory-desktop"]) {
+      const installRoot = path.join(root, dirname);
+      if (!existsSync(installRoot)) continue;
+      candidates.push(
+        ...(await listFiles(installRoot)).filter((file) =>
+          /(?:Trajectory|trajectory-desktop)\.exe$/i.test(file),
+        ),
+      );
+    }
+  }
+  const launchers = candidates.filter((file) => !/trajectory-client/i.test(path.basename(file)));
+  if (launchers.length !== 1) {
+    throw new Error(`Windows installed app launcher: expected one match, found ${launchers.length}`);
+  }
+  requireExecutable(launchers[0], "Windows installed MSI launcher");
+  return launchers[0];
 }
 
 async function assertLaunchesMacApp(appBundle, label, extraEnv = {}) {

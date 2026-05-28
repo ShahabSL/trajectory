@@ -37,6 +37,58 @@ class RuntimeStatusCenterTest {
         assertNotEquals(RuntimePhase.PROXY_CONNECTED, RuntimeStatusCenter.snapshot().phase)
     }
 
+    @Test
+    fun connectedVpnDoesNotDegradeOnNormalLocalSocksClose() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.markVpnConnected()
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.VPN,
+            profile(),
+            "SOCKS proxy stream 10 from 127.0.0.1:56442 failed: Broken pipe (os error 32)",
+        )
+
+        assertEquals(RuntimePhase.VPN_CONNECTED, RuntimeStatusCenter.snapshot().phase)
+    }
+
+    @Test
+    fun connectedProxyDoesNotDegradeOnNormalHttpClientClose() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.markProxyDataPathReady(profile(), "http://127.0.0.1:8080/smoke")
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.PROXY,
+            profile(),
+            "HTTP proxy stream 11 from 127.0.0.1:56443 failed: Connection reset by peer (os error 104)",
+        )
+
+        assertEquals(RuntimePhase.PROXY_CONNECTED, RuntimeStatusCenter.snapshot().phase)
+    }
+
+    @Test
+    fun connectedVpnStillDegradesOnResolverFailure() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.markVpnConnected()
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.VPN,
+            profile(),
+            "resolver 1.1.1.1:53 packet 42 failed: DNS response did not contain TXT answer",
+        )
+
+        assertEquals(RuntimePhase.DEGRADED, RuntimeStatusCenter.snapshot().phase)
+    }
+
+    @Test
+    fun connectedProxyStillDegradesOnClientTransportFailure() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.markProxyDataPathReady(profile(), "http://127.0.0.1:8080/smoke")
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.PROXY,
+            profile(),
+            "client transport failed: send local bytes to client transport",
+        )
+
+        assertEquals(RuntimePhase.DEGRADED, RuntimeStatusCenter.snapshot().phase)
+    }
+
     private fun profile(): ClientProfile = ClientProfile(
         name = "Test",
         domain = "t.example.com",

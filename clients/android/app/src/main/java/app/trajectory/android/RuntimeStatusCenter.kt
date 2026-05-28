@@ -251,19 +251,9 @@ object RuntimeStatusCenter {
         val isRecoveredTransportFallback =
             (lower.contains("failed") || lower.contains("timed out")) &&
                 (lower.contains("retrying over tcp") || lower.contains("retrying udp"))
-        val isBenignLocalProbe =
-            (lower.contains("http proxy stream") &&
-                lower.contains("client closed before sending headers")) ||
-                (lower.contains("socks proxy stream") &&
-                    (
-                        (lower.contains("read socks greeting") &&
-                            lower.contains("early eof")) ||
-                            lower.contains("socks proxy mode supports connect only") ||
-                            lower.contains("socks client used unsupported version") ||
-                            lower.contains("socks client did not offer no-auth method")
-                    ))
+        val isBenignLocalProxyClose = isBenignLocalProxyClose(lower)
         if (!isRecoveredTransportFallback &&
-            !isBenignLocalProbe &&
+            !isBenignLocalProxyClose &&
             (lower.contains("failed") || lower.contains("timed out") || lower.contains("error"))
         ) {
             if (current.phase == RuntimePhase.PROXY_CONNECTED || current.phase == RuntimePhase.VPN_CONNECTED) {
@@ -276,6 +266,21 @@ object RuntimeStatusCenter {
                 )
             }
         }
+    }
+
+    private fun isBenignLocalProxyClose(lowercaseLine: String): Boolean {
+        val isProxyStream =
+            lowercaseLine.contains("http proxy stream") ||
+                lowercaseLine.contains("socks proxy stream")
+        if (!isProxyStream) return false
+
+        return lowercaseLine.contains("client closed before sending headers") ||
+            lowercaseLine.contains("broken pipe") ||
+            lowercaseLine.contains("connection reset by peer") ||
+            lowercaseLine.contains("early eof") ||
+            lowercaseLine.contains("socks proxy mode supports connect only") ||
+            lowercaseLine.contains("socks client used unsupported version") ||
+            lowercaseLine.contains("socks client did not offer no-auth method")
     }
 
     fun markListenersReady(mode: RuntimeMode, profile: ClientProfile) {

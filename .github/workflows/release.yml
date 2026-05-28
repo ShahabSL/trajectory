@@ -462,7 +462,7 @@ jobs:
         if: always()
         run: scripts/ci_android_reclaim_emulator_disk.sh 33
 
-      - name: Smoke-test signed Android min-SDK-era UI
+      - name: Smoke-test signed Android legacy UI
         uses: reactivecircus/android-emulator-runner@v2
         env:
           TRAJECTORY_ANDROID_SMOKE_DOMAIN: ${{ secrets.TRAJECTORY_E2E_DOMAIN }}
@@ -482,6 +482,30 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
           script: scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/android-ui-api28"
 
+      - name: Reclaim Android API 28 emulator disk
+        if: always()
+        run: scripts/ci_android_reclaim_emulator_disk.sh 28
+
+      - name: Smoke-test signed Android true min-SDK UI
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          TRAJECTORY_ANDROID_SMOKE_DOMAIN: ${{ secrets.TRAJECTORY_E2E_DOMAIN }}
+          TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY: ${{ secrets.TRAJECTORY_E2E_ACCESS_KEY }}
+          TRAJECTORY_ANDROID_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
+          TRAJECTORY_ANDROID_SMOKE_FETCH_URL: ${{ secrets.TRAJECTORY_E2E_FETCH_URL }}
+          TRAJECTORY_ANDROID_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
+          TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER: "1"
+          TRAJECTORY_ANDROID_SMOKE_REQUIRE_LIVE: "1"
+          TRAJECTORY_ANDROID_SMOKE_REQUIRE_VPN: "1"
+        with:
+          api-level: 26
+          target: google_apis
+          arch: x86_64
+          profile: pixel
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
+          script: scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/android-ui-api26"
+
       - name: Upload Android release UI smoke artifacts
         if: always()
         uses: actions/upload-artifact@v7
@@ -491,6 +515,7 @@ jobs:
             ${{ runner.temp }}/android-ui
             ${{ runner.temp }}/android-ui-api33
             ${{ runner.temp }}/android-ui-api28
+            ${{ runner.temp }}/android-ui-api26
           if-no-files-found: error
           retention-days: 14
 
@@ -503,11 +528,116 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Upload Android smoke probe APK
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-smokeprobe-apk
+          path: clients/android/smokeprobe/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  android-arm64:
+    needs:
+      - android
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release ref
+        shell: bash
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            release_tag="$INPUT_RELEASE_TAG"
+          else
+            release_tag="$GITHUB_REF_NAME"
+          fi
+          if [[ ! "$release_tag" =~ ^v[0-9A-Za-z._-]+$ ]]; then
+            echo "invalid release tag: $release_tag" >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
+
+      - name: Verify release tag is on main
+        shell: bash
+        run: |
+          git fetch origin main --tags --force
+          tag_commit="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          git merge-base --is-ancestor "$tag_commit" origin/main
+
+      - name: Check out release tag
+        shell: bash
+        run: |
+          git fetch --tags --force
+          git checkout "$RELEASE_TAG"
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Download signed Android release APK
+        uses: actions/download-artifact@v5
+        with:
+          name: android-release-apk
+          path: ${{ runner.temp }}/android-release-apk
+
+      - name: Download Android smoke probe APK
+        uses: actions/download-artifact@v5
+        with:
+          name: android-smokeprobe-apk
+          path: ${{ runner.temp }}/android-smokeprobe-apk
+
+      - name: Smoke-test signed Android ARM64 UI
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          TRAJECTORY_ANDROID_SMOKE_DOMAIN: ${{ secrets.TRAJECTORY_E2E_DOMAIN }}
+          TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY: ${{ secrets.TRAJECTORY_E2E_ACCESS_KEY }}
+          TRAJECTORY_ANDROID_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
+          TRAJECTORY_ANDROID_SMOKE_FETCH_URL: ${{ secrets.TRAJECTORY_E2E_FETCH_URL }}
+          TRAJECTORY_ANDROID_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
+          TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER: "1"
+          TRAJECTORY_ANDROID_SMOKE_REQUIRE_LIVE: "1"
+          TRAJECTORY_ANDROID_SMOKE_REQUIRE_VPN: "1"
+        with:
+          api-level: 35
+          target: google_apis
+          arch: arm64-v8a
+          profile: pixel
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
+          script: |
+            apk="$(find "$RUNNER_TEMP/android-release-apk" -name '*.apk' -print -quit)"
+            probe="$(find "$RUNNER_TEMP/android-smokeprobe-apk" -name '*.apk' -print -quit)"
+            test -n "$apk"
+            test -n "$probe"
+            TRAJECTORY_ANDROID_SMOKE_PROBE_APK="$probe" \
+              scripts/ci_android_ui_smoke.sh "$apk" "$RUNNER_TEMP/android-ui-arm64"
+
+      - name: Upload Android ARM64 release UI smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-arm64-release-ui-smoke
+          path: ${{ runner.temp }}/android-ui-arm64
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
     needs:
       - build
       - desktop
       - android
+      - android-arm64
     runs-on: ubuntu-22.04
     permissions:
       contents: write

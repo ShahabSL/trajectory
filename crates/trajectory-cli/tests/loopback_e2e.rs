@@ -21,18 +21,30 @@ use trajectory_core::dns::{
     qname_to_envelope,
 };
 
+static NEXT_TEST_PORT: AtomicUsize = AtomicUsize::new(20_000);
+const TEST_PORT_SPAN: usize = 10_000;
+
 fn free_tcp_addr() -> SocketAddr {
-    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind TCP");
-    let addr = listener.local_addr().expect("TCP addr");
-    drop(listener);
-    addr
+    free_loopback_addr("TCP", |addr| StdTcpListener::bind(addr).map(|_| ()))
 }
 
 fn free_udp_addr() -> SocketAddr {
-    let socket = StdUdpSocket::bind("127.0.0.1:0").expect("bind UDP");
-    let addr = socket.local_addr().expect("UDP addr");
-    drop(socket);
-    addr
+    free_loopback_addr("UDP", |addr| StdUdpSocket::bind(addr).map(|_| ()))
+}
+
+fn free_loopback_addr(
+    protocol: &str,
+    bind: impl Fn(SocketAddr) -> std::io::Result<()>,
+) -> SocketAddr {
+    for _ in 0..TEST_PORT_SPAN {
+        let offset = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed) % TEST_PORT_SPAN;
+        let port = 20_000 + offset as u16;
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        if bind(addr).is_ok() {
+            return addr;
+        }
+    }
+    panic!("could not reserve {protocol} loopback port in test range");
 }
 
 async fn connect_with_retry(addr: SocketAddr, wait: Duration) -> TcpStream {

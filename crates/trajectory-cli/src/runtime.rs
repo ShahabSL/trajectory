@@ -72,10 +72,13 @@ const TCP_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const SERVER_UPLOAD_QUEUE: usize = 1024;
 const SERVER_UPLOAD_COALESCE_BYTES: usize = 4096;
 const SERVER_UPLOAD_COALESCE_DELAY: Duration = Duration::from_millis(1);
+const SERVER_DOWNLOAD_COALESCE_DELAY: Duration = Duration::from_millis(1);
 const SERVER_DOWNLOAD_QUEUE: usize = 1024;
 const SERVER_TARGET_READ_CHUNK: usize = 4096;
 const SERVER_RETAINED_BYTE_LIMIT: usize = SERVER_DOWNLOAD_QUEUE * SERVER_TARGET_READ_CHUNK;
 const SERVER_DOWNLOAD_FRAME_MAX: usize = 4096;
+const SERVER_DOWNLOAD_ADMISSION_FRAME_MAX: usize = 192;
+const SERVER_DOWNLOAD_ADMISSION_FRAME_MIN: usize = 32;
 const SERVER_DOWNLOAD_FAIR_FRAME_MAX: usize = 512;
 const SERVER_DOWNLOAD_FAIR_FRAME_MIN: usize = 128;
 const SERVER_UDP_QUERY_CONCURRENCY: usize = 1024;
@@ -2398,7 +2401,7 @@ async fn accept_http_proxy_streams(
                 Err(_) => return,
             };
             if let Err(error) = run_http_proxy_stream_io(transport_tx, stream_id, stream).await {
-                eprintln!("HTTP proxy stream {stream_id} from {peer} failed: {error:#}");
+                log_proxy_stream_error("HTTP", stream_id, peer, &error);
             }
         });
     }
@@ -2421,10 +2424,25 @@ async fn accept_socks_proxy_streams(
                 Err(_) => return,
             };
             if let Err(error) = run_socks_proxy_stream_io(transport_tx, stream_id, stream).await {
-                eprintln!("SOCKS proxy stream {stream_id} from {peer} failed: {error:#}");
+                log_proxy_stream_error("SOCKS", stream_id, peer, &error);
             }
         });
     }
+}
+
+fn log_proxy_stream_error(kind: &str, stream_id: u64, peer: SocketAddr, error: &anyhow::Error) {
+    if is_benign_proxy_stream_error(error) {
+        return;
+    }
+    eprintln!("{kind} proxy stream {stream_id} from {peer} failed: {error:#}");
+}
+
+fn is_benign_proxy_stream_error(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_lowercase();
+    text.contains("broken pipe")
+        || text.contains("connection reset by peer")
+        || text.contains("early eof")
+        || text.contains("client closed before sending headers")
 }
 
 async fn run_socks_proxy_stream_io(
@@ -5879,6 +5897,13 @@ async fn append_download_frames_for_sessions(
     for (_, session) in sessions {
         stage_download_frames(session).await?;
     }
+    if sessions.len() > 1 && should_coalesce_downloads(sessions).await {
+        tokio::time::sleep(SERVER_DOWNLOAD_COALESCE_DELAY).await;
+        for (_, session) in sessions {
+            stage_download_frames(session).await?;
+        }
+    }
+    append_admission_download_frames(query, key, response, sessions).await?;
 
     loop {
         let mut progressed = false;
@@ -5908,6 +5933,60 @@ async fn append_download_frames_for_sessions(
     Ok(())
 }
 
+async fn append_admission_download_frames(
+    query: &trajectory_core::dns::DnsQuery,
+    key: &ClientAccessKey,
+    response: &mut Packet,
+    sessions: &[(u64, Arc<SessionHandle>)],
+) -> Result<()> {
+    let pending = pending_download_session_count(sessions).await;
+    if pending <= 1 {
+        return Ok(());
+    }
+    let max_frame = download_admission_frame_max(response.max_response_bytes, pending);
+    for (stream_id, session) in sessions {
+        if response.frames.len() >= 60 {
+            return Ok(());
+        }
+        let has_pending = {
+            let send = session.download_send.lock().await;
+            send.has_pending_send()
+        };
+        if has_pending {
+            append_one_download_frame(query, key, response, *stream_id, session, max_frame).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn should_coalesce_downloads(sessions: &[(u64, Arc<SessionHandle>)]) -> bool {
+    let mut ready = false;
+    let mut waiting = false;
+    for (_, session) in sessions {
+        let send = session.download_send.lock().await;
+        if send.has_pending_send() {
+            ready = true;
+        } else {
+            waiting = true;
+        }
+        if ready && waiting {
+            return true;
+        }
+    }
+    false
+}
+
+async fn pending_download_session_count(sessions: &[(u64, Arc<SessionHandle>)]) -> usize {
+    let mut pending = 0;
+    for (_, session) in sessions {
+        let send = session.download_send.lock().await;
+        if send.has_pending_send() {
+            pending += 1;
+        }
+    }
+    pending
+}
+
 fn download_frame_max_for_response(max_response_bytes: u16, active_sessions: usize) -> usize {
     if active_sessions <= 1 {
         return SERVER_DOWNLOAD_FRAME_MAX;
@@ -5917,6 +5996,18 @@ fn download_frame_max_for_response(max_response_bytes: u16, active_sessions: usi
     (usable / reserved_slots).clamp(
         SERVER_DOWNLOAD_FAIR_FRAME_MIN,
         SERVER_DOWNLOAD_FAIR_FRAME_MAX,
+    )
+}
+
+fn download_admission_frame_max(max_response_bytes: u16, pending_sessions: usize) -> usize {
+    if pending_sessions <= 1 {
+        return SERVER_DOWNLOAD_FRAME_MAX;
+    }
+    let usable = (max_response_bytes as usize).saturating_sub(DNS_RESPONSE_SAFETY_MARGIN + 160);
+    let reserved_slots = pending_sessions.min(8) + 1;
+    (usable / reserved_slots).clamp(
+        SERVER_DOWNLOAD_ADMISSION_FRAME_MIN,
+        SERVER_DOWNLOAD_ADMISSION_FRAME_MAX,
     )
 }
 
@@ -6481,6 +6572,25 @@ mod tests {
     }
 
     #[test]
+    fn proxy_stream_disconnects_are_not_logged_as_failures() {
+        assert!(is_benign_proxy_stream_error(&anyhow::anyhow!(
+            "write tcp response: Broken pipe (os error 32)"
+        )));
+        assert!(is_benign_proxy_stream_error(&anyhow::anyhow!(
+            "write tcp response: Connection reset by peer (os error 104)"
+        )));
+        assert!(is_benign_proxy_stream_error(&anyhow::anyhow!(
+            "HTTP proxy client closed before sending headers"
+        )));
+        assert!(is_benign_proxy_stream_error(&anyhow::anyhow!(
+            "read SOCKS greeting: early eof"
+        )));
+        assert!(!is_benign_proxy_stream_error(&anyhow::anyhow!(
+            "register local stream with client transport"
+        )));
+    }
+
+    #[test]
     fn proxy_path_has_no_global_fixed_pacing_floor() {
         let mut health = ProxyHealth::default();
         health.record_result(
@@ -6506,6 +6616,20 @@ mod tests {
         );
         assert!(download_frame_max_for_response(4096, 2) <= SERVER_DOWNLOAD_FAIR_FRAME_MAX);
         assert!(download_frame_max_for_response(1232, 6) < SERVER_DOWNLOAD_FAIR_FRAME_MAX);
+    }
+
+    #[test]
+    fn admission_download_cap_preserves_first_frame_slots() {
+        assert_eq!(
+            download_admission_frame_max(1232, 1),
+            SERVER_DOWNLOAD_FRAME_MAX
+        );
+        assert!(download_admission_frame_max(700, 2) <= SERVER_DOWNLOAD_ADMISSION_FRAME_MAX);
+        assert!(download_admission_frame_max(700, 2) >= SERVER_DOWNLOAD_ADMISSION_FRAME_MIN);
+        assert!(
+            download_admission_frame_max(700, 8) < download_admission_frame_max(700, 2),
+            "more pending streams should receive smaller admission slices"
+        );
     }
 
     #[test]
