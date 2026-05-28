@@ -1,26 +1,37 @@
 import { chromium } from "@playwright/test";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const artifactDir = process.argv[2] ?? path.join(process.env.RUNNER_TEMP ?? "/tmp", "trajectory-desktop-ui");
-const baseUrl = "http://127.0.0.1:1420";
+const args = process.argv.slice(2);
+const usePreview = args.includes("--preview");
+const artifactDir = args.find((arg) => arg !== "--preview") ?? path.join(process.env.RUNNER_TEMP ?? "/tmp", "trajectory-desktop-ui");
+const baseUrl = usePreview ? "http://127.0.0.1:4173" : "http://127.0.0.1:1420";
 
 await mkdir(artifactDir, { recursive: true });
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const server = spawn(npm, ["run", "dev", "--", "--host", "127.0.0.1", "--port", "1420", "--strictPort"], {
+const serverCommand = usePreview ? "preview" : "dev";
+const serverPort = usePreview ? "4173" : "1420";
+const server = spawn(npm, ["run", serverCommand, "--", "--host", "127.0.0.1", "--port", serverPort, "--strictPort"], {
   cwd: path.resolve(import.meta.dirname, ".."),
   detached: process.platform !== "win32",
   stdio: ["ignore", "pipe", "pipe"],
 });
 
 let serverLog = "";
+let serverExit = null;
 server.stdout.on("data", (chunk) => {
   serverLog += chunk.toString();
 });
 server.stderr.on("data", (chunk) => {
   serverLog += chunk.toString();
+});
+server.once("exit", (code, signal) => {
+  serverExit = { code, signal };
+});
+server.once("error", (error) => {
+  serverLog += `\nfailed to start dev server: ${error.message}\n`;
 });
 
 try {
@@ -69,23 +80,16 @@ try {
     throw new Error(`desktop UI console errors:\n${relevantErrors.join("\n")}`);
   }
 } finally {
-  if (server.pid) {
-    if (process.platform === "win32") {
-      server.kill("SIGTERM");
-    } else {
-      try {
-        process.kill(-server.pid, "SIGTERM");
-      } catch {
-        server.kill("SIGTERM");
-      }
-    }
-  }
+  stopServer();
   await writeFile(path.join(artifactDir, "vite.log"), serverLog);
 }
 
 async function waitForHttp(url) {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
+    if (serverExit) {
+      throw new Error(`desktop dev server exited before ${url} was ready: ${JSON.stringify(serverExit)}`);
+    }
     try {
       const response = await fetch(url);
       if (response.ok) return;
@@ -94,6 +98,19 @@ async function waitForHttp(url) {
     }
   }
   throw new Error(`Timed out waiting for ${url}`);
+}
+
+function stopServer() {
+  if (!server.pid) return;
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/pid", String(server.pid), "/T", "/F"], { stdio: "ignore" });
+    return;
+  }
+  try {
+    process.kill(-server.pid, "SIGTERM");
+  } catch {
+    server.kill("SIGTERM");
+  }
 }
 
 async function expectVisibleText(page, text) {

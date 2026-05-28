@@ -8,10 +8,34 @@ package_name="app.trajectory.android"
 mkdir -p "$artifact_dir"
 test -f "$apk"
 
+record_failure_artifacts() {
+  set +e
+  timeout 10s adb logcat -d > "$artifact_dir/logcat.txt" 2>/dev/null
+  timeout 10s adb shell dumpsys window > "$artifact_dir/window.txt" 2>/dev/null
+  timeout 10s adb shell dumpsys activity activities > "$artifact_dir/activities.txt" 2>/dev/null
+  timeout 10s adb shell dumpsys package "$package_name" > "$artifact_dir/package.txt" 2>/dev/null
+  timeout 10s adb exec-out uiautomator dump /dev/tty > "$artifact_dir/failure.raw.xml" 2>/dev/null
+  timeout 10s adb exec-out screencap -p > "$artifact_dir/failure.png" 2>/dev/null
+}
+
+on_exit() {
+  local code=$?
+  if [[ "$code" -ne 0 ]]; then
+    record_failure_artifacts
+  fi
+  exit "$code"
+}
+
+trap on_exit EXIT
+
 adb wait-for-device
 adb uninstall "$package_name" >/dev/null 2>&1 || true
 adb install -r "$apk"
-adb shell pm grant "$package_name" android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+if adb shell pm grant "$package_name" android.permission.POST_NOTIFICATIONS > "$artifact_dir/notification-permission.txt" 2>&1; then
+  echo "POST_NOTIFICATIONS granted by smoke harness" >> "$artifact_dir/notification-permission.txt"
+else
+  echo "POST_NOTIFICATIONS grant failed or is not applicable on this API level" >> "$artifact_dir/notification-permission.txt"
+fi
 
 activity="$(adb shell cmd package resolve-activity --brief "$package_name" | tail -n 1 | tr -d '\r')"
 if [[ -z "$activity" || "$activity" != "$package_name/"* ]]; then
@@ -36,11 +60,29 @@ fi
 swipe_x=$((screen_width / 2))
 swipe_start_y=$((screen_height * 78 / 100))
 swipe_end_y=$((screen_height * 28 / 100))
+platform_dialog_probe_done=0
+
+dump_ui_tree_raw() {
+  local output="$1"
+  local seconds="${2:-10}"
+  for _ in 1 2; do
+    if timeout "${seconds}s" adb exec-out uiautomator dump /dev/tty > "$output"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+capture_screenshot() {
+  local output="$1"
+  timeout 20s adb exec-out screencap -p > "$output"
+}
 
 dump_screen() {
   local name="$1"
   dismiss_platform_dialogs
-  adb exec-out uiautomator dump /dev/tty > "$artifact_dir/$name.raw.xml"
+  dump_ui_tree_raw "$artifact_dir/$name.raw.xml"
   python3 - "$artifact_dir/$name.raw.xml" "$artifact_dir/$name.xml" <<'PY'
 import sys
 from pathlib import Path
@@ -51,17 +93,30 @@ if end < 0:
     raise SystemExit("uiautomator XML did not contain </hierarchy>")
 Path(sys.argv[2]).write_text(raw[: end + len("</hierarchy>")])
 PY
-  adb exec-out screencap -p > "$artifact_dir/$name.png"
+  capture_screenshot "$artifact_dir/$name.png"
 }
 
 dismiss_platform_dialogs() {
-  local probe="$artifact_dir/platform-dialog-probe.raw.xml"
-  adb exec-out uiautomator dump /dev/tty > "$probe" 2>/dev/null || return 0
-  if ! grep -Fq "System UI isn't responding" "$probe"; then
+  if [[ "$platform_dialog_probe_done" -eq 1 ]]; then
     return 0
   fi
+
+  local probe="$artifact_dir/platform-dialog-probe.raw.xml"
   local coords
-  if coords="$(python3 - "$probe" <<'PY'
+  for _ in 1 2 3; do
+    if ! timeout 5s adb exec-out uiautomator dump /dev/tty > "$probe" 2>/dev/null; then
+      platform_dialog_probe_done=1
+      return 0
+    fi
+    if grep -Eq "(Trajectory|${package_name}).*isn't responding" "$probe"; then
+      echo "Trajectory app ANR detected during Android UI smoke test" >&2
+      exit 1
+    fi
+    if ! grep -Fq "isn't responding" "$probe"; then
+      platform_dialog_probe_done=1
+      return 0
+    fi
+    if ! coords="$(python3 - "$probe" <<'PY'
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -80,10 +135,12 @@ for node in root.iter("node"):
             raise SystemExit(0)
 raise SystemExit(1)
 PY
-  )"; then
+    )"; then
+      return 0
+    fi
     adb shell input tap ${coords}
     sleep 2
-  fi
+  done
 }
 
 tap_node() {
@@ -113,6 +170,20 @@ PY
   adb shell input tap ${coords}
 }
 
+wait_for_text() {
+  local text="$1"
+  local screen_name="$2"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    dump_screen "$screen_name"
+    if grep -Fq "$text" "$artifact_dir/$screen_name.xml"; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for Android UI text: $text" >&2
+  return 1
+}
+
 capture_tab() {
   local label="$1"
   local prefix="$2"
@@ -129,7 +200,7 @@ capture_tab() {
 }
 
 xml_files=()
-dump_screen main
+wait_for_text "Start proxy" main
 grep -Fq "Trajectory" "$artifact_dir/main.xml"
 grep -Fq "Status" "$artifact_dir/main.xml"
 grep -Fq "Start proxy" "$artifact_dir/main.xml"

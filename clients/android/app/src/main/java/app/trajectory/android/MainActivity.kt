@@ -1,12 +1,13 @@
 package app.trajectory.android
 
 import android.Manifest
+import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
@@ -95,6 +96,12 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        // The foreground service may run even if notification drawer visibility is denied.
+    }
+
     private val vpnConsentLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
@@ -103,6 +110,7 @@ class MainActivity : ComponentActivity() {
                 RuntimeMode.VPN,
                 "Android accepted the VPN profile; starting Trajectory.",
             )
+            requestNotificationPermissionForServiceStart()
             TrajectoryVpnService.start(this)
         } else {
             RuntimeStatusCenter.markFailed(
@@ -115,10 +123,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (Build.VERSION.SDK_INT >= 33) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 700)
-        }
-
         setContent {
             TrajectoryAndroidApp(
                 initialProfile = ProfileStore.load(this, includeSecret = false),
@@ -142,6 +146,7 @@ class MainActivity : ComponentActivity() {
     private fun startProxy(profile: ClientProfile): List<String> {
         val errors = saveProfile(profile)
         if (errors.isEmpty()) {
+            requestNotificationPermissionForServiceStart()
             RuntimeStatusCenter.starting(
                 RuntimeMode.PROXY,
                 "Launching sidecar, resolver admission, SOCKS, and HTTP listeners.",
@@ -160,6 +165,7 @@ class MainActivity : ComponentActivity() {
             RuntimeStatusCenter.vpnPermissionRequired()
             vpnConsentLauncher.launch(consentIntent)
         } else {
+            requestNotificationPermissionForServiceStart()
             RuntimeStatusCenter.starting(
                 RuntimeMode.VPN,
                 "Launching sidecar before creating the Android VPN interface.",
@@ -173,6 +179,15 @@ class MainActivity : ComponentActivity() {
         TrajectoryVpnService.stop(this)
         TrajectoryProxyService.stop(this)
         RuntimeStatusCenter.markStopping(RuntimeMode.NONE)
+    }
+
+    private fun requestNotificationPermissionForServiceStart() {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
 }

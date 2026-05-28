@@ -85,6 +85,10 @@ jobs:
             --output-dir dist/release \
             --release-tag "$RELEASE_TAG"
 
+      - name: Smoke-test portable bundles
+        shell: bash
+        run: python scripts/ci_smoke_release_bundles.py dist/release
+
       - name: Upload release bundles
         uses: actions/upload-artifact@v7
         with:
@@ -166,21 +170,29 @@ jobs:
         run: npm ci
         working-directory: clients/desktop
 
+      - name: Build desktop web UI
+        run: npm run build
+        working-directory: clients/desktop
+
       - name: Install desktop UI smoke browser
         if: runner.os == 'Linux'
         run: npx playwright install --with-deps chromium
         working-directory: clients/desktop
 
+      - name: Install desktop UI smoke browser
+        if: runner.os != 'Linux'
+        run: npx playwright install chromium
+        working-directory: clients/desktop
+
       - name: Smoke-test desktop UI
-        if: runner.os == 'Linux'
-        run: npm run ui:smoke -- "$RUNNER_TEMP/desktop-ui"
+        run: npm run ui:smoke -- --preview "${{ runner.temp }}/desktop-ui"
         working-directory: clients/desktop
 
       - name: Upload desktop release UI smoke artifacts
-        if: runner.os == 'Linux' && always()
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: desktop-release-ui-smoke
+          name: desktop-release-ui-smoke-${{ matrix.target }}
           path: ${{ runner.temp }}/desktop-ui
           if-no-files-found: error
           retention-days: 14
@@ -346,6 +358,7 @@ jobs:
           retention-days: 14
 
       - name: Upload Android signed release APK
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: android-release-apk
