@@ -336,10 +336,12 @@ async function assertLaunchesMacApp(appBundle, label, extraEnv = {}) {
     throw new Error("macOS packaged app smoke requires open --env so the .app receives smoke markers");
   }
   const { launcher } = await inspectMacApp(appBundle, label);
-  await assertLaunches("open", [appBundle], label, extraEnv, {
+  await assertLaunches("open", [appBundle], `${label} LaunchServices start`, extraEnv, {
     macAppBundle: appBundle,
     macExecutable: path.basename(launcher),
+    readiness: "page",
   });
+  await assertLaunches(launcher, [], `${label} executable readiness`, extraEnv);
 }
 
 async function assertLaunches(command, args, label, extraEnv = {}, options = {}) {
@@ -349,9 +351,12 @@ async function assertLaunches(command, args, label, extraEnv = {}, options = {})
   const stateFile = path.join(artifactDir, `${safeName(label)}-state-ready.txt`);
   const uiFlowFile = path.join(artifactDir, `${safeName(label)}-ui-flow-ready.txt`);
   const errorFile = path.join(artifactDir, `${safeName(label)}-frontend-error.txt`);
-  const liveEnv = await prepareDesktopLiveSmoke(label);
+  const pageOnly = options.readiness === "page";
+  const liveEnv = pageOnly ? {} : await prepareDesktopLiveSmoke(label);
   const liveFile = liveEnv.TRAJECTORY_DESKTOP_SMOKE_LIVE_FILE;
-  const readyFiles = [backendFile, pageFile, frontendFile, stateFile, uiFlowFile];
+  const readyFiles = pageOnly
+    ? [backendFile, pageFile]
+    : [backendFile, pageFile, frontendFile, stateFile, uiFlowFile];
   if (liveFile) readyFiles.push(liveFile);
   const xvfb = await startPackageXvfb(label);
   const smokeEnv = {
@@ -395,7 +400,7 @@ async function assertLaunches(command, args, label, extraEnv = {}, options = {})
       child,
       readyFiles,
       [errorFile],
-      liveFile ? 90_000 : 45_000,
+      pageOnly ? 30_000 : liveFile ? 90_000 : 45_000,
       () => launchError,
     );
     if (!ready.ok) {
@@ -403,10 +408,11 @@ async function assertLaunches(command, args, label, extraEnv = {}, options = {})
         writeFile(path.join(artifactDir, `${safeName(label)}-failure-screen-error.txt`), `${formatError(error)}\n`),
       );
       await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
-      throw new Error(`${label} did not prove packaged app/frontend/backend readiness: ${ready.reason}`);
+      const proof = pageOnly ? "packaged app backend/page startup" : "packaged app/frontend/backend readiness";
+      throw new Error(`${label} did not prove ${proof}: ${ready.reason}`);
     }
-    const screen = await capturePackageScreenshot(label, xvfb.env);
-    if (screen) {
+    const screen = pageOnly ? null : await capturePackageScreenshot(label, xvfb.env);
+    if (!pageOnly && screen) {
       await assertPngVisual(screen, `${label} packaged screen`);
       manifest.push(`${label}=packaged screen pixels ready`);
     }
@@ -419,6 +425,10 @@ async function assertLaunches(command, args, label, extraEnv = {}, options = {})
   stopLaunchedApp(child, options);
   stopPackageXvfb(xvfb);
   await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
+  if (pageOnly) {
+    manifest.push(`${label}=LaunchServices opened .app and loaded Tauri page`);
+    return;
+  }
   manifest.push(`${label}=backend, page, frontend IPC, state, and UI connect/disconnect ready`);
   if (liveFile) {
     manifest.push(`${label}=live HTTP/SOCKS proxy smoke and shutdown ready`);
