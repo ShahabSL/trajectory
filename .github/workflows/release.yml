@@ -403,6 +403,10 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
           script: scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/android-ui"
 
+      - name: Reclaim Android API 35 emulator disk
+        if: always()
+        run: scripts/ci_android_reclaim_emulator_disk.sh 35
+
       - name: Smoke-test signed Android API 33 compact UI
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -416,6 +420,10 @@ jobs:
             adb shell wm size 720x1280
             adb shell settings put system font_scale 1.25
             scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/android-ui-api33"
+
+      - name: Reclaim Android API 33 emulator disk
+        if: always()
+        run: scripts/ci_android_reclaim_emulator_disk.sh 33
 
       - name: Smoke-test signed Android min-SDK-era UI
         uses: reactivecircus/android-emulator-runner@v2
