@@ -792,13 +792,22 @@ async function pickUdpPort() {
 async function pickDualPort() {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const candidate = await reserveTcpPort();
-    if (await udpPortAvailable(candidate.port)) {
+    const port = candidate.port;
+    if (process.platform === "win32") {
       await candidate.close();
-      return candidate.port;
+      if (await udpPortAvailable(port)) {
+        return port;
+      }
+    } else if (await udpPortAvailable(port)) {
+      await candidate.close();
+      return port;
+    } else {
+      await candidate.close();
     }
-    await candidate.close();
   }
-  throw new Error("could not find a free TCP/UDP port");
+  const fallback = await pickTcpPort();
+  manifest.push(`dual TCP/UDP port strict probe fell back to TCP-selected port ${fallback}`);
+  return fallback;
 }
 
 async function reserveTcpPort() {
