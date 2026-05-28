@@ -287,123 +287,6 @@ jobs:
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose clients/android/app/build/outputs/apk/debug/app-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose clients/android/app/build/outputs/apk/release/app-release.apk
 
-      - name: Enable Android emulator KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: Smoke-test Android UI
-        uses: reactivecircus/android-emulator-runner@v2
-        env:
-          TRAJECTORY_ANDROID_SMOKE_DOMAIN: ${{ secrets.TRAJECTORY_E2E_DOMAIN }}
-          TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY: ${{ secrets.TRAJECTORY_E2E_ACCESS_KEY }}
-          TRAJECTORY_ANDROID_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
-          TRAJECTORY_ANDROID_SMOKE_FETCH_URL: ${{ secrets.TRAJECTORY_E2E_FETCH_URL }}
-          TRAJECTORY_ANDROID_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
-          TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER: "1"
-          TRAJECTORY_ANDROID_SMOKE_REQUIRE_LIVE: "1"
-          TRAJECTORY_ANDROID_SMOKE_REQUIRE_VPN: "1"
-        with:
-          api-level: 35
-          target: google_apis
-          arch: x86_64
-          profile: pixel
-          disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
-          script: |
-            scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/android-ui-debug"
-            scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/android-ui-release"
-
-      - name: Reclaim Android API 35 emulator disk
-        if: always()
-        run: scripts/ci_android_reclaim_emulator_disk.sh 35
-
-      - name: Smoke-test Android API 33 notification-era UI
-        uses: reactivecircus/android-emulator-runner@v2
-        env:
-          TRAJECTORY_ANDROID_SMOKE_DOMAIN: ${{ secrets.TRAJECTORY_E2E_DOMAIN }}
-          TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY: ${{ secrets.TRAJECTORY_E2E_ACCESS_KEY }}
-          TRAJECTORY_ANDROID_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
-          TRAJECTORY_ANDROID_SMOKE_FETCH_URL: ${{ secrets.TRAJECTORY_E2E_FETCH_URL }}
-          TRAJECTORY_ANDROID_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
-          TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER: "1"
-          TRAJECTORY_ANDROID_SMOKE_REQUIRE_LIVE: "1"
-          TRAJECTORY_ANDROID_SMOKE_REQUIRE_VPN: "1"
-        with:
-          api-level: 33
-          target: google_apis
-          arch: x86_64
-          profile: pixel
-          disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
-          script: |
-            adb shell wm size 720x1280
-            adb shell settings put system font_scale 1.25
-            scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/android-ui-api33-debug"
-
-      - name: Reclaim Android API 33 emulator disk
-        if: always()
-        run: scripts/ci_android_reclaim_emulator_disk.sh 33
-
-      - name: Smoke-test Android legacy release UI
-        uses: reactivecircus/android-emulator-runner@v2
-        env:
-          TRAJECTORY_ANDROID_SMOKE_DOMAIN: ${{ secrets.TRAJECTORY_E2E_DOMAIN }}
-          TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY: ${{ secrets.TRAJECTORY_E2E_ACCESS_KEY }}
-          TRAJECTORY_ANDROID_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
-          TRAJECTORY_ANDROID_SMOKE_FETCH_URL: ${{ secrets.TRAJECTORY_E2E_FETCH_URL }}
-          TRAJECTORY_ANDROID_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
-          TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER: "1"
-          TRAJECTORY_ANDROID_SMOKE_REQUIRE_LIVE: "1"
-          TRAJECTORY_ANDROID_SMOKE_REQUIRE_VPN: "1"
-        with:
-          api-level: 28
-          target: google_apis
-          arch: x86_64
-          profile: pixel
-          disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
-          script: scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/android-ui-api28-release"
-
-      - name: Reclaim Android API 28 emulator disk
-        if: always()
-        run: scripts/ci_android_reclaim_emulator_disk.sh 28
-
-      - name: Smoke-test Android true min-SDK release UI
-        uses: reactivecircus/android-emulator-runner@v2
-        env:
-          TRAJECTORY_ANDROID_SMOKE_DOMAIN: ${{ secrets.TRAJECTORY_E2E_DOMAIN }}
-          TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY: ${{ secrets.TRAJECTORY_E2E_ACCESS_KEY }}
-          TRAJECTORY_ANDROID_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
-          TRAJECTORY_ANDROID_SMOKE_FETCH_URL: ${{ secrets.TRAJECTORY_E2E_FETCH_URL }}
-          TRAJECTORY_ANDROID_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
-          TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER: "1"
-          TRAJECTORY_ANDROID_SMOKE_REQUIRE_LIVE: "1"
-          TRAJECTORY_ANDROID_SMOKE_REQUIRE_VPN: "1"
-        with:
-          api-level: 26
-          target: google_apis
-          arch: x86_64
-          profile: pixel
-          disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
-          script: scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/android-ui-api26-release"
-
-      - name: Upload Android UI smoke artifacts
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ci-android-ui-smoke
-          path: |
-            ${{ runner.temp }}/android-ui-debug
-            ${{ runner.temp }}/android-ui-release
-            ${{ runner.temp }}/android-ui-api33-debug
-            ${{ runner.temp }}/android-ui-api28-release
-            ${{ runner.temp }}/android-ui-api26-release
-          if-no-files-found: error
-          retention-days: 7
-
       - name: Upload Android debug APK
         uses: actions/upload-artifact@v7
         with:
@@ -425,6 +308,113 @@ jobs:
         with:
           name: ci-android-smokeprobe-apk
           path: clients/android/smokeprobe/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  android-x86-runtime:
+    needs: android-client
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: api35-debug
+            api_level: 35
+            apk_artifact: ci-android-debug-apk
+            apk_dir: android-debug-apk
+            smoke_dir: android-ui-api35-debug
+            compact: "false"
+          - name: api35-release
+            api_level: 35
+            apk_artifact: ci-android-signed-release-apk
+            apk_dir: android-release-apk
+            smoke_dir: android-ui-api35-release
+            compact: "false"
+          - name: api33-debug-compact
+            api_level: 33
+            apk_artifact: ci-android-debug-apk
+            apk_dir: android-debug-apk
+            smoke_dir: android-ui-api33-debug
+            compact: "true"
+          - name: api28-release
+            api_level: 28
+            apk_artifact: ci-android-signed-release-apk
+            apk_dir: android-release-apk
+            smoke_dir: android-ui-api28-release
+            compact: "false"
+          - name: api26-release
+            api_level: 26
+            apk_artifact: ci-android-signed-release-apk
+            apk_dir: android-release-apk
+            smoke_dir: android-ui-api26-release
+            compact: "false"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Download Android APK
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ matrix.apk_artifact }}
+          path: ${{ runner.temp }}/${{ matrix.apk_dir }}
+
+      - name: Download Android smoke probe APK
+        uses: actions/download-artifact@v5
+        with:
+          name: ci-android-smokeprobe-apk
+          path: ${{ runner.temp }}/android-smokeprobe-apk
+
+      - name: Enable Android emulator KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Smoke-test Android x86 ${{ matrix.name }} UI
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          TRAJECTORY_ANDROID_SMOKE_DOMAIN: ${{ secrets.TRAJECTORY_E2E_DOMAIN }}
+          TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY: ${{ secrets.TRAJECTORY_E2E_ACCESS_KEY }}
+          TRAJECTORY_ANDROID_SMOKE_RESOLVERS: ${{ secrets.TRAJECTORY_E2E_RESOLVERS }}
+          TRAJECTORY_ANDROID_SMOKE_FETCH_URL: ${{ secrets.TRAJECTORY_E2E_FETCH_URL }}
+          TRAJECTORY_ANDROID_SMOKE_HTTP_PORT: ${{ secrets.TRAJECTORY_E2E_HTTP_LISTEN_PORT }}
+          TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER: "1"
+          TRAJECTORY_ANDROID_SMOKE_REQUIRE_LIVE: "1"
+          TRAJECTORY_ANDROID_SMOKE_REQUIRE_VPN: "1"
+        with:
+          api-level: ${{ matrix.api_level }}
+          target: google_apis
+          arch: x86_64
+          profile: pixel
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
+          script: |
+            apk="$(find "$RUNNER_TEMP/${{ matrix.apk_dir }}" -name '*.apk' -print -quit)"
+            probe="$(find "$RUNNER_TEMP/android-smokeprobe-apk" -name '*.apk' -print -quit)"
+            test -n "$apk"
+            test -n "$probe"
+            if [[ "${{ matrix.compact }}" == "true" ]]; then
+              adb shell wm size 720x1280
+              adb shell settings put system font_scale 1.25
+            fi
+            TRAJECTORY_ANDROID_SMOKE_PROBE_APK="$probe" \
+              scripts/ci_android_ui_smoke.sh "$apk" "$RUNNER_TEMP/${{ matrix.smoke_dir }}"
+
+      - name: Upload Android x86 UI smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-android-x86-ui-smoke-${{ matrix.name }}
+          path: ${{ runner.temp }}/${{ matrix.smoke_dir }}
           if-no-files-found: error
           retention-days: 7
 
@@ -509,7 +499,7 @@ jobs:
         run: cargo build --release --workspace
 
   live-e2e:
-    needs: [unit, local-e2e, clippy, package-cli, desktop-client, android-client, android-arm64-runtime, cross-platform-build]
+    needs: [unit, local-e2e, clippy, package-cli, desktop-client, android-client, android-x86-runtime, android-arm64-runtime, cross-platform-build]
     if: ${{ (github.event_name == 'workflow_dispatch' && inputs.live_e2e && github.ref == 'refs/heads/main') || (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.TRAJECTORY_E2E_ENABLED == 'true') }}
     runs-on: ubuntu-22.04
     environment: trajectory-live-e2e

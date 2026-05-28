@@ -49,6 +49,17 @@ adb_wait_ready() {
   return 1
 }
 
+clear_logcat_best_effort() {
+  local output="$1"
+  if timeout 10s adb shell logcat -c > "$output" 2>&1; then
+    return 0
+  fi
+  {
+    echo
+    echo "Android logcat clear failed; continuing because API 26 emulator images can deny or transiently fail log buffer clearing."
+  } >> "$output"
+}
+
 install_apk() {
   local attempt
   for attempt in 1 2 3; do
@@ -167,10 +178,20 @@ adb uninstall "$package_name" >/dev/null 2>&1 || true
 adb uninstall "$smoke_probe_package" >/dev/null 2>&1 || true
 install_apk
 run_android_sidecar_help
-if adb shell pm grant "$package_name" android.permission.POST_NOTIFICATIONS > "$artifact_dir/notification-permission.txt" 2>&1; then
-  echo "POST_NOTIFICATIONS granted by smoke harness" >> "$artifact_dir/notification-permission.txt"
+android_sdk="$(
+  adb shell getprop ro.build.version.sdk 2>/dev/null |
+    tr -d '\r' |
+    awk 'NF { print; exit }'
+)"
+if [[ "$android_sdk" =~ ^[0-9]+$ && "$android_sdk" -ge 33 ]]; then
+  if adb shell pm grant "$package_name" android.permission.POST_NOTIFICATIONS > "$artifact_dir/notification-permission.txt" 2>&1; then
+    echo "POST_NOTIFICATIONS granted by smoke harness" >> "$artifact_dir/notification-permission.txt"
+  else
+    echo "POST_NOTIFICATIONS grant failed on API ${android_sdk}" >> "$artifact_dir/notification-permission.txt"
+  fi
 else
-  echo "POST_NOTIFICATIONS grant failed or is not applicable on this API level" >> "$artifact_dir/notification-permission.txt"
+  echo "POST_NOTIFICATIONS skipped on API ${android_sdk:-unknown}; runtime notification permission starts at API 33" \
+    > "$artifact_dir/notification-permission.txt"
 fi
 
 activity="$(adb shell cmd package resolve-activity --brief "$package_name" | tail -n 1 | tr -d '\r')"
@@ -180,7 +201,7 @@ if [[ -z "$activity" || "$activity" != "$package_name/"* ]]; then
 fi
 
 adb shell am force-stop "$package_name"
-adb shell logcat -c
+clear_logcat_best_effort "$artifact_dir/logcat-clear.txt"
 adb shell am start -W -n "$activity" > "$artifact_dir/start.txt"
 sleep 2
 
@@ -1062,22 +1083,47 @@ PY
 
 assert_proxy_status_connected() {
   local source_xml="$1"
-  if grep -Fq "Proxy connected" "$source_xml" ||
-    grep -Fq "status.phase.proxy_connected" "$source_xml"; then
-    return 0
-  fi
-  echo "Android live proxy data path worked, but UI did not show Proxy connected" >&2
-  return 1
+  assert_connected_status_ui "$source_xml" "Proxy connected" "status.phase.proxy_connected" "proxy_status"
 }
 
 assert_vpn_status_connected() {
   local source_xml="$1"
-  if grep -Fq "VPN connected" "$source_xml" ||
-    grep -Fq "status.phase.vpn_connected" "$source_xml"; then
-    return 0
+  assert_connected_status_ui "$source_xml" "VPN connected" "status.phase.vpn_connected" "vpn_status"
+}
+
+assert_connected_status_ui() {
+  local source_xml="$1"
+  local visible_title="$2"
+  local semantic_phase="$3"
+  local prefix="$4"
+  local restored_xml="$artifact_dir/${prefix}_restored.xml"
+  local combined_xml="$artifact_dir/${prefix}_connected_assertion.xml"
+
+  if ! grep -Fq "$semantic_phase" "$source_xml"; then
+    echo "Android data path worked, but UI semantics did not expose ${semantic_phase}" >&2
+    return 1
   fi
-  echo "Android VPN data path worked, but UI did not show VPN connected" >&2
-  return 1
+
+  if ! grep -Fq "$visible_title" "$source_xml"; then
+    adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 500 >/dev/null 2>&1 || true
+    adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 500 >/dev/null 2>&1 || true
+    sleep 1
+    dump_screen "${prefix}_restored"
+  fi
+
+  cat "$source_xml" "$restored_xml" > "$combined_xml" 2>/dev/null || cp "$source_xml" "$combined_xml"
+  if ! grep -Fq "$visible_title" "$combined_xml"; then
+    echo "Android data path worked, but UI did not visibly show ${visible_title}" >&2
+    return 1
+  fi
+  if ! grep -Fq "SOCKS" "$combined_xml" || ! grep -Fq "ready" "$combined_xml" || ! grep -Fq "DNS" "$combined_xml"; then
+    echo "Android connected UI did not expose runtime readiness chips" >&2
+    return 1
+  fi
+  if [[ "$visible_title" == "Proxy connected" ]] && ! grep -Fq "HTTP" "$combined_xml"; then
+    echo "Android connected proxy UI did not expose HTTP readiness" >&2
+    return 1
+  fi
 }
 
 assert_socks_handshake() {
@@ -1785,16 +1831,7 @@ assert_texts "$artifact_dir/all.xml" \
 run_live_proxy_smoke
 run_vpn_smoke
 
-if timeout 15s adb logcat -d > "$artifact_dir/logcat.txt" 2> "$artifact_dir/logcat.stderr"; then
-  final_logcat_available=1
-else
-  final_logcat_available=0
-  echo "Android final logcat capture timed out or failed; UI/data-path smoke completed" > "$artifact_dir/logcat.warning"
-fi
-if [[ "$final_logcat_available" == "1" ]] && grep -E "FATAL EXCEPTION|E AndroidRuntime" "$artifact_dir/logcat.txt"; then
-  echo "Android crash detected during UI smoke test" >&2
-  exit 1
-fi
+assert_no_android_crash "$artifact_dir/logcat.txt"
 
 find "$artifact_dir" -maxdepth 1 -type f \( -name '*.png' -o -name '*.xml' -o -name '*.txt' \) \
   -printf '%f\n' | sort > "$artifact_dir/manifest.txt"
