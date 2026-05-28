@@ -372,6 +372,20 @@ fn disable_system_proxy(state: State<'_, AppState>) -> Result<RuntimeSnapshot, S
     refresh_snapshot(&state)
 }
 
+#[tauri::command]
+fn mark_frontend_ready() -> Result<(), String> {
+    let Ok(path) = std::env::var("TRAJECTORY_DESKTOP_SMOKE_READY_FILE") else {
+        return Ok(());
+    };
+    let path = PathBuf::from(path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create smoke marker directory: {error}"))?;
+    }
+    fs::write(path, format!("frontend ready at {}\n", now_string()))
+        .map_err(|error| format!("failed to write smoke marker: {error}"))
+}
+
 pub fn run() {
     let data_dir = app_config_dir();
     tauri::Builder::default()
@@ -392,7 +406,8 @@ pub fn run() {
             connect_profile,
             disconnect_profile,
             enable_system_proxy,
-            disable_system_proxy
+            disable_system_proxy,
+            mark_frontend_ready
         ])
         .run(tauri::generate_context!())
         .expect("error while running trajectory desktop");

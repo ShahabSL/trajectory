@@ -73,6 +73,26 @@ GitHub release builds require the matching protected secrets and verify the
 final APK with `apksigner` before uploading it. An unsigned release APK is not a
 valid release artifact.
 
+## Validation
+
+```sh
+ANDROID_HOME="$PWD/.tooling/android-sdk" \
+ANDROID_SDK_ROOT="$PWD/.tooling/android-sdk" \
+  ./clients/android/gradlew -p clients/android :app:testDebugUnitTest --no-daemon
+
+scripts/ci_android_vpn_static_checks.sh clients/android/app/build/outputs/apk/debug/app-debug.apk
+
+PATH="$PWD/.tooling/android-sdk/platform-tools:$PATH" \
+  scripts/ci_android_ui_smoke.sh \
+    clients/android/app/build/outputs/apk/debug/app-debug.apk \
+    /tmp/trajectory-android-ui-smoke
+```
+
+The CI smoke installs the APK, resolves and launches the activity, captures UI
+trees and screenshots for every tab, scrolls until lower controls such as
+`Check DNS list` are visible, selects `Frontier`, and fails on Android
+crash/ANR dialogs or `AndroidRuntime` crashes.
+
 ## Product Boundary
 
 Proxy mode is stream-level and opt-in per app. VPN mode is packet-level and must

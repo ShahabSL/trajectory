@@ -206,6 +206,36 @@ PY
   adb shell input tap ${coords}
 }
 
+xml_has_text() {
+  local text="$1"
+  shift
+  local xml
+  for xml in "$@"; do
+    if [[ -f "$xml" ]] && grep -Fq "$text" "$xml"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+scroll_until_text() {
+  local text="$1"
+  local prefix="$2"
+  local max_swipes="${3:-6}"
+  local pass
+
+  for pass in $(seq 1 "$max_swipes"); do
+    if xml_has_text "$text" "$artifact_dir/${prefix}_top.xml" "$artifact_dir/${prefix}_bottom.xml" "$artifact_dir/${prefix}_lower.xml" "$artifact_dir/${prefix}_scroll_"*.xml; then
+      return 0
+    fi
+    adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
+    sleep 1
+    dump_screen "${prefix}_scroll_${pass}"
+  done
+
+  xml_has_text "$text" "$artifact_dir/${prefix}_top.xml" "$artifact_dir/${prefix}_bottom.xml" "$artifact_dir/${prefix}_lower.xml" "$artifact_dir/${prefix}_scroll_"*.xml
+}
+
 wait_for_text() {
   local text="$1"
   local screen_name="$2"
@@ -218,6 +248,22 @@ wait_for_text() {
   done
   echo "Timed out waiting for Android UI text: $text" >&2
   return 1
+}
+
+assert_texts() {
+  local xml="$1"
+  shift
+  local missing=0
+  local text
+
+  for text in "$@"; do
+    if ! grep -Fq "$text" "$xml"; then
+      echo "Android UI smoke missing text in $(basename "$xml"): $text" >&2
+      missing=1
+    fi
+  done
+
+  return "$missing"
 }
 
 capture_tab() {
@@ -237,9 +283,7 @@ capture_tab() {
 
 xml_files=()
 wait_for_text "Start proxy" main
-grep -Fq "Trajectory" "$artifact_dir/main.xml"
-grep -Fq "Status" "$artifact_dir/main.xml"
-grep -Fq "Start proxy" "$artifact_dir/main.xml"
+assert_texts "$artifact_dir/main.xml" "Trajectory" "Status" "Start proxy"
 xml_files+=("$artifact_dir/main.xml")
 
 nav_source="$artifact_dir/main.xml"
@@ -262,7 +306,14 @@ for tab in Profile Resolvers VPN Diagnostics; do
   adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
   sleep 1
   dump_screen "${tab,,}_lower"
-  cat "$artifact_dir/${tab,,}_top.xml" "$artifact_dir/${tab,,}_bottom.xml" "$artifact_dir/${tab,,}_lower.xml" > "$artifact_dir/${tab,,}.xml"
+  if [[ "$tab" == "Resolvers" ]]; then
+    if ! scroll_until_text "Check DNS list" "${tab,,}" 6; then
+      echo "Resolvers screen did not expose Check DNS list after scroll search" >&2
+      exit 1
+    fi
+  fi
+  cat "$artifact_dir/${tab,,}_top.xml" "$artifact_dir/${tab,,}_bottom.xml" "$artifact_dir/${tab,,}_lower.xml" "$artifact_dir/${tab,,}_scroll_"*.xml > "$artifact_dir/${tab,,}.xml" 2>/dev/null || \
+    cat "$artifact_dir/${tab,,}_top.xml" "$artifact_dir/${tab,,}_bottom.xml" "$artifact_dir/${tab,,}_lower.xml" > "$artifact_dir/${tab,,}.xml"
   xml_files+=("$artifact_dir/${tab,,}.xml")
   if [[ "$tab" == "Resolvers" ]]; then
     xml_files+=("$artifact_dir/frontier_selected.xml")
@@ -275,18 +326,19 @@ for tab in Profile Resolvers VPN Diagnostics; do
 done
 
 cat "${xml_files[@]}" > "$artifact_dir/all.xml"
-grep -Fq "Profile" "$artifact_dir/all.xml"
-grep -Fq "Tunnel domain" "$artifact_dir/all.xml"
-grep -Fq "Resolvers" "$artifact_dir/all.xml"
-grep -Fq "Check DNS list" "$artifact_dir/all.xml"
-grep -Fq "Frontier" "$artifact_dir/all.xml"
-grep -Fq "Experimental" "$artifact_dir/all.xml"
-grep -Fq "VPN" "$artifact_dir/all.xml"
-grep -Fq "MTU" "$artifact_dir/all.xml"
-grep -Fq "Diagnostics" "$artifact_dir/all.xml"
-grep -Fq "Runtime log" "$artifact_dir/all.xml"
-grep -Fq "Start VPN" "$artifact_dir/all.xml"
-grep -Fq "Stop Trajectory" "$artifact_dir/all.xml"
+assert_texts "$artifact_dir/all.xml" \
+  "Profile" \
+  "Tunnel domain" \
+  "Resolvers" \
+  "Check DNS list" \
+  "Frontier" \
+  "Experimental" \
+  "VPN" \
+  "MTU" \
+  "Diagnostics" \
+  "Runtime log" \
+  "Start VPN" \
+  "Stop Trajectory"
 
 adb logcat -d > "$artifact_dir/logcat.txt"
 if grep -E "FATAL EXCEPTION|E AndroidRuntime" "$artifact_dir/logcat.txt"; then

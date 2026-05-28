@@ -109,6 +109,7 @@ const mockApi: DesktopApi = {
       logLines: [...mockSnapshot.logLines, "browser preview mode: system proxy not changed"],
     };
   },
+  async markFrontendReady() {},
 };
 
 export const desktopApi: DesktopApi = hasTauriRuntime()
@@ -127,5 +128,6 @@ export const desktopApi: DesktopApi = hasTauriRuntime()
       enableSystemProxy: (profileId) =>
         invokeCommand<RuntimeSnapshot>("enable_system_proxy", { profileId }),
       disableSystemProxy: () => invokeCommand<RuntimeSnapshot>("disable_system_proxy"),
+      markFrontendReady: () => invokeCommand<void>("mark_frontend_ready"),
     }
   : mockApi;

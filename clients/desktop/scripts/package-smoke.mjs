@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { constants, writeFileSync } from "node:fs";
+import { constants, existsSync, writeFileSync } from "node:fs";
 import { accessSync, chmodSync } from "node:fs";
 import path from "node:path";
 
@@ -167,11 +167,13 @@ function runChecked(command, args, label) {
 }
 
 async function assertLaunches(command, args, label) {
+  const readyFile = path.join(artifactDir, `${safeName(label)}-frontend-ready.txt`);
   const child = spawn(command, args, {
     cwd: repoRoot,
     env: {
       ...process.env,
       TRAJECTORY_DESKTOP_SMOKE: "1",
+      TRAJECTORY_DESKTOP_SMOKE_READY_FILE: readyFile,
       NO_AT_BRIDGE: "1",
       WEBKIT_DISABLE_COMPOSITING_MODE: "1",
     },
@@ -181,35 +183,46 @@ async function assertLaunches(command, args, label) {
   });
   let stdout = "";
   let stderr = "";
+  let launchError = null;
   child.stdout.on("data", (chunk) => {
     stdout += chunk.toString();
   });
   child.stderr.on("data", (chunk) => {
     stderr += chunk.toString();
   });
+  child.once("error", (error) => {
+    launchError = error.message;
+  });
 
-  const earlyExit = await waitForExit(child, 4_000);
-  if (earlyExit) {
+  const ready = await waitForFrontendReady(child, readyFile, 30_000, () => launchError);
+  if (!ready.ok) {
     await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
-    throw new Error(`${label} exited too early: ${JSON.stringify(earlyExit)}`);
+    throw new Error(`${label} did not prove packaged frontend readiness: ${ready.reason}`);
   }
   stopProcess(child);
   await writeFile(path.join(artifactDir, `${safeName(label)}.log`), stdout + stderr);
-  manifest.push(`${label}=launched`);
+  manifest.push(`${label}=frontend ready`);
 }
 
-function waitForExit(child, ms) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(null), ms);
-    child.once("exit", (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal });
-    });
-    child.once("error", (error) => {
-      clearTimeout(timer);
-      resolve({ error: error.message });
-    });
-  });
+async function waitForFrontendReady(child, readyFile, ms, launchError) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (existsSync(readyFile)) {
+      return { ok: true };
+    }
+    const error = launchError();
+    if (error) {
+      return { ok: false, reason: `launch error: ${error}` };
+    }
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return {
+        ok: false,
+        reason: `exited early with code=${child.exitCode ?? ""} signal=${child.signalCode ?? ""}`,
+      };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return { ok: false, reason: `timed out waiting for ${readyFile}` };
 }
 
 function stopProcess(child) {

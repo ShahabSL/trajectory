@@ -153,6 +153,7 @@ export default function App() {
         if (alive) {
           applyProfileState(profileState);
           setSnapshot(runtimeState);
+          await desktopApi.markFrontendReady();
         }
       } catch (error) {
         if (alive) {
