@@ -398,16 +398,11 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
           script: |
-            apk="$(find "$RUNNER_TEMP/${{ matrix.apk_dir }}" -name '*.apk' -print -quit)"
-            probe="$(find "$RUNNER_TEMP/android-smokeprobe-apk" -name '*.apk' -print -quit)"
-            test -n "$apk"
-            test -n "$probe"
-            if [[ "${{ matrix.compact }}" == "true" ]]; then
-              adb shell wm size 720x1280
-              adb shell settings put system font_scale 1.25
-            fi
-            TRAJECTORY_ANDROID_SMOKE_PROBE_APK="$probe" \
-              scripts/ci_android_ui_smoke.sh "$apk" "$RUNNER_TEMP/${{ matrix.smoke_dir }}"
+            test -n "$(find "$RUNNER_TEMP/${{ matrix.apk_dir }}" -name '*.apk' -print -quit)"
+            test -n "$(find "$RUNNER_TEMP/android-smokeprobe-apk" -name '*.apk' -print -quit)"
+            [ "${{ matrix.compact }}" != "true" ] || adb shell wm size 720x1280
+            [ "${{ matrix.compact }}" != "true" ] || adb shell settings put system font_scale 1.25
+            TRAJECTORY_ANDROID_SMOKE_PROBE_APK="$(find "$RUNNER_TEMP/android-smokeprobe-apk" -name '*.apk' -print -quit)" scripts/ci_android_ui_smoke.sh "$(find "$RUNNER_TEMP/${{ matrix.apk_dir }}" -name '*.apk' -print -quit)" "$RUNNER_TEMP/${{ matrix.smoke_dir }}"
 
       - name: Upload Android x86 UI smoke artifacts
         if: always()
@@ -465,12 +460,9 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
           script: |
-            apk="$(find "$RUNNER_TEMP/android-release-apk" -name '*.apk' -print -quit)"
-            probe="$(find "$RUNNER_TEMP/android-smokeprobe-apk" -name '*.apk' -print -quit)"
-            test -n "$apk"
-            test -n "$probe"
-            TRAJECTORY_ANDROID_SMOKE_PROBE_APK="$probe" \
-              scripts/ci_android_ui_smoke.sh "$apk" "$RUNNER_TEMP/android-ui-arm64-release"
+            test -n "$(find "$RUNNER_TEMP/android-release-apk" -name '*.apk' -print -quit)"
+            test -n "$(find "$RUNNER_TEMP/android-smokeprobe-apk" -name '*.apk' -print -quit)"
+            TRAJECTORY_ANDROID_SMOKE_PROBE_APK="$(find "$RUNNER_TEMP/android-smokeprobe-apk" -name '*.apk' -print -quit)" scripts/ci_android_ui_smoke.sh "$(find "$RUNNER_TEMP/android-release-apk" -name '*.apk' -print -quit)" "$RUNNER_TEMP/android-ui-arm64-release"
 
       - name: Upload Android ARM64 UI smoke artifacts
         if: always()
