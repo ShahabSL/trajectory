@@ -465,6 +465,14 @@ fn mark_smoke_ui_flow_ready(
     )
 }
 
+#[tauri::command]
+fn mark_smoke_frontend_error(message: String) -> Result<(), String> {
+    write_smoke_marker_env(
+        "TRAJECTORY_DESKTOP_SMOKE_ERROR_FILE",
+        format!("frontend smoke error at {}\n{}\n", now_string(), message),
+    )
+}
+
 fn assert_frontend_visual_report(report: &str) -> Result<(), String> {
     let metric = |name: &str| -> Result<u64, String> {
         report
@@ -602,7 +610,8 @@ pub fn run() {
             mark_frontend_ready,
             mark_smoke_state_ready,
             smoke_ui_flow_enabled,
-            mark_smoke_ui_flow_ready
+            mark_smoke_ui_flow_ready,
+            mark_smoke_frontend_error
         ])
         .run(tauri::generate_context!())
         .expect("error while running trajectory desktop");

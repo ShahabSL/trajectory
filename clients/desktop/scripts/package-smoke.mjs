@@ -323,6 +323,7 @@ async function assertLaunches(command, args, label, extraEnv = {}) {
   const frontendFile = path.join(artifactDir, `${safeName(label)}-frontend-ready.txt`);
   const stateFile = path.join(artifactDir, `${safeName(label)}-state-ready.txt`);
   const uiFlowFile = path.join(artifactDir, `${safeName(label)}-ui-flow-ready.txt`);
+  const errorFile = path.join(artifactDir, `${safeName(label)}-frontend-error.txt`);
   const liveEnv = await prepareDesktopLiveSmoke(label);
   const liveFile = liveEnv.TRAJECTORY_DESKTOP_SMOKE_LIVE_FILE;
   const readyFiles = [backendFile, pageFile, frontendFile, stateFile, uiFlowFile];
@@ -339,6 +340,7 @@ async function assertLaunches(command, args, label, extraEnv = {}) {
       TRAJECTORY_DESKTOP_SMOKE_READY_FILE: frontendFile,
       TRAJECTORY_DESKTOP_SMOKE_STATE_FILE: stateFile,
       TRAJECTORY_DESKTOP_SMOKE_UI_FLOW_FILE: uiFlowFile,
+      TRAJECTORY_DESKTOP_SMOKE_ERROR_FILE: errorFile,
       NO_AT_BRIDGE: "1",
       WEBKIT_DISABLE_COMPOSITING_MODE: "1",
       ...liveEnv,
@@ -365,6 +367,7 @@ async function assertLaunches(command, args, label, extraEnv = {}) {
     const ready = await waitForReadyFiles(
       child,
       readyFiles,
+      [errorFile],
       liveFile ? 90_000 : 45_000,
       () => launchError,
     );
@@ -913,9 +916,15 @@ async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForReadyFiles(child, readyFiles, ms, launchError) {
+async function waitForReadyFiles(child, readyFiles, errorFiles, ms, launchError) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
+    for (const file of errorFiles) {
+      if (existsSync(file)) {
+        const contents = await readFile(file, "utf8").catch(() => "");
+        return { ok: false, reason: contents.trim() || `frontend smoke error marker ${file}` };
+      }
+    }
     const missing = readyFiles.filter((file) => !existsSync(file));
     if (missing.length === 0) {
       return { ok: true };

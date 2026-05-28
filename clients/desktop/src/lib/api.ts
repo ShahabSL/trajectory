@@ -4,6 +4,7 @@ import {
   saveProfiles,
   saveSelectedProfileId,
 } from "./profile-store";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import type {
   DesktopApi,
   ProfileStoreSnapshot,
@@ -11,11 +12,9 @@ import type {
   TrajectoryProfile,
 } from "./types";
 
-const hasTauriRuntime = () =>
-  typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
+const hasTauriRuntime = () => typeof window !== "undefined" && isTauri();
 
 async function invokeCommand<T>(command: string, args?: Record<string, unknown>) {
-  const { invoke } = await import("@tauri-apps/api/core");
   return invoke<T>(command, args);
 }
 
@@ -119,6 +118,7 @@ const mockApi: DesktopApi = {
     return false;
   },
   async markSmokeUiFlowReady() {},
+  async markSmokeFrontendError() {},
 };
 
 export const desktopApi: DesktopApi = hasTauriRuntime()
@@ -153,5 +153,7 @@ export const desktopApi: DesktopApi = hasTauriRuntime()
           disconnectedText,
           disconnectedVisualReport,
         }),
+      markSmokeFrontendError: (message) =>
+        invokeCommand<void>("mark_smoke_frontend_error", { message }),
     }
   : mockApi;

@@ -84,4 +84,5 @@ export interface DesktopApi {
     disconnectedText?: string,
     disconnectedVisualReport?: string,
   ): Promise<void>;
+  markSmokeFrontendError(message: string): Promise<void>;
 }

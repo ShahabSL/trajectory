@@ -1237,72 +1237,193 @@ resolve_smoke_probe_uid() {
   printf '%s\n' "$probe_uid"
 }
 
+resolve_trajectory_app_uid() {
+  local output_prefix="$1"
+  local uid_output="${output_prefix}-trajectory-uid.txt"
+  local package_output="${output_prefix}-trajectory-package.txt"
+  local app_uid
+  adb shell dumpsys package "$package_name" > "$package_output" 2>&1 || true
+  app_uid="$(
+    tr -d '\r' < "$package_output" |
+      awk -F= '/userId=/ { print $2; exit }'
+  )"
+  if [[ -z "$app_uid" ]]; then
+    app_uid="$(
+      tr -d '\r' < "$package_output" |
+        awk -F= '/appId=/ { print $2; exit }'
+    )"
+  fi
+  if [[ -z "$app_uid" || ! "$app_uid" =~ ^[0-9]+$ ]]; then
+    echo "Android VPN smoke could not resolve Trajectory app UID" >&2
+    return 1
+  fi
+  printf '%s\n' "$app_uid" > "$uid_output"
+  printf '%s\n' "$app_uid"
+}
+
 assert_vpn_network_active() {
   local output="$1"
   local probe_uid
+  local app_uid
+  local summary_output="${output%.txt}-summary.txt"
   probe_uid="$(resolve_smoke_probe_uid "${output%.txt}")"
+  app_uid="$(resolve_trajectory_app_uid "${output%.txt}")"
   timeout 10s adb shell dumpsys connectivity > "$output" 2>&1
-  python3 - "$output" "$probe_uid" "$package_name" <<'PY'
+  python3 - "$output" "$summary_output" "$probe_uid" "$app_uid" <<'PY'
 import re
 import sys
 from pathlib import Path
 
 text = Path(sys.argv[1]).read_text(errors="replace")
-probe_uid = int(sys.argv[2])
-package_name = sys.argv[3]
-start = text.find(f"VPN CONNECTED extra: VPN:{package_name}")
-if start < 0:
+summary_path = Path(sys.argv[2])
+probe_uid = int(sys.argv[3])
+app_uid = int(sys.argv[4])
+
+
+def network_blocks(source: str) -> list[str]:
+    matches = list(re.finditer(r"(?:^|\n)\s*NetworkAgentInfo\{", source))
+    blocks = []
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+        blocks.append(source[start:end])
+    return blocks
+
+
+def uid_in_ranges(block: str, uid: int) -> bool:
+    match = re.search(r"Uids:\s*<\{([^}]*)\}>", block, re.S)
+    if not match:
+        return False
+    for entry in match.group(1).split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "-" in entry:
+            start, end = [int(part) for part in entry.split("-", 1)]
+        else:
+            start = end = int(entry)
+        if start <= uid <= end:
+            return True
+    return False
+
+
+def owned_by_trajectory(block: str) -> bool:
+    owner_matches = re.search(rf"\bOwnerUid:\s*{app_uid}\b", block) is not None
+    admin_matches = re.search(rf"\bAdminUids:\s*\[[^\]]*\b{app_uid}\b", block) is not None
+    session_matches = "sessionId=Trajectory" in block
+    return owner_matches or admin_matches or session_matches
+
+
+vpn_blocks = [
+    block
+    for block in network_blocks(text)
+    if "VPN" in block and ("ni{VPN CONNECTED" in block or "Transports:" in block)
+]
+trajectory_blocks = [block for block in vpn_blocks if owned_by_trajectory(block)]
+if not trajectory_blocks:
+    summary_path.write_text(
+        f"no Trajectory-owned VPN block found for app_uid={app_uid}; vpn_blocks={len(vpn_blocks)}\n",
+        encoding="utf-8",
+    )
     raise SystemExit("Android VPN network was not visible in dumpsys connectivity")
-block = text[start:start + 5000]
-if not re.search(r"InterfaceName:\s*tun\d+", block):
-    raise SystemExit("Android VPN network did not expose a tun interface")
-match = re.search(r"Uids:\s*<\{([^}]*)\}>", block, re.S)
-if not match:
-    raise SystemExit("could not find VPN UID ranges")
-for entry in match.group(1).split(","):
-    entry = entry.strip()
-    if "-" in entry:
-        start, end = [int(part) for part in entry.split("-", 1)]
-    elif entry:
-        start = end = int(entry)
-    else:
+
+for block in trajectory_blocks:
+    has_tun = re.search(r"InterfaceName:\s*tun\d+", block) is not None
+    routes_probe = uid_in_ranges(block, probe_uid)
+    validated = "VALIDATED" in block
+    owner = re.search(r"\bOwnerUid:\s*([0-9]+)", block)
+    network = re.search(r"network\{([^}]+)\}", block)
+    summary_path.write_text(
+        "trajectory vpn candidate\n"
+        f"network={network.group(1) if network else 'unknown'}\n"
+        f"app_uid={app_uid}\n"
+        f"owner_uid={owner.group(1) if owner else 'unknown'}\n"
+        f"probe_uid={probe_uid}\n"
+        f"has_tun={has_tun}\n"
+        f"routes_probe_uid={routes_probe}\n"
+        f"validated={validated}\n",
+        encoding="utf-8",
+    )
+    if not has_tun:
         continue
-    if start <= probe_uid <= end:
-        raise SystemExit(0)
-raise SystemExit(f"smoke probe UID {probe_uid} is not routed through the VPN")
+    if not routes_probe:
+        continue
+    raise SystemExit(0)
+
+raise SystemExit(f"smoke probe UID {probe_uid} is not routed through the Trajectory VPN")
 PY
 }
 
 assert_vpn_network_stopped() {
   local output="$1"
   local probe_uid
+  local app_uid
+  local summary_output="${output%.txt}-summary.txt"
   probe_uid="$(resolve_smoke_probe_uid "${output%.txt}")"
+  app_uid="$(resolve_trajectory_app_uid "${output%.txt}")"
   timeout 10s adb shell dumpsys connectivity > "$output" 2>&1
-  python3 - "$output" "$probe_uid" "$package_name" <<'PY'
+  python3 - "$output" "$summary_output" "$probe_uid" "$app_uid" <<'PY'
 import re
 import sys
 from pathlib import Path
 
 text = Path(sys.argv[1]).read_text(errors="replace")
-probe_uid = int(sys.argv[2])
-package_name = sys.argv[3]
-if f"VPN:{package_name}" in text:
-    raise SystemExit("Trajectory VPN network still present after shutdown")
-for block in text.split("VPN CONNECTED extra: VPN:")[1:]:
-    block = block[:5000]
+summary_path = Path(sys.argv[2])
+probe_uid = int(sys.argv[3])
+app_uid = int(sys.argv[4])
+
+
+def network_blocks(source: str) -> list[str]:
+    matches = list(re.finditer(r"(?:^|\n)\s*NetworkAgentInfo\{", source))
+    blocks = []
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+        blocks.append(source[start:end])
+    return blocks
+
+
+def uid_in_ranges(block: str, uid: int) -> bool:
     match = re.search(r"Uids:\s*<\{([^}]*)\}>", block, re.S)
     if not match:
-        continue
+        return False
     for entry in match.group(1).split(","):
         entry = entry.strip()
+        if not entry:
+            continue
         if "-" in entry:
             start, end = [int(part) for part in entry.split("-", 1)]
-        elif entry:
-            start = end = int(entry)
         else:
-            continue
-        if start <= probe_uid <= end:
-            raise SystemExit(f"smoke probe UID {probe_uid} is still routed through a VPN after shutdown")
+            start = end = int(entry)
+        if start <= uid <= end:
+            return True
+    return False
+
+
+def owned_by_trajectory(block: str) -> bool:
+    owner_matches = re.search(rf"\bOwnerUid:\s*{app_uid}\b", block) is not None
+    admin_matches = re.search(rf"\bAdminUids:\s*\[[^\]]*\b{app_uid}\b", block) is not None
+    session_matches = "sessionId=Trajectory" in block
+    return owner_matches or admin_matches or session_matches
+
+
+remaining = []
+for block in network_blocks(text):
+    if "VPN" not in block:
+        continue
+    if owned_by_trajectory(block):
+        remaining.append("trajectory-owned")
+    elif uid_in_ranges(block, probe_uid):
+        remaining.append("probe-routed-through-other-vpn")
+
+summary_path.write_text(
+    f"app_uid={app_uid}\nprobe_uid={probe_uid}\nremaining_vpn_matches={','.join(remaining) or 'none'}\n",
+    encoding="utf-8",
+)
+if remaining:
+    raise SystemExit(
+        f"Trajectory VPN network still present after shutdown or smoke probe UID {probe_uid} is still VPN-routed"
+    )
 raise SystemExit(0)
 PY
 }

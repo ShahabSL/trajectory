@@ -171,6 +171,7 @@ export default function App() {
                 });
               }
             } catch (error) {
+              await desktopApi.markSmokeFrontendError(String(error)).catch(() => undefined);
               if (alive) {
                 setUiError(String(error));
               }
