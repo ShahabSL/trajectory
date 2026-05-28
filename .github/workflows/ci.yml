@@ -61,6 +61,8 @@ jobs:
             target: x86_64-pc-windows-msvc
           - os: macos-15-intel
             target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
 
     steps:
       - uses: actions/checkout@v5
@@ -89,10 +91,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-22.04
-          - windows-2022
-          - macos-15-intel
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
 
     steps:
       - uses: actions/checkout@v5
@@ -107,6 +114,7 @@ jobs:
             curl \
             wget \
             file \
+            xvfb \
             libxdo-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
@@ -158,6 +166,19 @@ jobs:
         run: npm run tauri:build
         working-directory: clients/desktop
 
+      - name: Smoke-test Tauri desktop package
+        run: npm run package:smoke -- "${{ runner.temp }}/desktop-package"
+        working-directory: clients/desktop
+
+      - name: Upload desktop package smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-desktop-package-smoke-${{ matrix.os }}
+          path: ${{ runner.temp }}/desktop-package
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Archive macOS app bundle
         if: runner.os == 'macOS'
         shell: bash
@@ -165,7 +186,7 @@ jobs:
           app_path="clients/desktop/src-tauri/target/release/bundle/macos/Trajectory.app"
           test -d "$app_path"
           tar -C "$(dirname "$app_path")" \
-            -czf "clients/desktop/src-tauri/target/release/bundle/macos/Trajectory_${{ matrix.os }}.app.tar.gz" \
+            -czf "clients/desktop/src-tauri/target/release/bundle/macos/Trajectory_${{ matrix.target }}.app.tar.gz" \
             "$(basename "$app_path")"
 
       - name: Upload desktop CI bundles
@@ -258,6 +279,17 @@ jobs:
             scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/android-ui-debug"
             scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/android-ui-release"
 
+      - name: Smoke-test Android API 33 notification-era UI
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          target: google_apis
+          arch: x86_64
+          profile: pixel
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-audio -no-boot-anim
+          script: scripts/ci_android_ui_smoke.sh clients/android/app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/android-ui-api33-debug"
+
       - name: Upload Android UI smoke artifacts
         if: always()
         uses: actions/upload-artifact@v7
@@ -266,6 +298,7 @@ jobs:
           path: |
             ${{ runner.temp }}/android-ui-debug
             ${{ runner.temp }}/android-ui-release
+            ${{ runner.temp }}/android-ui-api33-debug
           if-no-files-found: error
           retention-days: 7
 
@@ -294,6 +327,7 @@ jobs:
           - os: ubuntu-22.04
           - os: windows-2022
           - os: macos-15-intel
+          - os: macos-15
 
     steps:
       - uses: actions/checkout@v5

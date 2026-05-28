@@ -37,6 +37,8 @@ jobs:
             target: x86_64-pc-windows-msvc
           - os: macos-15-intel
             target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
 
     steps:
       - uses: actions/checkout@v5
@@ -77,6 +79,10 @@ jobs:
           git fetch --tags --force
           git checkout "$RELEASE_TAG"
 
+      - name: Validate release versions
+        shell: bash
+        run: python scripts/validate_release_versions.py --release-tag "$RELEASE_TAG"
+
       - name: Build portable bundles
         shell: bash
         run: |
@@ -109,6 +115,8 @@ jobs:
             target: x86_64-pc-windows-msvc
           - os: macos-15-intel
             target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
 
     steps:
       - uses: actions/checkout@v5
@@ -144,6 +152,15 @@ jobs:
           git fetch --tags --force
           git checkout "$RELEASE_TAG"
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate release versions
+        shell: bash
+        run: python scripts/validate_release_versions.py --release-tag "$RELEASE_TAG"
+
       - name: Install Tauri Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -154,6 +171,7 @@ jobs:
             curl \
             wget \
             file \
+            xvfb \
             libxdo-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
@@ -200,6 +218,19 @@ jobs:
       - name: Build Tauri desktop bundle
         run: npm run tauri:build
         working-directory: clients/desktop
+
+      - name: Smoke-test Tauri desktop package
+        run: npm run package:smoke -- "${{ runner.temp }}/desktop-package"
+        working-directory: clients/desktop
+
+      - name: Upload desktop release package smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-release-package-smoke-${{ matrix.target }}
+          path: ${{ runner.temp }}/desktop-package
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Archive macOS app bundle
         if: runner.os == 'macOS'
@@ -256,6 +287,15 @@ jobs:
         run: |
           git fetch --tags --force
           git checkout "$RELEASE_TAG"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate release versions
+        shell: bash
+        run: python scripts/validate_release_versions.py --release-tag "$RELEASE_TAG"
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -325,6 +365,13 @@ jobs:
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$apk"
           scripts/ci_android_vpn_static_checks.sh "$apk"
 
+      - name: Stage Android release APK
+        shell: bash
+        run: |
+          mkdir -p dist/android
+          cp clients/android/app/build/outputs/apk/release/app-release.apk \
+            "dist/android/trajectory-${RELEASE_TAG}-android.apk"
+
       - name: Remove Android signing key before emulator smoke
         if: always()
         shell: bash
@@ -362,7 +409,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: android-release-apk
-          path: clients/android/app/build/outputs/apk/release/app-release.apk
+          path: dist/android/*.apk
           if-no-files-found: error
           retention-days: 14
 
@@ -431,6 +478,10 @@ jobs:
           git fetch --tags --force
           git checkout "$RELEASE_TAG"
 
+      - name: Validate release versions
+        shell: bash
+        run: python scripts/validate_release_versions.py --release-tag "$RELEASE_TAG"
+
       - name: Download CLI release bundles
         uses: actions/download-artifact@v5
         with:
@@ -442,6 +493,13 @@ jobs:
         uses: actions/download-artifact@v5
         with:
           pattern: desktop-x86_64-*
+          path: dist/release
+          merge-multiple: true
+
+      - name: Download Apple Silicon desktop release bundles
+        uses: actions/download-artifact@v5
+        with:
+          pattern: desktop-aarch64-*
           path: dist/release
           merge-multiple: true
 
@@ -458,6 +516,10 @@ jobs:
           python scripts/merge_release_checksums.py \
             --input-dir dist/release \
             --output "dist/release/${RELEASE_TAG}-SHA256SUMS.txt"
+
+      - name: Validate release asset set
+        shell: bash
+        run: python scripts/validate_release_assets.py dist/release --release-tag "$RELEASE_TAG"
 
       - name: Ensure GitHub CLI is available
         shell: bash

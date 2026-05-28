@@ -8,6 +8,30 @@ package_name="app.trajectory.android"
 mkdir -p "$artifact_dir"
 test -f "$apk"
 
+wait_for_boot_completed() {
+  for _ in $(seq 1 90); do
+    if [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for Android boot completion" >&2
+  return 1
+}
+
+install_apk() {
+  local attempt
+  for attempt in 1 2 3; do
+    if adb install -r "$apk" > "$artifact_dir/install-attempt-${attempt}.txt" 2>&1; then
+      return 0
+    fi
+    adb uninstall "$package_name" >/dev/null 2>&1 || true
+    sleep 2
+  done
+  echo "Android APK install failed after retries" >&2
+  return 1
+}
+
 record_failure_artifacts() {
   set +e
   timeout 10s adb logcat -d > "$artifact_dir/logcat.txt" 2>/dev/null
@@ -29,8 +53,9 @@ on_exit() {
 trap on_exit EXIT
 
 adb wait-for-device
+wait_for_boot_completed
 adb uninstall "$package_name" >/dev/null 2>&1 || true
-adb install -r "$apk"
+install_apk
 if adb shell pm grant "$package_name" android.permission.POST_NOTIFICATIONS > "$artifact_dir/notification-permission.txt" 2>&1; then
   echo "POST_NOTIFICATIONS granted by smoke harness" >> "$artifact_dir/notification-permission.txt"
 else
@@ -60,7 +85,6 @@ fi
 swipe_x=$((screen_width / 2))
 swipe_start_y=$((screen_height * 78 / 100))
 swipe_end_y=$((screen_height * 28 / 100))
-platform_dialog_probe_done=0
 
 dump_ui_tree_raw() {
   local output="$1"
@@ -97,48 +121,60 @@ PY
 }
 
 dismiss_platform_dialogs() {
-  if [[ "$platform_dialog_probe_done" -eq 1 ]]; then
-    return 0
-  fi
-
   local probe="$artifact_dir/platform-dialog-probe.raw.xml"
-  local coords
+  local action
   for _ in 1 2 3; do
     if ! timeout 5s adb exec-out uiautomator dump /dev/tty > "$probe" 2>/dev/null; then
-      platform_dialog_probe_done=1
       return 0
     fi
-    if grep -Eq "(Trajectory|${package_name}).*isn't responding" "$probe"; then
-      echo "Trajectory app ANR detected during Android UI smoke test" >&2
-      exit 1
-    fi
-    if ! grep -Fq "isn't responding" "$probe"; then
-      platform_dialog_probe_done=1
-      return 0
-    fi
-    if ! coords="$(python3 - "$probe" <<'PY'
+    if ! action="$(python3 - "$probe" "$package_name" <<'PY'
 import re
 import sys
 import xml.etree.ElementTree as ET
 
 raw = open(sys.argv[1], errors="replace").read()
+package_name = sys.argv[2]
 end = raw.find("</hierarchy>")
 if end < 0:
     raise SystemExit(1)
 root = ET.fromstring(raw[: end + len("</hierarchy>")])
+texts = []
 for node in root.iter("node"):
-    if node.attrib.get("text") == "Wait":
+    for key in ("text", "content-desc"):
+        value = node.attrib.get(key, "")
+        if value:
+            texts.append(value)
+problem_texts = [
+    text for text in texts
+    if "isn't responding" in text or "keeps stopping" in text or "has stopped" in text
+]
+for text in problem_texts:
+    if "Trajectory" in text or package_name in text:
+        print("FAIL")
+        raise SystemExit(0)
+if not problem_texts:
+    print("NONE")
+    raise SystemExit(0)
+for node in root.iter("node"):
+    if node.attrib.get("text") in {"Wait", "Close app", "OK"}:
         match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds", ""))
         if match:
             x1, y1, x2, y2 = map(int, match.groups())
-            print((x1 + x2) // 2, (y1 + y2) // 2)
+            print("TAP", (x1 + x2) // 2, (y1 + y2) // 2)
             raise SystemExit(0)
-raise SystemExit(1)
+print("NONE")
 PY
     )"; then
       return 0
     fi
-    adb shell input tap ${coords}
+    if [[ "$action" == "FAIL" ]]; then
+      echo "Trajectory app platform crash/ANR dialog detected during Android UI smoke test" >&2
+      exit 1
+    fi
+    if [[ "$action" != TAP* ]]; then
+      return 0
+    fi
+    adb shell input tap ${action#TAP }
     sleep 2
   done
 }
