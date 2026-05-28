@@ -86,7 +86,7 @@ jobs:
             --release-tag "$RELEASE_TAG"
 
       - name: Upload release bundles
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.target }}
           path: dist/release/*
@@ -178,7 +178,7 @@ jobs:
 
       - name: Upload desktop release UI smoke artifacts
         if: runner.os == 'Linux' && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-release-ui-smoke
           path: ${{ runner.temp }}/desktop-ui
@@ -200,7 +200,7 @@ jobs:
             "$(basename "$app_path")"
 
       - name: Upload desktop release bundles
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.target }}
           path: clients/desktop/src-tauri/target/release/bundle/**/*
@@ -338,7 +338,7 @@ jobs:
 
       - name: Upload Android release UI smoke artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: android-release-ui-smoke
           path: ${{ runner.temp }}/android-ui
@@ -346,7 +346,7 @@ jobs:
           retention-days: 14
 
       - name: Upload Android signed release APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: android-release-apk
           path: clients/android/app/build/outputs/apk/release/app-release.apk

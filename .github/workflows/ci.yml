@@ -64,7 +64,7 @@ jobs:
         run: python3 scripts/package_release.py --target x86_64-unknown-linux-gnu --output-dir dist/ci
 
       - name: Upload Linux CI bundles
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-linux-release-bundles
           path: dist/ci/*
@@ -126,7 +126,7 @@ jobs:
 
       - name: Upload desktop UI smoke artifacts
         if: runner.os == 'Linux' && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-desktop-ui-smoke
           path: ${{ runner.temp }}/desktop-ui
@@ -152,7 +152,7 @@ jobs:
             "$(basename "$app_path")"
 
       - name: Upload desktop CI bundles
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-desktop-${{ matrix.os }}
           path: clients/desktop/src-tauri/target/release/bundle/**/*
@@ -219,7 +219,7 @@ jobs:
 
       - name: Upload Android UI smoke artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-android-ui-smoke
           path: ${{ runner.temp }}/android-ui
@@ -227,7 +227,7 @@ jobs:
           retention-days: 7
 
       - name: Upload Android debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-android-debug-apk
           path: clients/android/app/build/outputs/apk/debug/*.apk
@@ -235,7 +235,7 @@ jobs:
           retention-days: 7
 
       - name: Upload Android release APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-android-unsigned-release-apk
           path: clients/android/app/build/outputs/apk/release/*.apk

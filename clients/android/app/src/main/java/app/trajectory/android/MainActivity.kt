@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -198,28 +199,28 @@ private val transportModeOptions = listOf(
         id = "secure",
         label = "Secure",
         badge = "Default",
-        summary = "Conservative pacing and verification for the safest baseline.",
+        summary = "Verified pacing for the safest baseline.",
         icon = Icons.Filled.Lock,
     ),
     TransportModeOption(
         id = "velocity",
         label = "Velocity",
         badge = "Fast",
-        summary = "Aggressive scheduler for normal resolver cohorts and low latency.",
+        summary = "Aggressive scheduler for low latency.",
         icon = Icons.Filled.Speed,
     ),
     TransportModeOption(
         id = "resilient",
         label = "Resilient",
         badge = "Fallback",
-        summary = "Compatibility-first behavior for weak or restricted DNS paths.",
+        summary = "Fallback behavior for restricted DNS.",
         icon = Icons.Filled.NetworkCheck,
     ),
     TransportModeOption(
         id = "frontier",
         label = "Frontier",
         badge = "Experimental",
-        summary = "Highest-ceiling profile for breakthrough testing across strong cohorts.",
+        summary = "Ceiling tests on strong DNS cohorts.",
         icon = Icons.Filled.Explore,
         experimental = true,
     ),
@@ -348,34 +349,45 @@ private fun TrajectoryAndroidApp(
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    item {
-                        StatusCard(
-                            status = status,
-                            isWorking = isWorking,
-                            profile = currentProfile,
-                            notice = notice,
-                            profileErrors = profileErrors,
-                            onDismissNotice = { notice = null },
-                        )
-                    }
-                    item {
-                        ActionStrip(
-                            canStart = profileErrors.isEmpty(),
-                            onSave = {
-                                val errors = onSaveProfile(currentProfile)
-                                notice = if (errors.isEmpty()) "Profile saved. Status remains disconnected until a service proves readiness."
-                                else errors.joinToString("\n")
-                            },
-                            onStartProxy = {
-                                val errors = onStartProxy(currentProfile)
-                                notice = errors.takeIf { it.isNotEmpty() }?.joinToString("\n")
-                            },
-                            onStartVpn = {
-                                val errors = onStartVpn(currentProfile)
-                                notice = errors.takeIf { it.isNotEmpty() }?.joinToString("\n")
-                            },
-                            onStop = onStop,
-                        )
+                    if (tab == AndroidTab.STATUS) {
+                        item {
+                            StatusCard(
+                                status = status,
+                                isWorking = isWorking,
+                                profile = currentProfile,
+                                notice = notice,
+                                profileErrors = profileErrors,
+                                onDismissNotice = { notice = null },
+                            )
+                        }
+                        item {
+                            ActionStrip(
+                                canStart = profileErrors.isEmpty(),
+                                onSave = {
+                                    val errors = onSaveProfile(currentProfile)
+                                    notice = if (errors.isEmpty()) "Profile saved. Status remains disconnected until a service proves readiness."
+                                    else errors.joinToString("\n")
+                                },
+                                onStartProxy = {
+                                    val errors = onStartProxy(currentProfile)
+                                    notice = errors.takeIf { it.isNotEmpty() }?.joinToString("\n")
+                                },
+                                onStartVpn = {
+                                    val errors = onStartVpn(currentProfile)
+                                    notice = errors.takeIf { it.isNotEmpty() }?.joinToString("\n")
+                                },
+                                onStop = onStop,
+                            )
+                        }
+                    } else {
+                        item {
+                            CompactStatusCard(
+                                status = status,
+                                isWorking = isWorking,
+                                profile = currentProfile,
+                                profileErrors = profileErrors,
+                            )
+                        }
                     }
                     when (tab) {
                         AndroidTab.STATUS -> {
@@ -439,6 +451,53 @@ private fun TrajectoryAndroidApp(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun CompactStatusCard(
+    status: RuntimeStatusSnapshot,
+    isWorking: Boolean,
+    profile: ClientProfile,
+    profileErrors: List<String>,
+) {
+    CardShell(
+        modifier = Modifier.semantics {
+            contentDescription = "status.phase.${status.phase.name.lowercase()}"
+        },
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusDot(status.phase, isWorking)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(status.title, fontSize = 18.sp, fontWeight = FontWeight.Black)
+                Text(status.detail, color = TrajectoryColors.Muted, fontSize = 12.sp, maxLines = 2)
+            }
+        }
+        AnimatedVisibility(isWorking) {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp)
+                    .clip(RoundedCornerShape(999.dp)),
+                color = TrajectoryColors.Ink,
+                trackColor = TrajectoryColors.Border,
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            StatusChip("Mode", modeLabel(profile.transportMode))
+            StatusChip("DNS", resolverSummary(status, profile))
+        }
+        if (profileErrors.isNotEmpty() || status.lastError != null) {
+            Text(
+                text = status.lastError ?: profileErrors.first(),
+                modifier = Modifier.padding(top = 8.dp),
+                color = TrajectoryColors.WarningInk,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
         }
     }
 }
@@ -720,43 +779,55 @@ private fun TransportModeSelector(
             .padding(top = 6.dp)
             .fillMaxWidth(),
     ) {
-        transportModeOptions.forEach { mode ->
-            val selected = transportMode == mode.id
-            FilterChip(
-                selected = selected,
-                onClick = { onModeChange(mode.id) },
-                label = {
-                    Column(Modifier.fillMaxWidth()) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(mode.icon, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(mode.label, fontWeight = FontWeight.Bold)
-                        }
-                        Text(
-                            mode.badge,
-                            color = if (selected) Color.White else if (mode.experimental) TrajectoryColors.WarningInk else TrajectoryColors.Muted,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            mode.summary,
-                            color = if (selected) Color.White else TrajectoryColors.Muted,
-                            fontSize = 11.sp,
-                            lineHeight = 14.sp,
-                        )
-                    }
-                },
-                shape = RoundedCornerShape(8.dp),
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = if (mode.experimental) TrajectoryColors.WarningInk else TrajectoryColors.Ink,
-                    selectedLabelColor = Color.White,
-                    containerColor = if (mode.experimental) TrajectoryColors.WarningSurface else TrajectoryColors.Surface,
-                    labelColor = TrajectoryColors.Ink,
-                ),
-                modifier = Modifier.semantics {
-                    contentDescription = "${mode.label} ${if (mode.experimental) "experimental " else ""}mode"
-                },
-            )
+        transportModeOptions.chunked(2).forEach { rowModes ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                rowModes.forEach { mode ->
+                    val selected = transportMode == mode.id
+                    FilterChip(
+                        selected = selected,
+                        onClick = { onModeChange(mode.id) },
+                        label = {
+                            Column(Modifier.fillMaxWidth()) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(mode.icon, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(mode.label, fontWeight = FontWeight.Bold, maxLines = 1)
+                                }
+                                Text(
+                                    mode.badge,
+                                    color = if (selected) Color.White else if (mode.experimental) TrajectoryColors.WarningInk else TrajectoryColors.Muted,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                )
+                                Text(
+                                    mode.summary,
+                                    color = if (selected) Color.White else TrajectoryColors.Muted,
+                                    fontSize = 11.sp,
+                                    lineHeight = 14.sp,
+                                    maxLines = 2,
+                                )
+                            }
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = if (mode.experimental) TrajectoryColors.WarningInk else TrajectoryColors.Ink,
+                            selectedLabelColor = Color.White,
+                            containerColor = if (mode.experimental) TrajectoryColors.WarningSurface else TrajectoryColors.Surface,
+                            labelColor = TrajectoryColors.Ink,
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 108.dp)
+                            .semantics {
+                                contentDescription = "${mode.label} ${if (mode.experimental) "experimental " else ""}mode"
+                            },
+                    )
+                }
+                if (rowModes.size == 1) {
+                    Spacer(Modifier.weight(1f))
+                }
+            }
         }
     }
 }
