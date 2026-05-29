@@ -21,6 +21,7 @@ local_live_dir=""
 local_live_server_pid=""
 local_origin_pid=""
 local_origin_marker=""
+local_reverse_ports=()
 
 wait_for_boot_completed() {
   for _ in $(seq 1 90); do
@@ -207,7 +208,7 @@ install_smoke_probe_apk() {
   build_smoke_probe_apk
   local attempt
   for attempt in 1 2 3; do
-    if adb install -r "$smoke_probe_apk" > "$artifact_dir/smokeprobe-install-attempt-${attempt}.txt" 2>&1; then
+    if timeout 60s adb install -r "$smoke_probe_apk" > "$artifact_dir/smokeprobe-install-attempt-${attempt}.txt" 2>&1; then
       return 0
     fi
     adb uninstall "$smoke_probe_package" >/dev/null 2>&1 || true
@@ -249,9 +250,31 @@ run_android_sidecar_help() {
         exit
       }'
   )"
-  binary="$native_dir/libtrajectory_client.so"
-  if ! adb shell "test -x '$binary'" >/dev/null 2>&1 && [[ -n "$primary_abi" && "$primary_abi" != "null" ]]; then
-    binary="$native_dir/$primary_abi/libtrajectory_client.so"
+  local runtime_abi_dir="$primary_abi"
+  case "$primary_abi" in
+    arm64-v8a) runtime_abi_dir="arm64" ;;
+    armeabi-v7a) runtime_abi_dir="arm" ;;
+  esac
+  local candidate
+  binary=""
+  for candidate in \
+    "$native_dir/libtrajectory_client.so" \
+    "$native_dir/$primary_abi/libtrajectory_client.so" \
+    "$native_dir/$runtime_abi_dir/libtrajectory_client.so"; do
+    if adb shell "test -x '$candidate'" >/dev/null 2>&1; then
+      binary="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$binary" ]]; then
+    binary="$(
+      adb shell "find '$native_dir' -type f -name libtrajectory_client.so 2>/dev/null | head -n 1" |
+        tr -d '\r'
+    )"
+  fi
+  if [[ -z "$binary" ]]; then
+    echo "could not find executable libtrajectory_client.so under $native_dir" >&2
+    return 1
   fi
   adb shell "$binary" --help > "$artifact_dir/native-sidecar-help.txt" 2>&1
   grep -Fq "Usage: trajectory-client" "$artifact_dir/native-sidecar-help.txt"
@@ -275,6 +298,10 @@ on_exit() {
   if [[ "$code" -ne 0 ]]; then
     record_failure_artifacts
   fi
+  local port
+  for port in "${local_reverse_ports[@]}"; do
+    adb reverse --remove "tcp:${port}" >/dev/null 2>&1 || true
+  done
   if [[ -n "$local_origin_pid" ]] && kill -0 "$local_origin_pid" >/dev/null 2>&1; then
     kill "$local_origin_pid" >/dev/null 2>&1 || true
     wait "$local_origin_pid" >/dev/null 2>&1 || true
@@ -1050,15 +1077,37 @@ PY
 }
 
 pick_host_ip() {
+  local route_target="${TRAJECTORY_ANDROID_SMOKE_DEVICE_IP:-}"
+  if [[ -z "$route_target" && "${ANDROID_SERIAL:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+: ]]; then
+    route_target="${ANDROID_SERIAL%%:*}"
+  fi
+  route_target="${route_target:-8.8.8.8}"
   local ip
   ip="$(
-    (ip route get 8.8.8.8 2>/dev/null || true) |
+    (ip route get "$route_target" 2>/dev/null || true) |
       awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }'
   )"
   if [[ -z "$ip" ]]; then
     ip="$(hostname -I 2>/dev/null | awk '{ print $1 }')"
   fi
   printf '%s\n' "${ip:-127.0.0.1}"
+}
+
+pick_android_device_host_ip() {
+  local host_ip="$1"
+  local is_emulator
+  is_emulator="$(adb shell getprop ro.kernel.qemu 2>/dev/null | tr -d '\r' || true)"
+  if [[ "$is_emulator" == "1" ]]; then
+    printf '%s\n' "${TRAJECTORY_ANDROID_SMOKE_EMULATOR_HOST_IP:-10.0.2.2}"
+  else
+    printf '%s\n' "$host_ip"
+  fi
+}
+
+adb_reverse_port() {
+  local port="$1"
+  adb reverse "tcp:${port}" "tcp:${port}" > "$artifact_dir/adb-reverse-${port}.txt" 2>&1
+  local_reverse_ports+=("$port")
 }
 
 prepare_local_live_proxy_smoke() {
@@ -1073,6 +1122,19 @@ prepare_local_live_proxy_smoke() {
   local dns_port="${TRAJECTORY_ANDROID_SMOKE_LOCAL_DNS_PORT:-$(pick_local_port)}"
   local origin_port="${TRAJECTORY_ANDROID_SMOKE_LOCAL_ORIGIN_PORT:-$(pick_local_port)}"
   local host_ip="${TRAJECTORY_ANDROID_SMOKE_LOCAL_HOST_IP:-$(pick_host_ip)}"
+  local device_host_ip="${TRAJECTORY_ANDROID_SMOKE_DEVICE_HOST_IP:-$(pick_android_device_host_ip "$host_ip")}"
+  local is_emulator
+  is_emulator="$(adb shell getprop ro.kernel.qemu 2>/dev/null | tr -d '\r' || true)"
+  local use_adb_reverse="${TRAJECTORY_ANDROID_SMOKE_USE_ADB_REVERSE:-}"
+  if [[ -z "$use_adb_reverse" && -z "${TRAJECTORY_ANDROID_SMOKE_DEVICE_HOST_IP:-}" && "$is_emulator" != "1" ]]; then
+    use_adb_reverse="1"
+  fi
+  if [[ "$use_adb_reverse" == "1" ]]; then
+    adb_reverse_port "$dns_port"
+    adb_reverse_port "$origin_port"
+    device_host_ip="127.0.0.1"
+    export TRAJECTORY_ANDROID_SMOKE_RESOLVER_TRANSPORT="${TRAJECTORY_ANDROID_SMOKE_RESOLVER_TRANSPORT:-tcp}"
+  fi
 
   mkdir -p "$origin_dir"
   local_origin_marker="trajectory-android-smoke-${RANDOM}-${RANDOM}"
@@ -1115,10 +1177,12 @@ prepare_local_live_proxy_smoke() {
 
   export TRAJECTORY_ANDROID_SMOKE_DOMAIN="$domain"
   export TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY="$access_key"
-  export TRAJECTORY_ANDROID_SMOKE_RESOLVERS="10.0.2.2:${dns_port}"
-  export TRAJECTORY_ANDROID_SMOKE_FETCH_URL="http://${host_ip}:${origin_port}/trajectory-smoke.txt"
-  export TRAJECTORY_ANDROID_SMOKE_EXPECT_BODY="$local_origin_marker"
-  echo "Android local live proxy smoke server ready on host DNS port ${dns_port}; origin http://${host_ip}:${origin_port}/trajectory-smoke.txt" \
+  export TRAJECTORY_ANDROID_SMOKE_RESOLVERS="${TRAJECTORY_ANDROID_SMOKE_RESOLVERS:-${device_host_ip}:${dns_port}}"
+  if [[ -z "${TRAJECTORY_ANDROID_SMOKE_FETCH_URL:-}" ]]; then
+    export TRAJECTORY_ANDROID_SMOKE_FETCH_URL="http://${device_host_ip}:${origin_port}/trajectory-smoke.txt"
+    export TRAJECTORY_ANDROID_SMOKE_EXPECT_BODY="$local_origin_marker"
+  fi
+  echo "Android local live proxy smoke server ready on host DNS port ${dns_port}; device host ${device_host_ip}; resolver transport ${TRAJECTORY_ANDROID_SMOKE_RESOLVER_TRANSPORT:-auto}; origin http://${device_host_ip}:${origin_port}/trajectory-smoke.txt" \
     > "$artifact_dir/local-live-server-ready.txt"
 }
 
@@ -1136,7 +1200,7 @@ start_live_profile_from_intent() {
     --es trajectory_smoke_domain "$domain" \
     --es trajectory_smoke_access_key "$access_key" \
     --es trajectory_smoke_resolvers "$resolvers" \
-    --es trajectory_smoke_resolver_transport auto \
+    --es trajectory_smoke_resolver_transport "${TRAJECTORY_ANDROID_SMOKE_RESOLVER_TRANSPORT:-auto}" \
     --es trajectory_smoke_transport_mode velocity \
     --es trajectory_smoke_socks_port "${TRAJECTORY_ANDROID_SMOKE_SOCKS_PORT:-7000}" \
     --es trajectory_smoke_http_port "${TRAJECTORY_ANDROID_SMOKE_HTTP_PORT:-7001}" \
@@ -1668,7 +1732,7 @@ app_uid = int(sys.argv[4])
 
 
 def network_blocks(source: str) -> list[str]:
-    matches = list(re.finditer(r"(?:^|\n)\s*NetworkAgentInfo\{", source))
+    matches = list(re.finditer(r"(?:^|\n)\s*NetworkAgentInfo(?:\{| |\[)", source))
     blocks = []
     for index, match in enumerate(matches):
         start = match.start()
@@ -1678,7 +1742,7 @@ def network_blocks(source: str) -> list[str]:
 
 
 def uid_in_ranges(block: str, uid: int) -> bool:
-    match = re.search(r"Uids:\s*<\{([^}]*)\}>", block, re.S)
+    match = re.search(r"Uids:\s*<[\{\[]([^}\]]*)[\}\]]>", block, re.S)
     if not match:
         return False
     for entry in match.group(1).split(","):
@@ -1726,14 +1790,27 @@ PY
 run_vpn_probe_app() {
   local http_fetch_url="$1"
   local output_prefix="$2"
+  local expected_body
+  if [[ "$#" -ge 3 ]]; then
+    expected_body="$3"
+  else
+    expected_body="${TRAJECTORY_ANDROID_SMOKE_EXPECT_BODY:-}"
+  fi
   install_smoke_probe_apk
   adb shell am force-stop "$smoke_probe_package" >/dev/null 2>&1 || true
   adb shell run-as "$smoke_probe_package" rm -f files/result.txt >/dev/null 2>&1 || true
-  adb shell am start -W \
-    -n "$smoke_probe_package/.SmokeProbeActivity" \
-    --es trajectory_smoke_fetch_url "$http_fetch_url" \
-    --es trajectory_smoke_expect_body "${TRAJECTORY_ANDROID_SMOKE_EXPECT_BODY:-}" \
-    > "$artifact_dir/${output_prefix}-start.txt" 2>&1
+  if [[ -n "$expected_body" ]]; then
+    adb shell am start -W \
+      -n "$smoke_probe_package/.SmokeProbeActivity" \
+      --es trajectory_smoke_fetch_url "$http_fetch_url" \
+      --es trajectory_smoke_expect_body "$expected_body" \
+      > "$artifact_dir/${output_prefix}-start.txt" 2>&1
+  else
+    adb shell am start -W \
+      -n "$smoke_probe_package/.SmokeProbeActivity" \
+      --es trajectory_smoke_fetch_url "$http_fetch_url" \
+      > "$artifact_dir/${output_prefix}-start.txt" 2>&1
+  fi
 
   local pass
   for pass in $(seq 1 30); do
@@ -1766,7 +1843,13 @@ run_vpn_smoke() {
     echo "Android VPN smoke requires the live/local smoke profile" >&2
     return 1
   fi
-  local http_fetch_url="${TRAJECTORY_ANDROID_SMOKE_FETCH_URL:-}"
+  local http_fetch_url="${TRAJECTORY_ANDROID_SMOKE_VPN_FETCH_URL:-${TRAJECTORY_ANDROID_SMOKE_FETCH_URL:-}}"
+  local expected_body="${TRAJECTORY_ANDROID_SMOKE_EXPECT_BODY:-}"
+  if [[ -n "${TRAJECTORY_ANDROID_SMOKE_VPN_FETCH_URL:-}" ]]; then
+    expected_body="${TRAJECTORY_ANDROID_SMOKE_VPN_EXPECT_BODY:-}"
+  elif [[ -n "${TRAJECTORY_ANDROID_SMOKE_VPN_EXPECT_BODY:-}" ]]; then
+    expected_body="$TRAJECTORY_ANDROID_SMOKE_VPN_EXPECT_BODY"
+  fi
   if [[ "$http_fetch_url" != http://* ]]; then
     echo "Android VPN smoke requires a deterministic plain http:// fetch URL" >&2
     return 1
@@ -1792,7 +1875,7 @@ run_vpn_smoke() {
       grep -Fq "status.phase.vpn_connected" "$artifact_dir/vpn_live_${pass}.xml"; then
       install_smoke_probe_apk
       wait_for_vpn_network_active "$artifact_dir/vpn-connectivity.txt"
-      run_vpn_probe_app "$http_fetch_url" "vpn_probe"
+      run_vpn_probe_app "$http_fetch_url" "vpn_probe" "$expected_body"
       adb shell am start -W -n "$activity" > "$artifact_dir/vpn-return-main.txt" 2>&1
       sleep 1
       dump_screen "vpn_live_proven_${pass}"

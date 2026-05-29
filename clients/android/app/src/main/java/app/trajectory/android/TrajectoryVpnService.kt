@@ -38,12 +38,11 @@ class TrajectoryVpnService : VpnService() {
                         line,
                     )
                 },
-            ) {
+            ) { exitCode ->
                 if (!requestedStop) {
-                    RuntimeStatusCenter.markFailed(
+                    RuntimeStatusCenter.markSidecarExited(
                         RuntimeMode.VPN,
-                        "sidecar",
-                        "trajectory-client exited",
+                        "trajectory-client exited${exitCode?.let { " with code $it" } ?: ""}",
                     )
                 }
                 stopSelf()
@@ -90,17 +89,23 @@ class TrajectoryVpnService : VpnService() {
             return
         }
         if (!runtime.start(profile)) {
-            RuntimeStatusCenter.markFailed(RuntimeMode.VPN, "sidecar", "failed to start trajectory-client")
+            RuntimeStatusCenter.markFailed(
+                RuntimeMode.VPN,
+                "sidecar",
+                runtime.lastStartFailure() ?: "failed to start trajectory-client",
+            )
             stopRuntime(resetStatus = false)
             return
         }
         if (!waitForPort(profile.socksPort, 8_000)) {
-            android.util.Log.e("TrajectoryVpn", "local Trajectory SOCKS listener did not become ready")
-            RuntimeStatusCenter.markFailed(
-                RuntimeMode.VPN,
-                "SOCKS listener",
-                "port ${profile.socksPort} did not open",
-            )
+            if (!RuntimeStatusCenter.isFailed(RuntimeMode.VPN)) {
+                android.util.Log.e("TrajectoryVpn", "local Trajectory SOCKS listener did not become ready")
+                RuntimeStatusCenter.markFailed(
+                    RuntimeMode.VPN,
+                    "SOCKS listener",
+                    "port ${profile.socksPort} did not open",
+                )
+            }
             stopRuntime(resetStatus = false)
             return
         }
@@ -201,6 +206,7 @@ class TrajectoryVpnService : VpnService() {
     private fun waitForPort(port: Int, timeoutMs: Long): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
+            if (RuntimeStatusCenter.isFailed(RuntimeMode.VPN)) return false
             try {
                 Socket().use { socket ->
                     socket.connect(InetSocketAddress("127.0.0.1", port), 250)

@@ -112,6 +112,15 @@ object RuntimeStatusCenter {
         appendLog("failed at $step: $error")
     }
 
+    fun markSidecarExited(mode: RuntimeMode, error: String) {
+        val current = snapshot()
+        if (current.mode == mode && current.phase == RuntimePhase.FAILED) {
+            appendLog("trajectory-client exited after failure: $error")
+            return
+        }
+        markFailed(mode, "sidecar", error)
+    }
+
     fun markStopping(mode: RuntimeMode) {
         update(
             mode = mode,
@@ -198,6 +207,23 @@ object RuntimeStatusCenter {
         val lower = line.lowercase(Locale.US)
         val current = snapshot()
 
+        Regex("only (\\d+) resolver\\(s\\) passed signed tunnel admission; required (\\d+)")
+            .find(lower)
+            ?.let { match ->
+                val admitted = match.groupValues.getOrNull(1)?.toIntOrNull() ?: 0
+                val required = match.groupValues.getOrNull(2)?.toIntOrNull() ?: profile.resolverAdmissionMin
+                update(
+                    mode = mode,
+                    phase = RuntimePhase.FAILED,
+                    title = "DNS admission failed",
+                    detail = "Resolver admission: $admitted DNS path(s) passed; $required required. Check resolver transport, domain NS records, and access key.",
+                    admittedResolvers = admitted,
+                    candidateResolvers = current.candidateResolvers.coerceAtLeast(profile.resolvers.size),
+                    lastError = line.take(180),
+                )
+                return
+            }
+
         if (lower.contains("probing ") && lower.contains(" resolver")) {
             val candidates = Regex("probing (\\d+) resolver").find(lower)
                 ?.groupValues
@@ -276,8 +302,10 @@ object RuntimeStatusCenter {
             (lower.contains("failed") || lower.contains("timed out")) &&
                 (lower.contains("retrying over tcp") || lower.contains("retrying udp"))
         val isBenignLocalProxyClose = isBenignLocalProxyClose(lower)
+        val isTransientResolverPacketFailure = isTransientResolverPacketFailure(lower)
         if (!isRecoveredTransportFallback &&
             !isBenignLocalProxyClose &&
+            !isTransientResolverPacketFailure &&
             (lower.contains("failed") || lower.contains("timed out") || lower.contains("error"))
         ) {
             if (current.phase == RuntimePhase.PROXY_CONNECTED || current.phase == RuntimePhase.VPN_CONNECTED) {
@@ -307,6 +335,21 @@ object RuntimeStatusCenter {
             lowercaseLine.contains("socks client did not offer no-auth method")
     }
 
+    private fun isTransientResolverPacketFailure(lowercaseLine: String): Boolean {
+        val isResolverPacket =
+            lowercaseLine.contains("resolver ") &&
+                lowercaseLine.contains(" packet ") &&
+                lowercaseLine.contains(" failed:")
+        if (!isResolverPacket) return false
+
+        return lowercaseLine.contains("timed out") ||
+            lowercaseLine.contains("read failed") ||
+            lowercaseLine.contains("write failed") ||
+            lowercaseLine.contains("early eof") ||
+            lowercaseLine.contains("broken pipe") ||
+            lowercaseLine.contains("connection reset by peer")
+    }
+
     fun markListenersReady(mode: RuntimeMode, profile: ClientProfile) {
         val socksReady = isPortOpen(profile.socksPort)
         val httpReady = isPortOpen(profile.httpPort)
@@ -331,6 +374,11 @@ object RuntimeStatusCenter {
         } catch (_: Exception) {
             false
         }
+
+    fun isFailed(mode: RuntimeMode): Boolean {
+        val current = snapshot()
+        return current.mode == mode && current.phase == RuntimePhase.FAILED
+    }
 
     private fun promoteIfReady(mode: RuntimeMode, profile: ClientProfile) {
         val current = snapshot()

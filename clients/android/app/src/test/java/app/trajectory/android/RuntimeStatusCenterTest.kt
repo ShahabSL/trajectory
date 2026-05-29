@@ -26,6 +26,28 @@ class RuntimeStatusCenterTest {
     }
 
     @Test
+    fun resolverAdmissionFailureReportsDnsInsteadOfGenericSidecarExit() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.VPN,
+            profile(),
+            "probing 4 resolver(s) before admission",
+        )
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.VPN,
+            profile(),
+            "only 0 resolver(s) passed signed tunnel admission; required 1",
+        )
+        RuntimeStatusCenter.markSidecarExited(RuntimeMode.VPN, "trajectory-client exited")
+
+        val snapshot = RuntimeStatusCenter.snapshot()
+        assertEquals(RuntimePhase.FAILED, snapshot.phase)
+        assertEquals("DNS admission failed", snapshot.title)
+        assertEquals(0, snapshot.admittedResolvers)
+        assertEquals(4, snapshot.candidateResolvers)
+    }
+
+    @Test
     fun listenerLogAloneDoesNotMeanProxyConnected() {
         RuntimeStatusCenter.reset()
         RuntimeStatusCenter.observeRuntimeLine(
@@ -74,6 +96,19 @@ class RuntimeStatusCenterTest {
         )
 
         assertEquals(RuntimePhase.DEGRADED, RuntimeStatusCenter.snapshot().phase)
+    }
+
+    @Test
+    fun connectedProxyDoesNotDegradeOnSingleResolverTimeout() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.markProxyDataPathReady(profile(), "http://127.0.0.1:8080/smoke")
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.PROXY,
+            profile(),
+            "resolver 127.0.0.1:43503 packet 29 failed: DNS-over-TCP resolver query failed: DNS-over-TCP response timed out",
+        )
+
+        assertEquals(RuntimePhase.PROXY_CONNECTED, RuntimeStatusCenter.snapshot().phase)
     }
 
     @Test

@@ -1,6 +1,6 @@
 {
   "name": "@trajectory/desktop",
-  "version": "0.1.44",
+  "version": "0.1.45",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "ui:smoke": "node scripts/ui-smoke.mjs",
     "package:smoke": "node scripts/package-smoke.mjs",
+    "package:windows-portable": "node scripts/package-windows-portable.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "sidecar:stage": "bash scripts/stage-sidecar.sh",
     "tauri": "tauri",

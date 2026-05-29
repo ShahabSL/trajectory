@@ -109,7 +109,7 @@ npm --prefix clients/desktop run package:smoke -- /tmp/trajectory-desktop-packag
 `ui:smoke` validates the browser-rendered production UI. `package:smoke`
 validates the distributable Tauri output: it checks expected bundle files,
 verifies the packaged sidecar, inspects installable artifacts, launches the real
-app/AppImage/MSI-extracted app where the platform allows it, and waits for
+app/AppImage/Windows portable ZIP app where the platform allows it, and waits for
 backend setup, webview page-load, frontend IPC, and backend state readiness
 markers written by the packaged app. In live-smoke mode it also starts a local
 Trajectory server and local HTTP origin, configures the packaged app, proves

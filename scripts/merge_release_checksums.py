@@ -59,11 +59,10 @@ def is_release_asset(name: str) -> bool:
     patterns = [
         "trajectory-v*.tar.gz",
         "trajectory-v*.zip",
+        "Trajectory_*_portable.zip",
         "*.deb",
         "*.rpm",
         "*.AppImage",
-        "*.msi",
-        "*.exe",
         "*.dmg",
         "*.app.tar.gz",
         "*.apk",

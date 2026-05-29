@@ -13,21 +13,39 @@ class TrajectoryRuntimeProcess(
     private val executor: ExecutorService,
     private val logTag: String,
     private val onOutputLine: (String) -> Unit = {},
-    private val onExit: () -> Unit = {},
+    private val onExit: (Int?) -> Unit = {},
 ) {
     @Volatile private var process: Process? = null
     @Volatile private var stoppingProcess: Process? = null
+    @Volatile private var lastStartFailure: String? = null
 
     fun start(profile: ClientProfile): Boolean {
         if (process != null) return true
+        lastStartFailure = null
         val errors = profile.validate()
-        if (errors.isNotEmpty()) return false
+        if (errors.isNotEmpty()) {
+            return failStart("profile is not valid: ${errors.joinToString("; ")}")
+        }
 
         val binary = File(context.applicationInfo.nativeLibraryDir, "libtrajectory_client.so")
+        if (!binary.isFile) {
+            return failStart("native trajectory-client sidecar is missing at ${binary.absolutePath}")
+        }
+        if (!binary.canExecute()) {
+            return failStart("native trajectory-client sidecar is not executable at ${binary.absolutePath}")
+        }
         val builder = ProcessBuilder(buildArgs(binary.absolutePath, profile))
             .redirectErrorStream(true)
         builder.environment()["TRAJECTORY_ACCESS_KEY"] = profile.accessKey
-        val child = builder.start()
+        val child = try {
+            builder.start()
+        } catch (error: IOException) {
+            return failStart("could not launch native trajectory-client sidecar: ${error.message ?: error.javaClass.simpleName}")
+        } catch (error: SecurityException) {
+            return failStart("Android blocked trajectory-client sidecar launch: ${error.message ?: error.javaClass.simpleName}")
+        } catch (error: RuntimeException) {
+            return failStart("trajectory-client sidecar launch failed: ${error.message ?: error.javaClass.simpleName}")
+        }
         process = child
         stoppingProcess = null
         executor.execute {
@@ -51,6 +69,11 @@ class TrajectoryRuntimeProcess(
                 } catch (error: InterruptedException) {
                     Thread.currentThread().interrupt()
                 }
+                val exitCode = try {
+                    child.exitValue()
+                } catch (_: IllegalThreadStateException) {
+                    null
+                }
                 if (process === child) {
                     process = null
                 }
@@ -58,12 +81,14 @@ class TrajectoryRuntimeProcess(
                     stoppingProcess = null
                 }
                 if (!stopped) {
-                    onExit()
+                    onExit(exitCode)
                 }
             }
         }
         return true
     }
+
+    fun lastStartFailure(): String? = lastStartFailure
 
     fun stop() {
         process?.let { child ->
@@ -122,5 +147,12 @@ class TrajectoryRuntimeProcess(
 
         private fun redact(line: String): String =
             line.replace(Regex("traj1_[A-Za-z0-9_=-]+"), "[redacted]")
+    }
+
+    private fun failStart(reason: String): Boolean {
+        lastStartFailure = reason
+        android.util.Log.e(logTag, reason)
+        onOutputLine("trajectory-client start failed: $reason")
+        return false
     }
 }

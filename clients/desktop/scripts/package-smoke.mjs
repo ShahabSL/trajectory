@@ -211,79 +211,33 @@ async function smokeMountedDmg(dmg) {
 }
 
 async function smokeWindows(files) {
-  const msi = requireOne(files, new RegExp(`Trajectory_?${escapeRegex(version)}.*\\.msi$`), "Windows .msi");
-  const setup = requireOne(files, new RegExp(`Trajectory_?${escapeRegex(version)}.*\\.exe$`), "Windows setup .exe");
-  const targetDir = path.join(artifactDir, "msi-extract");
-  runChecked("msiexec.exe", ["/a", msi, "/qn", `TARGETDIR=${targetDir}`], "extract Windows .msi");
-  const msiFiles = await listFiles(targetDir);
-  const msiSidecar = requireOne(msiFiles, /trajectory-client.*\.exe$/i, "trajectory-client inside .msi");
-  const msiLauncher = requireOne(msiFiles, /(?:Trajectory|trajectory-desktop)\.exe$/i, "Trajectory app inside .msi");
-  runChecked(msiSidecar, ["--help"], "Windows MSI sidecar --help");
+  const portable = requireOne(
+    files,
+    new RegExp(`Trajectory_${escapeRegex(version)}_x64_portable\\.zip$`),
+    "Windows portable zip",
+  );
+  const targetDir = path.join(artifactDir, "windows-portable-extract");
+  runChecked(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      `Expand-Archive -LiteralPath '${escapePowerShell(portable)}' -DestinationPath '${escapePowerShell(targetDir)}' -Force`,
+    ],
+    "extract Windows portable zip",
+  );
+  const portableFiles = await listFiles(targetDir);
+  const portableSidecar = requireOne(portableFiles, /trajectory-client.*\.exe$/i, "trajectory-client inside Windows portable zip");
+  const portableLauncher = requireOne(portableFiles, /(?:Trajectory|trajectory-desktop)\.exe$/i, "Trajectory app inside Windows portable zip");
+  runChecked(portableSidecar, ["--help"], "Windows portable sidecar --help");
 
   const sidecar = path.join(tauriDir, "bin", "trajectory-client-x86_64-pc-windows-msvc.exe");
   requireExecutable(sidecar, "Windows staged trajectory-client sidecar");
   runChecked(sidecar, ["--help"], "Windows staged sidecar --help");
-  if (commandExists("7z")) {
-    runChecked("7z", ["t", setup], "test Windows setup archive");
-    const setupExtract = path.join(artifactDir, "setup-extract");
-    await mkdir(setupExtract, { recursive: true });
-    runChecked("7z", ["x", "-y", `-o${setupExtract}`, setup], "extract Windows setup archive");
-    const setupFiles = await expandWindowsSetupPayload(setupExtract);
-    const setupSidecar = requireOne(setupFiles, /trajectory-client.*\.exe$/i, "trajectory-client inside Windows setup");
-    const setupLauncher = requireOne(setupFiles, /(?:Trajectory|trajectory-desktop)\.exe$/i, "Trajectory app inside Windows setup");
-    runChecked(setupSidecar, ["--help"], "Windows setup sidecar --help");
-    await assertLaunches(setupLauncher, [], "Windows setup payload launch smoke");
-  } else if (process.env.CI) {
-    throw new Error("7z is required for CI Windows setup package smoke");
-  } else {
-    manifest.push("Windows setup archive test=skipped locally because 7z is unavailable");
-  }
-
-  manifest.push(`msi=${relative(msi)}`, `setup=${relative(setup)}`);
-  if (process.env.CI) {
-    runChecked("msiexec.exe", ["/i", msi, "/qn", "/norestart"], "install Windows .msi", {
-      timeoutMs: 180_000,
-    });
-    try {
-      const installedLaunchers = await findInstalledWindowsLaunchers();
-      for (const installedLauncher of installedLaunchers) {
-        await assertLaunches(
-          installedLauncher,
-          [],
-          `Windows MSI installed app launch smoke ${path.basename(installedLauncher)}`,
-        );
-      }
-    } finally {
-      runChecked("msiexec.exe", ["/x", msi, "/qn", "/norestart"], "uninstall Windows .msi", {
-        timeoutMs: 180_000,
-      });
-    }
-  } else {
-    manifest.push("Windows MSI install launch=skipped outside CI");
-  }
-  await assertLaunches(msiLauncher, [], "Windows MSI app launch smoke");
-}
-
-async function expandWindowsSetupPayload(setupExtract) {
-  const setupFiles = await listFiles(setupExtract);
-  if (
-    setupFiles.some((file) => /trajectory-client.*\.exe$/i.test(file)) &&
-    setupFiles.some((file) => /(?:Trajectory|trajectory-desktop)\.exe$/i.test(file))
-  ) {
-    return setupFiles;
-  }
-
-  const nestedArchives = setupFiles.filter((file) => file.toLowerCase().endsWith(".7z"));
-  if (nestedArchives.length === 0) {
-    return setupFiles;
-  }
-
-  const payloadExtract = path.join(artifactDir, "setup-payload-extract");
-  await mkdir(payloadExtract, { recursive: true });
-  for (const archive of nestedArchives) {
-    runChecked("7z", ["x", "-y", `-o${payloadExtract}`, archive], `extract nested Windows setup payload ${path.basename(archive)}`);
-  }
-  return [...setupFiles, ...(await listFiles(payloadExtract))];
+  manifest.push(`portable=${relative(portable)}`);
+  await assertLaunches(portableLauncher, [], "Windows portable app launch smoke");
 }
 
 async function listFiles(root) {
@@ -372,36 +326,6 @@ function rpmPackageField(rpm, field) {
   });
   writeCommandLog(`read Linux rpm ${field}`, result);
   return result.status === 0 ? result.stdout.trim() : "";
-}
-
-async function findInstalledWindowsLaunchers() {
-  const roots = [
-    process.env.ProgramFiles,
-    process.env["ProgramFiles(x86)"],
-    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Programs"),
-  ].filter(Boolean);
-  const candidates = [];
-  for (const root of roots) {
-    for (const dirname of ["Trajectory", "trajectory", "Trajectory Desktop", "trajectory-desktop"]) {
-      const installRoot = path.join(root, dirname);
-      if (!existsSync(installRoot)) continue;
-      candidates.push(
-        ...(await listFiles(installRoot)).filter((file) =>
-          /(?:Trajectory|trajectory-desktop)\.exe$/i.test(file),
-        ),
-      );
-    }
-  }
-  const launchers = [...new Set(candidates)]
-    .filter((file) => !/trajectory-client/i.test(path.basename(file)))
-    .sort((left, right) => left.localeCompare(right));
-  if (launchers.length === 0) {
-    throw new Error("Windows installed app launcher: expected at least one match, found 0");
-  }
-  for (const launcher of launchers) {
-    requireExecutable(launcher, "Windows installed MSI launcher");
-  }
-  return launchers;
 }
 
 async function assertLaunchesMacApp(appBundle, label, extraEnv = {}) {
@@ -776,6 +700,10 @@ function numberEnv(name) {
 
 function binaryName(base) {
   return process.platform === "win32" ? `${base}.exe` : base;
+}
+
+function escapePowerShell(value) {
+  return value.replaceAll("'", "''");
 }
 
 async function pickUdpPort() {

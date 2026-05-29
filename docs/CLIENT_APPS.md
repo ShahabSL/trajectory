@@ -101,7 +101,7 @@ Desktop proxy MVP:
 - desktop browser-preview smoke tests that render Status/Settings, select
   Frontier, and upload screenshots
 - desktop packaged smoke tests that inspect installable artifacts, launch the
-  real Tauri bundle/AppImage/MSI-extracted app where the platform allows it, and
+  real Tauri bundle/AppImage/Windows portable ZIP app where the platform allows it, and
   require packaged backend setup, webview page-load, frontend IPC, and backend
   state readiness markers
 - OS build matrix: Windows, macOS, Linux

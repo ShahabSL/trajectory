@@ -36,12 +36,11 @@ class TrajectoryProxyService : Service() {
                         line,
                     )
                 },
-            ) {
+            ) { exitCode ->
                 if (!requestedStop) {
-                    RuntimeStatusCenter.markFailed(
+                    RuntimeStatusCenter.markSidecarExited(
                         RuntimeMode.PROXY,
-                        "sidecar",
-                        "trajectory-client exited",
+                        "trajectory-client exited${exitCode?.let { " with code $it" } ?: ""}",
                     )
                 }
                 stopSelf()
@@ -80,18 +79,26 @@ class TrajectoryProxyService : Service() {
             return
         }
         if (!runtime.start(profile)) {
-            RuntimeStatusCenter.markFailed(RuntimeMode.PROXY, "sidecar", "failed to start trajectory-client")
+            RuntimeStatusCenter.markFailed(
+                RuntimeMode.PROXY,
+                "sidecar",
+                runtime.lastStartFailure() ?: "failed to start trajectory-client",
+            )
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
         }
         if (!waitForPort(profile.socksPort, 10_000)) {
-            RuntimeStatusCenter.markFailed(RuntimeMode.PROXY, "SOCKS listener", "port ${profile.socksPort} did not open")
+            if (!RuntimeStatusCenter.isFailed(RuntimeMode.PROXY)) {
+                RuntimeStatusCenter.markFailed(RuntimeMode.PROXY, "SOCKS listener", "port ${profile.socksPort} did not open")
+            }
             stopRuntime(resetStatus = false)
             return
         }
         if (!waitForPort(profile.httpPort, 10_000)) {
-            RuntimeStatusCenter.markFailed(RuntimeMode.PROXY, "HTTP listener", "port ${profile.httpPort} did not open")
+            if (!RuntimeStatusCenter.isFailed(RuntimeMode.PROXY)) {
+                RuntimeStatusCenter.markFailed(RuntimeMode.PROXY, "HTTP listener", "port ${profile.httpPort} did not open")
+            }
             stopRuntime(resetStatus = false)
             return
         }
@@ -130,6 +137,7 @@ class TrajectoryProxyService : Service() {
     private fun waitForPort(port: Int, timeoutMs: Long): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
+            if (RuntimeStatusCenter.isFailed(RuntimeMode.PROXY)) return false
             if (RuntimeStatusCenter.isPortOpen(port)) return true
             try {
                 Thread.sleep(100)

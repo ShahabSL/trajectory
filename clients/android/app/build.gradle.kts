@@ -13,6 +13,12 @@ val androidTargets = listOf(
     Triple("aarch64-linux-android", "arm64-v8a", "aarch64-linux-android24-clang"),
     Triple("x86_64-linux-android", "x86_64", "x86_64-linux-android24-clang"),
 )
+val androidRustFlags = listOf(
+    "-C",
+    "link-arg=-Wl,-z,max-page-size=16384",
+    "-C",
+    "link-arg=-Wl,-z,common-page-size=16384",
+).joinToString(" ")
 val releaseSigningConfigName = "trajectoryRelease"
 val releaseKeystoreFile = providers.environmentVariable("TRAJECTORY_ANDROID_KEYSTORE_FILE").orNull
 val releaseKeystorePassword = providers.environmentVariable("TRAJECTORY_ANDROID_KEYSTORE_PASSWORD").orNull
@@ -110,6 +116,7 @@ val buildTrajectorySidecar = tasks.register("buildTrajectorySidecar") {
                 environment("ANDROID_SDK_ROOT", androidSdkDir().absolutePath)
                 environment("ANDROID_NDK_HOME", ndkDir.absolutePath)
                 environment("CARGO_TARGET_${targetEnv}_LINKER", clang.absolutePath)
+                environment("CARGO_TARGET_${targetEnv}_RUSTFLAGS", androidRustFlags)
                 environment("CC_${target.replace('-', '_')}", clang.absolutePath)
                 environment("AR_${target.replace('-', '_')}", llvmAr.absolutePath)
             }
@@ -128,6 +135,7 @@ val buildTrajectorySidecar = tasks.register("buildTrajectorySidecar") {
                 environment("ANDROID_SDK_ROOT", androidSdkDir().absolutePath)
                 environment("ANDROID_NDK_HOME", ndkDir.absolutePath)
                 environment("CARGO_TARGET_${targetEnv}_LINKER", clang.absolutePath)
+                environment("CARGO_TARGET_${targetEnv}_RUSTFLAGS", androidRustFlags)
                 environment("CC_${target.replace('-', '_')}", clang.absolutePath)
                 environment("AR_${target.replace('-', '_')}", llvmAr.absolutePath)
             }
@@ -149,8 +157,8 @@ android {
         applicationId = "app.trajectory.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 44
-        versionName = "0.1.44"
+        versionCode = 45
+        versionName = "0.1.45"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -205,7 +213,7 @@ android {
 }
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2025.01.00")
+    val composeBom = platform("androidx.compose:compose-bom:2026.05.00")
 
     implementation(composeBom)
     implementation("androidx.activity:activity-compose:1.10.1")
@@ -215,6 +223,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.graphics:graphics-path:1.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
 

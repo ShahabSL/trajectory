@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 apk="${1:?usage: validate_android_release_apk.sh <apk> <release-tag> [artifact-dir]}"
 release_tag="${2:?usage: validate_android_release_apk.sh <apk> <release-tag> [artifact-dir]}"
 artifact_dir="${3:-${RUNNER_TEMP:-/tmp}/trajectory-android-release-validation}"
@@ -79,5 +80,7 @@ with zipfile.ZipFile(apk) as archive:
 
 report.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
+
+"$script_dir/ci_android_apk_package_smoke.sh" "$apk" "$artifact_dir/package-smoke"
 
 printf 'validated Android release APK %s for %s\n' "$apk" "$release_tag" > "$artifact_dir/summary.txt"

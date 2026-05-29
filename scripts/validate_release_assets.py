@@ -105,8 +105,7 @@ def main() -> None:
     expected_assets.extend(require(files, rf"Trajectory_{re.escape(args.release_tag)}_x86_64-apple-darwin\.app\.tar\.gz", "macOS Intel app bundle archive", failures))
     expected_assets.extend(require(files, rf"Trajectory_{re.escape(args.release_tag)}_aarch64-apple-darwin\.app\.tar\.gz", "macOS Apple Silicon app bundle archive", failures))
     expected_assets.extend(optional(files, rf"Trajectory_?{version}.*\.dmg", "macOS desktop .dmg", failures, max_count=2))
-    expected_assets.extend(require(files, rf"Trajectory_?{version}.*\.msi", "Windows desktop .msi", failures))
-    expected_assets.extend(require(files, rf"Trajectory_?{version}.*\.exe", "Windows desktop setup .exe", failures))
+    expected_assets.extend(require(files, rf"Trajectory_{version}_x64_portable\.zip", "Windows desktop portable zip", failures))
     expected_assets.extend(require(files, rf"trajectory-{tag}-android\.apk", "Android release APK", failures))
     merged_manifests = require(files, rf"{tag}-SHA256SUMS\.txt", "merged checksum manifest", failures)
     expected_assets.extend(merged_manifests)
@@ -133,6 +132,17 @@ def main() -> None:
         failures.append(
             "found unexpected publishable assets: " + ", ".join(sorted(unexpected_publishable))
         )
+    forbidden_windows_installers = [
+        path.name
+        for path in files
+        if path.name.endswith(".msi")
+        or re.fullmatch(r"Trajectory_?.*\.exe", path.name)
+    ]
+    if forbidden_windows_installers:
+        failures.append(
+            "Windows desktop release must be portable-only; found installer assets: "
+            + ", ".join(sorted(forbidden_windows_installers))
+        )
 
     if merged_manifests:
         verify_merged_checksums(merged_manifests[0], expected_assets, failures)
@@ -149,12 +159,11 @@ def is_release_asset(name: str) -> bool:
     patterns = [
         "trajectory-v*.tar.gz",
         "trajectory-v*.zip",
+        "Trajectory_*_portable.zip",
         "*SHA256SUMS.txt",
         "*.deb",
         "*.rpm",
         "*.AppImage",
-        "*.msi",
-        "*.exe",
         "*.dmg",
         "*.app.tar.gz",
         "*.apk",
@@ -232,7 +241,24 @@ def verify_asset_structures(
     for asset in assets:
         name = asset.name
         try:
-            if name.endswith(".zip"):
+            if re.fullmatch(rf"Trajectory_{re.escape(version)}_x64_portable\.zip", name):
+                with zipfile.ZipFile(asset) as bundle:
+                    bad = bundle.testzip()
+                    if bad:
+                        failures.append(f"{name}: corrupt zip member {bad}")
+                    members = bundle.namelist()
+                    require_archive_member(members, "trajectory-client", name, failures)
+                    require_archive_member_predicate(
+                        members,
+                        lambda member: (
+                            Path(member).name.lower() in {"trajectory.exe", "trajectory-desktop.exe"}
+                        ),
+                        "Windows desktop launcher executable",
+                        name,
+                        failures,
+                    )
+                    require_archive_member(members, "README-portable.txt", name, failures)
+            elif name.endswith(".zip"):
                 with zipfile.ZipFile(asset) as bundle:
                     bad = bundle.testzip()
                     if bad:
@@ -286,12 +312,6 @@ def verify_asset_structures(
                 require_magic(asset, b"\x7fELF", name, "AppImage ELF header", failures)
                 if version not in name:
                     failures.append(f"{name}: AppImage filename does not include version {version}")
-            elif name.endswith(".msi"):
-                require_magic(asset, b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", name, "MSI OLE header", failures)
-                run_required(["7z", "t", str(asset)], f"{name} 7z integrity", failures)
-            elif name.endswith(".exe"):
-                require_magic(asset, b"MZ", name, "Windows executable header", failures)
-                run_required(["7z", "t", str(asset)], f"{name} setup archive integrity", failures)
             elif name.endswith(".dmg"):
                 tail = asset.read_bytes()[-512:]
                 if b"koly" not in tail:

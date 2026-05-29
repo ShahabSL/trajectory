@@ -176,7 +176,16 @@ jobs:
         working-directory: clients/desktop
 
       - name: Build Tauri desktop bundle
+        if: runner.os != 'Windows'
         run: npm run tauri:build
+        working-directory: clients/desktop
+
+      - name: Build Tauri Windows portable app
+        if: runner.os == 'Windows'
+        run: |
+          npm run sidecar:stage
+          npm run tauri -- build --no-bundle
+          npm run package:windows-portable
         working-directory: clients/desktop
 
       - name: Archive macOS app bundle
@@ -220,7 +229,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ci-desktop-${{ matrix.os }}
-          path: clients/desktop/src-tauri/target/release/bundle/**/*
+          path: |
+            clients/desktop/src-tauri/target/release/bundle/**/*
+            !clients/desktop/src-tauri/target/release/bundle/**/*.msi
+            !clients/desktop/src-tauri/target/release/bundle/**/*.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -429,6 +441,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Install Android package validation tools
+        run: sdkmanager "build-tools;35.0.0" "ndk;29.0.14206865"
 
       - name: Download signed Android release APK
         uses: actions/download-artifact@v5

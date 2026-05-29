@@ -229,7 +229,16 @@ jobs:
           retention-days: 14
 
       - name: Build Tauri desktop bundle
+        if: runner.os != 'Windows'
         run: npm run tauri:build
+        working-directory: clients/desktop
+
+      - name: Build Tauri Windows portable app
+        if: runner.os == 'Windows'
+        run: |
+          npm run sidecar:stage
+          npm run tauri -- build --no-bundle
+          npm run package:windows-portable
         working-directory: clients/desktop
 
       - name: Archive macOS app bundle
@@ -273,7 +282,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.target }}
-          path: clients/desktop/src-tauri/target/release/bundle/**/*
+          path: |
+            clients/desktop/src-tauri/target/release/bundle/**/*
+            !clients/desktop/src-tauri/target/release/bundle/**/*.msi
+            !clients/desktop/src-tauri/target/release/bundle/**/*.exe
           if-no-files-found: error
           retention-days: 14
 
@@ -490,6 +502,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Install Android package validation tools
+        run: sdkmanager "build-tools;35.0.0" "ndk;29.0.14206865"
 
       - name: Download signed Android release APK
         uses: actions/download-artifact@v5
@@ -729,7 +744,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y cpio p7zip-full rpm2cpio
+          sudo apt-get install -y binutils cpio p7zip-full rpm2cpio
 
       - name: Merge checksum manifests
         shell: bash
@@ -778,12 +793,11 @@ jobs:
               ! -path '*/.*' \
               \( -name 'trajectory-v*.tar.gz' \
                  -o -name 'trajectory-v*.zip' \
+                 -o -name 'Trajectory_*_portable.zip' \
                  -o -name '*SHA256SUMS.txt' \
                  -o -name '*.deb' \
                  -o -name '*.rpm' \
                  -o -name '*.AppImage' \
-                 -o -name '*.msi' \
-                 -o -name '*.exe' \
                  -o -name '*.dmg' \
                  -o -name '*.app.tar.gz' \
                  -o -name '*.apk' \) \
