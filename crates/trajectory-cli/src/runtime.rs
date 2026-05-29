@@ -2322,7 +2322,7 @@ fn fit_admission_probe_packet(config: &ClientConfig, packet: &mut Packet) -> Res
     let mut low = 0usize;
     let mut high = original_padding;
     while low < high {
-        let mid = (low + high + 1) / 2;
+        let mid = (low + high).div_ceil(2);
         resize_path_response_padding(packet, frame_index, mid);
         if client_request_fits(config, packet, false) {
             low = mid;
