@@ -86,7 +86,7 @@ class RuntimeStatusCenterTest {
     }
 
     @Test
-    fun connectedVpnStillDegradesOnResolverFailure() {
+    fun connectedVpnDoesNotDegradeOnSingleResolverTxtMiss() {
         RuntimeStatusCenter.reset()
         RuntimeStatusCenter.markVpnConnectedForTest()
         RuntimeStatusCenter.observeRuntimeLine(
@@ -95,7 +95,7 @@ class RuntimeStatusCenterTest {
             "resolver 1.1.1.1:53 packet 42 failed: DNS response did not contain TXT answer",
         )
 
-        assertEquals(RuntimePhase.DEGRADED, RuntimeStatusCenter.snapshot().phase)
+        assertEquals(RuntimePhase.VPN_CONNECTED, RuntimeStatusCenter.snapshot().phase)
     }
 
     @Test
@@ -109,6 +109,30 @@ class RuntimeStatusCenterTest {
         )
 
         assertEquals(RuntimePhase.PROXY_CONNECTED, RuntimeStatusCenter.snapshot().phase)
+    }
+
+    @Test
+    fun connectedProxyDoesNotDegradeOnResolverTcpEof() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.markProxyDataPathReady(profile(), "http://127.0.0.1:8080/smoke")
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.PROXY,
+            profile(),
+            "resolver 8.8.4.4:53 persistent TCP connection failed: read DNS-over-TCP response: early eof",
+        )
+
+        assertEquals(RuntimePhase.PROXY_CONNECTED, RuntimeStatusCenter.snapshot().phase)
+    }
+
+    @Test
+    fun proxyDataPathProofDoesNotFakeResolverAdmission() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.markProxyDataPathReady(profile(), "http://127.0.0.1:8080/smoke")
+
+        val snapshot = RuntimeStatusCenter.snapshot()
+        assertEquals(RuntimePhase.PROXY_CONNECTED, snapshot.phase)
+        assertEquals(0, snapshot.admittedResolvers)
+        assertEquals(1, snapshot.candidateResolvers)
     }
 
     @Test

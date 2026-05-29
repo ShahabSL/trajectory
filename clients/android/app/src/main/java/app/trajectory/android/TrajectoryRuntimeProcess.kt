@@ -34,9 +34,15 @@ class TrajectoryRuntimeProcess(
         if (!binary.canExecute()) {
             return failStart("native trajectory-client sidecar is not executable at ${binary.absolutePath}")
         }
-        val builder = ProcessBuilder(buildArgs(binary.absolutePath, profile))
+        val admissionReport = File(
+            context.cacheDir,
+            "${logTag.replace(Regex("[^A-Za-z0-9_.-]"), "_")}-admission.jsonl",
+        )
+        admissionReport.delete()
+        val builder = ProcessBuilder(buildArgs(binary.absolutePath, profile, admissionReport.absolutePath))
             .redirectErrorStream(true)
         builder.environment()["TRAJECTORY_ACCESS_KEY"] = profile.accessKey
+        builder.environment()["TRAJECTORY_ADMISSION_DIAG"] = "1"
         val child = try {
             builder.start()
         } catch (error: IOException) {
@@ -108,7 +114,11 @@ class TrajectoryRuntimeProcess(
     }
 
     companion object {
-        fun buildArgs(binaryPath: String, profile: ClientProfile): List<String> {
+        fun buildArgs(
+            binaryPath: String,
+            profile: ClientProfile,
+            admissionReportPath: String? = null,
+        ): List<String> {
             val args = mutableListOf(
                 binaryPath,
                 "--listen",
@@ -141,6 +151,10 @@ class TrajectoryRuntimeProcess(
             profile.resolverCohortSize?.let { size ->
                 args += "--resolver-cohort-size"
                 args += size.toString()
+            }
+            if (!admissionReportPath.isNullOrBlank()) {
+                args += "--admission-report"
+                args += admissionReportPath
             }
             return args
         }

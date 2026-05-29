@@ -4167,6 +4167,39 @@ async fn send_dns_packet_inner(
                     transport: DnsTransportOutcome::TcpFallbackAfterTruncation,
                 });
             }
+            Err(error) if config.allow_udp_to_tcp_fallback() => {
+                if let Some(diag) = &runtime.diag {
+                    diag.tcp_fallbacks.fetch_add(1, Ordering::Relaxed);
+                }
+                let udp_response_len = response.len();
+                eprintln!(
+                    "resolver {resolver} returned unusable UDP DNS response ({error:#}); retrying over TCP"
+                );
+                match runtime
+                    .tcp_fallback_pool
+                    .query(
+                        resolver,
+                        &query,
+                        options.query_timeout.max(PATH_RTO_MIN_TCP),
+                    )
+                    .await
+                {
+                    Ok(tcp_response) => {
+                        return Ok(DnsPacketOutcome {
+                            packet: open_dns_response(&config.access_key, &tcp_response)?,
+                            response_wire_bytes: tcp_response.len().max(udp_response_len),
+                            truncated: false,
+                            transport: DnsTransportOutcome::TcpAfterUdpFailure,
+                        });
+                    }
+                    Err(tcp_error) => {
+                        runtime.tcp_fallback_pool.remove_sender(resolver).await;
+                        return Err(tcp_error.context(format!(
+                            "UDP DNS response was unusable ({error:#}); DNS-over-TCP fallback failed"
+                        )));
+                    }
+                }
+            }
             Err(error) => return Err(error),
         }
     };

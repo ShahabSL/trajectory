@@ -7,7 +7,11 @@ import org.junit.Test
 class TrajectoryRuntimeProcessTest {
     @Test
     fun sidecarArgsKeepSecretsOutOfCommandLine() {
-        val args = TrajectoryRuntimeProcess.buildArgs("/app/lib/libtrajectory_client.so", profile())
+        val args = TrajectoryRuntimeProcess.buildArgs(
+            "/app/lib/libtrajectory_client.so",
+            profile(),
+            "/data/user/0/app.trajectory.android/cache/admission.jsonl",
+        )
 
         assertEquals("/app/lib/libtrajectory_client.so", args.first())
         assertTrue(args.containsAll(listOf("--listen", "127.0.0.1:0")))
@@ -18,6 +22,7 @@ class TrajectoryRuntimeProcessTest {
         assertTrue(args.containsAll(listOf("--resolver-transport", "tcp")))
         assertTrue(args.containsAll(listOf("--mode", "secure")))
         assertTrue(args.containsAll(listOf("--resolver-cohort-size", "8")))
+        assertTrue(args.containsAll(listOf("--admission-report", "/data/user/0/app.trajectory.android/cache/admission.jsonl")))
         assertTrue("access key must only be passed through env", args.none { it.contains("traj1_") })
     }
 

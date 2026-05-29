@@ -13,7 +13,7 @@ body:
     attributes:
       label: Version
       description: Trajectory version, tag, commit, or release asset name.
-      placeholder: v0.1.48
+      placeholder: v0.1.49
     validations:
       required: true
   - type: dropdown

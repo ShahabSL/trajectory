@@ -88,14 +88,15 @@ class TrajectoryProxyService : Service() {
             stopSelf()
             return
         }
-        if (!waitForPort(profile.socksPort, 10_000)) {
+        val listenerTimeoutMs = listenerStartupTimeoutMs(profile)
+        if (!waitForPort(profile.socksPort, listenerTimeoutMs)) {
             if (!RuntimeStatusCenter.isFailed(RuntimeMode.PROXY)) {
                 RuntimeStatusCenter.markFailed(RuntimeMode.PROXY, "SOCKS listener", "port ${profile.socksPort} did not open")
             }
             stopRuntime(resetStatus = false)
             return
         }
-        if (!waitForPort(profile.httpPort, 10_000)) {
+        if (!waitForPort(profile.httpPort, listenerTimeoutMs)) {
             if (!RuntimeStatusCenter.isFailed(RuntimeMode.PROXY)) {
                 RuntimeStatusCenter.markFailed(RuntimeMode.PROXY, "HTTP listener", "port ${profile.httpPort} did not open")
             }
@@ -117,6 +118,16 @@ class TrajectoryProxyService : Service() {
                 notification("Proxy listeners ready; HTTP data-path proof is pending"),
             )
         }
+    }
+
+    private fun listenerStartupTimeoutMs(profile: ClientProfile): Long {
+        val resolverCount = profile.resolvers.size.coerceAtLeast(1)
+        val perResolverBudgetMs = if (profile.resolverTransport == "tcp" || profile.resolverSocksProxy.isNotBlank()) {
+            20_000L
+        } else {
+            12_000L
+        }
+        return (20_000L + resolverCount * perResolverBudgetMs).coerceIn(45_000L, 180_000L)
     }
 
     private fun stopRuntime(resetStatus: Boolean) {

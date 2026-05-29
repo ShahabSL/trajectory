@@ -183,7 +183,7 @@ object RuntimeStatusCenter {
             detail = "HTTP proxy data path proved through ${probeUrl.take(96)}.",
             socksReady = true,
             httpReady = true,
-            admittedResolvers = snapshot().admittedResolvers.coerceAtLeast(1),
+            admittedResolvers = snapshot().admittedResolvers,
             candidateResolvers = snapshot().candidateResolvers.coerceAtLeast(profile.resolvers.size),
             lastError = null,
         )
@@ -336,15 +336,13 @@ object RuntimeStatusCenter {
     }
 
     private fun isTransientResolverPacketFailure(lowercaseLine: String): Boolean {
-        val isResolverPacket =
-            lowercaseLine.contains("resolver ") &&
-                lowercaseLine.contains(" packet ") &&
-                lowercaseLine.contains(" failed:")
-        if (!isResolverPacket) return false
+        val isResolverEvent = lowercaseLine.contains("resolver ")
+        if (!isResolverEvent) return false
 
         return lowercaseLine.contains("timed out") ||
             lowercaseLine.contains("read failed") ||
             lowercaseLine.contains("write failed") ||
+            lowercaseLine.contains("did not contain txt answer") ||
             lowercaseLine.contains("early eof") ||
             lowercaseLine.contains("broken pipe") ||
             lowercaseLine.contains("connection reset by peer")

@@ -144,8 +144,7 @@ class MainActivity : ComponentActivity() {
             ?.let { ConnectivityProbeConfig.saveHttpUrl(this, it) }
 
         val resolvers = intent.getStringExtra("trajectory_smoke_resolvers")
-            ?.lineSequence()
-            ?.flatMap { it.split(',').asSequence() }
+            ?.split(Regex("[,\\s]+"))
             ?.map { it.trim() }
             ?.filter { it.isNotEmpty() }
             ?.toList()

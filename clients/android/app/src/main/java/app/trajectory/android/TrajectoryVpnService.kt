@@ -97,7 +97,7 @@ class TrajectoryVpnService : VpnService() {
             stopRuntime(resetStatus = false)
             return
         }
-        if (!waitForPort(profile.socksPort, 8_000)) {
+        if (!waitForPort(profile.socksPort, listenerStartupTimeoutMs(profile))) {
             if (!RuntimeStatusCenter.isFailed(RuntimeMode.VPN)) {
                 android.util.Log.e("TrajectoryVpn", "local Trajectory SOCKS listener did not become ready")
                 RuntimeStatusCenter.markFailed(
@@ -159,6 +159,16 @@ class TrajectoryVpnService : VpnService() {
             }
             stopSelf()
         }
+    }
+
+    private fun listenerStartupTimeoutMs(profile: ClientProfile): Long {
+        val resolverCount = profile.resolvers.size.coerceAtLeast(1)
+        val perResolverBudgetMs = if (profile.resolverTransport == "tcp" || profile.resolverSocksProxy.isNotBlank()) {
+            20_000L
+        } else {
+            12_000L
+        }
+        return (20_000L + resolverCount * perResolverBudgetMs).coerceIn(45_000L, 180_000L)
     }
 
     private fun stopRuntime(resetStatus: Boolean) {

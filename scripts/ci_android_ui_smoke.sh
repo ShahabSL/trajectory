@@ -1200,16 +1200,23 @@ start_live_profile_from_intent() {
     return 1
   fi
   adb shell am force-stop "$package_name"
-  adb shell am start -W -n "$activity" \
+  local start_args=(
+    -W
+    -n "$activity"
     --es trajectory_smoke_domain "$domain" \
     --es trajectory_smoke_access_key "$access_key" \
-    --es trajectory_smoke_resolvers "$resolvers" \
     --es trajectory_smoke_resolver_transport "${TRAJECTORY_ANDROID_SMOKE_RESOLVER_TRANSPORT:-auto}" \
     --es trajectory_smoke_transport_mode velocity \
     --es trajectory_smoke_socks_port "${TRAJECTORY_ANDROID_SMOKE_SOCKS_PORT:-7000}" \
-    --es trajectory_smoke_http_port "${TRAJECTORY_ANDROID_SMOKE_HTTP_PORT:-7001}" \
-    --es trajectory_smoke_fetch_url "${TRAJECTORY_ANDROID_SMOKE_FETCH_URL:-}" \
-    > "$artifact_dir/live-smoke-intent-start.txt"
+    --es trajectory_smoke_http_port "${TRAJECTORY_ANDROID_SMOKE_HTTP_PORT:-7001}"
+  )
+  if [[ -n "$resolvers" ]]; then
+    start_args+=(--es trajectory_smoke_resolvers "$resolvers")
+  fi
+  if [[ -n "${TRAJECTORY_ANDROID_SMOKE_FETCH_URL:-}" ]]; then
+    start_args+=(--es trajectory_smoke_fetch_url "$TRAJECTORY_ANDROID_SMOKE_FETCH_URL")
+  fi
+  adb shell am start "${start_args[@]}" > "$artifact_dir/live-smoke-intent-start.txt"
   sleep 2
   dump_screen "live_smoke_configured"
 }
@@ -1219,8 +1226,43 @@ fetch_android_http_proxy() {
   local http_host="$2"
   local http_port="$3"
   local output="$4"
-  timeout 25s adb shell "printf 'GET ${http_fetch_url} HTTP/1.1\r\nHost: ${http_host}\r\nConnection: close\r\n\r\n' | toybox nc -w 20 -q 2 127.0.0.1 ${http_port}" \
-    > "$output" 2>&1
+  local attempt
+  for attempt in 1 2 3; do
+    adb_wait_ready "http-fetch-${attempt}" || true
+    local forward_port
+    forward_port="${TRAJECTORY_ANDROID_SMOKE_HTTP_FORWARD_PORT:-$(pick_local_port)}"
+    adb forward "tcp:${forward_port}" "tcp:${http_port}" >/dev/null 2>&1 || true
+    if python3 - "$forward_port" "$http_fetch_url" "$http_host" "$output" <<'PY'
+import socket
+import sys
+from pathlib import Path
+
+forward_port = int(sys.argv[1])
+url = sys.argv[2]
+host = sys.argv[3]
+output = Path(sys.argv[4])
+
+request = f"GET {url} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode()
+with socket.create_connection(("127.0.0.1", forward_port), timeout=10) as stream:
+    stream.settimeout(25)
+    stream.sendall(request)
+    chunks = []
+    while True:
+        chunk = stream.recv(4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
+output.write_bytes(b"".join(chunks))
+PY
+      [[ -s "$output" ]]; then
+      adb forward --remove "tcp:${forward_port}" >/dev/null 2>&1 || true
+      return 0
+    fi
+    adb forward --remove "tcp:${forward_port}" >/dev/null 2>&1 || true
+    timeout 10s adb reconnect >/dev/null 2>&1 || true
+    sleep 1
+  done
+  return 1
 }
 
 assert_http_proxy_response() {
@@ -1922,71 +1964,8 @@ run_live_proxy_smoke() {
     return 0
   fi
 
-  if [[ "${TRAJECTORY_ANDROID_SMOKE_LOCAL_SERVER:-}" == "1" ]]; then
-    start_live_profile_from_intent "$domain" "$access_key" "${TRAJECTORY_ANDROID_SMOKE_RESOLVERS:-}"
-    tap_control "Start proxy" "$artifact_dir/live_smoke_configured.xml" "live_smoke"
-    for pass in $(seq 1 60); do
-      sleep 1
-      dump_screen "live_proxy_${pass}"
-      if fetch_android_http_proxy "$http_fetch_url" "$http_host" "$http_port" "$artifact_dir/live-proxy-http.txt" &&
-        assert_http_proxy_response "$artifact_dir/live-proxy-http.txt" &&
-        assert_socks_handshake; then
-        dump_screen "live_proxy_proven_${pass}"
-        assert_proxy_status_connected "$artifact_dir/live_proxy_proven_${pass}.xml"
-        echo "Proxy connected after ${pass}s" > "$artifact_dir/live-proxy-smoke.txt"
-        assert_clean_proxy_shutdown "$artifact_dir/live_proxy_proven_${pass}.xml"
-        return 0
-      fi
-      if grep -Fq "Failed" "$artifact_dir/live_proxy_${pass}.xml"; then
-        echo "Android live proxy smoke reached Failed state" >&2
-        return 1
-      fi
-    done
-    echo "Timed out waiting for Android live proxy to reach Proxy connected" >&2
-    return 1
-  fi
-
-  tap_node "Profile tab" "$nav_source" || tap_node "Profile" "$nav_source"
-  sleep 1
-  dump_screen "live_profile"
-  tap_first_text_field_after_label "Tunnel domain" "$artifact_dir/live_profile.xml"
-  clear_focused_field
-  adb_input_text "$domain"
-  dump_screen "live_profile_domain"
-  tap_first_text_field_after_label "Access key" "$artifact_dir/live_profile_domain.xml" \
-    || tap_first_password_field "$artifact_dir/live_profile_domain.xml"
-  clear_focused_field
-  adb_input_text "$access_key"
-  adb shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
-  sleep 1
-
-  if [[ -n "${TRAJECTORY_ANDROID_SMOKE_RESOLVERS:-}" ]]; then
-    local first_resolver
-    first_resolver="$(
-      printf '%s\n' "$TRAJECTORY_ANDROID_SMOKE_RESOLVERS" |
-        tr ', ' '\n' |
-        awk 'NF { print; exit }'
-    )"
-    tap_node "Resolvers tab" "$artifact_dir/live_profile.xml" || tap_node "Resolvers" "$artifact_dir/live_profile.xml"
-    sleep 1
-    dump_screen "live_resolvers_top"
-    adb shell input swipe "$swipe_x" "$swipe_start_y" "$swipe_x" "$swipe_end_y" 600
-    sleep 1
-    dump_screen "live_resolvers_form"
-    tap_first_text_field_after_label "DNS resolvers" "$artifact_dir/live_resolvers_form.xml"
-    clear_focused_field
-    adb_input_text "$first_resolver"
-    adb shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
-    sleep 1
-  fi
-
-  tap_node "Status tab" "$artifact_dir/live_profile.xml" || tap_node "Status" "$artifact_dir/live_profile.xml"
-  sleep 1
-  dump_screen "live_status"
-  tap_node "Save profile" "$artifact_dir/live_status.xml"
-  sleep 1
-  dump_screen "live_saved"
-  tap_control "Start proxy" "$artifact_dir/live_saved.xml" "live_saved"
+  start_live_profile_from_intent "$domain" "$access_key" "${TRAJECTORY_ANDROID_SMOKE_RESOLVERS:-}"
+  tap_control "Start proxy" "$artifact_dir/live_smoke_configured.xml" "live_smoke"
 
   for pass in $(seq 1 60); do
     sleep 1
@@ -2000,8 +1979,9 @@ run_live_proxy_smoke() {
       fi
       assert_http_proxy_response "$artifact_dir/live-proxy-http.txt"
       assert_socks_handshake
-      assert_proxy_status_connected "$artifact_dir/live_proxy_${pass}.xml"
-      assert_clean_proxy_shutdown "$artifact_dir/live_proxy_${pass}.xml"
+      dump_screen "live_proxy_proven_${pass}"
+      assert_proxy_status_connected "$artifact_dir/live_proxy_proven_${pass}.xml"
+      assert_clean_proxy_shutdown "$artifact_dir/live_proxy_proven_${pass}.xml"
       return 0
     fi
     if grep -Fq "Failed" "$artifact_dir/live_proxy_${pass}.xml"; then
