@@ -343,7 +343,7 @@ jobs:
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install Android targets
         run: |
@@ -501,7 +501,7 @@ jobs:
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install Android package validation tools
         run: sdkmanager "build-tools;35.0.0" "ndk;29.0.14206865"
@@ -605,7 +605,7 @@ jobs:
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Download signed Android release APK
         uses: actions/download-artifact@v5
@@ -735,7 +735,7 @@ jobs:
           java-version: "17"
 
       - name: Set up Android SDK for publish validation
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install Android publish validation tools
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
