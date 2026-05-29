@@ -809,7 +809,29 @@ jobs:
             exit 1
           fi
 
+          declare -A expected_asset_names=()
+          for asset in "${assets[@]}"; do
+            expected_asset_names["$(basename "$asset")"]=1
+          done
+
+          is_managed_release_asset() {
+            local name="$1"
+            case "$name" in
+              trajectory-v*.tar.gz|trajectory-v*.zip|Trajectory_*_portable.zip|*SHA256SUMS.txt|*.deb|*.rpm|*.AppImage|*.dmg|*.app.tar.gz|*.apk|*.msi|Trajectory_*.exe)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            while IFS= read -r existing_asset; do
+              if [[ -z "${expected_asset_names[$existing_asset]:-}" ]] && is_managed_release_asset "$existing_asset"; then
+                gh release delete-asset "$RELEASE_TAG" "$existing_asset" --yes
+              fi
+            done < <(gh release view "$RELEASE_TAG" --json assets -q '.assets[].name')
             gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           else
             gh release create "$RELEASE_TAG" "${assets[@]}" \

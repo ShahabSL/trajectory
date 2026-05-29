@@ -5,6 +5,8 @@ clients/desktop/node_modules/
 clients/desktop/.tmp-playwright/
 clients/desktop/src-tauri/bin/trajectory-client-*
 clients/desktop/src-tauri/gen/
+clients/desktop/src-tauri/icons/android/
+clients/desktop/src-tauri/icons/ios/
 clients/desktop/src-tauri/target/
 .tooling/
 .secrets/
@@ -12,6 +14,7 @@ clients/android/.gradle/
 clients/android/local.properties
 clients/android/build/
 clients/android/app/build/
+clients/android/smokeprobe/build/
 clients/android/app/src/main/jniLibs/
 __pycache__/
 *.pyc

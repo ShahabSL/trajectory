@@ -79,12 +79,13 @@ jobs:
         run: python scripts/ci_smoke_release_bundles.py dist/ci
 
       - name: Upload CLI CI bundles
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: ci-cli-release-bundles-${{ matrix.target }}
           path: dist/ci/*
-          if-no-files-found: error
-          retention-days: 7
+          if-no-files-found: ignore
+          retention-days: 3
 
   desktop-client:
     runs-on: ${{ matrix.os }}
@@ -163,13 +164,13 @@ jobs:
         working-directory: clients/desktop
 
       - name: Upload desktop UI smoke artifacts
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: ci-desktop-ui-smoke-${{ matrix.os }}
           path: ${{ runner.temp }}/desktop-ui
-          if-no-files-found: error
-          retention-days: 7
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Check Tauri desktop backend
         run: npm run tauri:check
@@ -217,15 +218,16 @@ jobs:
         working-directory: clients/desktop
 
       - name: Upload desktop package smoke artifacts
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: ci-desktop-package-smoke-${{ matrix.os }}
           path: ${{ runner.temp }}/desktop-package
-          if-no-files-found: error
-          retention-days: 7
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Upload desktop CI bundles
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: ci-desktop-${{ matrix.os }}
@@ -233,8 +235,8 @@ jobs:
             clients/desktop/src-tauri/target/release/bundle/**/*
             !clients/desktop/src-tauri/target/release/bundle/**/*.msi
             !clients/desktop/src-tauri/target/release/bundle/**/*.exe
-          if-no-files-found: error
-          retention-days: 7
+          if-no-files-found: ignore
+          retention-days: 3
 
   android-client:
     runs-on: ubuntu-22.04
@@ -417,13 +419,13 @@ jobs:
             TRAJECTORY_ANDROID_SMOKE_PROBE_APK="$(find "$RUNNER_TEMP/android-smokeprobe-apk" -name '*.apk' -print -quit)" scripts/ci_android_ui_smoke.sh "$(find "$RUNNER_TEMP/${{ matrix.apk_dir }}" -name '*.apk' -print -quit)" "$RUNNER_TEMP/${{ matrix.smoke_dir }}"
 
       - name: Upload Android x86 UI smoke artifacts
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: ci-android-x86-ui-smoke-${{ matrix.name }}
           path: ${{ runner.temp }}/${{ matrix.smoke_dir }}
-          if-no-files-found: error
-          retention-days: 7
+          if-no-files-found: ignore
+          retention-days: 3
 
   android-arm64-runtime:
     name: android-arm64 package smoke
@@ -459,13 +461,13 @@ jobs:
             "$RUNNER_TEMP/android-arm64-package-smoke"
 
       - name: Upload Android ARM64 package smoke artifacts
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: ci-android-arm64-package-smoke
           path: ${{ runner.temp }}/android-arm64-package-smoke
-          if-no-files-found: error
-          retention-days: 7
+          if-no-files-found: ignore
+          retention-days: 3
 
   cross-platform-build:
     runs-on: ${{ matrix.os }}

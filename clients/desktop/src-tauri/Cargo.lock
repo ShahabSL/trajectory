@@ -3510,7 +3510,7 @@ dependencies = [
 
 [[package]]
 name = "trajectory-desktop"
-version = "0.1.47"
+version = "0.1.48"
 dependencies = [
  "keyring",
  "serde",

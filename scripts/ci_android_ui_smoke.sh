@@ -1183,7 +1183,10 @@ prepare_local_live_proxy_smoke() {
     export TRAJECTORY_ANDROID_SMOKE_FETCH_URL="http://${origin_target_host}:${origin_port}/trajectory-smoke.txt"
     export TRAJECTORY_ANDROID_SMOKE_EXPECT_BODY="$local_origin_marker"
   fi
-  echo "Android local live proxy smoke server ready on host DNS port ${dns_port}; device host ${device_host_ip}; resolver transport ${TRAJECTORY_ANDROID_SMOKE_RESOLVER_TRANSPORT:-auto}; origin target http://${origin_target_host}:${origin_port}/trajectory-smoke.txt" \
+  if [[ -z "${TRAJECTORY_ANDROID_SMOKE_VPN_FETCH_URL:-}" ]]; then
+    export TRAJECTORY_ANDROID_SMOKE_VPN_FETCH_URL="${TRAJECTORY_ANDROID_SMOKE_DEFAULT_VPN_FETCH_URL:-http://example.com/}"
+  fi
+  echo "Android local live proxy smoke server ready on host DNS port ${dns_port}; device host ${device_host_ip}; resolver transport ${TRAJECTORY_ANDROID_SMOKE_RESOLVER_TRANSPORT:-auto}; origin target http://${origin_target_host}:${origin_port}/trajectory-smoke.txt; vpn target ${TRAJECTORY_ANDROID_SMOKE_VPN_FETCH_URL}" \
     > "$artifact_dir/local-live-server-ready.txt"
 }
 

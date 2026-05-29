@@ -253,7 +253,7 @@ class TrajectoryVpnService : VpnService() {
         return Notification.Builder(this, channelId)
             .setContentTitle("Trajectory VPN")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setSmallIcon(R.drawable.ic_stat_trajectory)
             .setOngoing(true)
             .build()
     }

@@ -66,6 +66,9 @@ def main() -> None:
 
     checks = {
         "Cargo workspace": cargo_versions(),
+        "package.json": {
+            "trajectory": read_json("package.json")["version"],
+        },
         "clients/desktop/package.json": {
             "@trajectory/desktop": read_json("clients/desktop/package.json")["version"],
         },

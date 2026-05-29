@@ -84,6 +84,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -366,6 +367,23 @@ private fun TrajectoryAndroidApp(
         Scaffold(
             topBar = {
                 CenterAlignedTopAppBar(
+                    navigationIcon = {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .padding(start = 16.dp)
+                                .size(34.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(TrajectoryColors.Subtle),
+                        ) {
+                            Icon(
+                                painter = painterResource(id = R.drawable.ic_stat_trajectory),
+                                contentDescription = null,
+                                tint = TrajectoryColors.Ink,
+                                modifier = Modifier.size(21.dp),
+                            )
+                        }
+                    },
                     title = {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text("Trajectory", fontWeight = FontWeight.Bold)

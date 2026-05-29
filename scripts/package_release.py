@@ -100,6 +100,8 @@ Included support files:
 - deploy/install_server.sh
 - docs/SELF_HOSTING.md
 - docs/client-ui-prototype.html
+- assets/branding/
+- SECURITY.md and DISCLAIMER.md
 
 Quick start:
 1. Install the server with deploy/install_server.sh.
@@ -179,6 +181,11 @@ def write_bundle_notes(
 
 
 def copy_support_files(bundle_dir: Path) -> None:
+    assets_dir = bundle_dir / "assets" / "branding"
+    assets_dir.mkdir(parents=True)
+    for name in ["README.md", "trajectory-logo.png", "trajectory-mark.png", "trajectory-pixel-t.svg"]:
+        shutil.copy2(ROOT / "assets" / "branding" / name, assets_dir / name)
+
     deploy_dir = bundle_dir / "deploy"
     deploy_dir.mkdir()
     for name in [
@@ -223,6 +230,8 @@ def package_component(
         (bundle_dir / "README.txt").write_text(config["readme"], encoding="utf-8")
         shutil.copy2(ROOT / "README.md", bundle_dir / "README-project.md")
         shutil.copy2(ROOT / "LICENSE", bundle_dir / "LICENSE")
+        shutil.copy2(ROOT / "SECURITY.md", bundle_dir / "SECURITY.md")
+        shutil.copy2(ROOT / "DISCLAIMER.md", bundle_dir / "DISCLAIMER.md")
         copy_support_files(bundle_dir)
         write_bundle_notes(bundle_dir, version, target, component, release_tag)
         archive_directory(bundle_dir, archive_path)

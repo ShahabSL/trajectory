@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a reproducible Trajectory defect.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste access keys, private resolver lists, signing keys, or live server credentials.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Trajectory version, tag, commit, or release asset name.
+      placeholder: v0.1.48
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Rust CLI
+        - Desktop client
+        - Android proxy mode
+        - Android VPN mode
+        - Server/deploy
+        - Release packaging
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: The shortest deterministic steps that trigger the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include sanitized logs when useful.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, resolver transport, proxy/VPN mode, and whether the path is direct or through a lab bridge.
