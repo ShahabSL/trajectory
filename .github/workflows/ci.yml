@@ -376,13 +376,13 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Download Android APK
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.apk_artifact }}
           path: ${{ runner.temp }}/${{ matrix.apk_dir }}
 
       - name: Download Android smoke probe APK
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: ci-android-smokeprobe-apk
           path: ${{ runner.temp }}/android-smokeprobe-apk
@@ -448,7 +448,7 @@ jobs:
         run: sdkmanager "build-tools;35.0.0" "ndk;29.0.14206865"
 
       - name: Download signed Android release APK
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: ci-android-signed-release-apk
           path: ${{ runner.temp }}/android-release-apk
