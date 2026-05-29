@@ -2237,6 +2237,7 @@ impl AdmissionProbe {
                 bytes: vec![0; challenge.request_padding],
             });
         }
+        fit_admission_probe_packet(&self.runtime.config, &mut packet)?;
         let started = Instant::now();
         let response = send_dns_packet_inner(
             &self.runtime,
@@ -2298,6 +2299,54 @@ impl AdmissionProbe {
             rtt,
             response_payload_bytes,
         })
+    }
+}
+
+fn fit_admission_probe_packet(config: &ClientConfig, packet: &mut Packet) -> Result<(), String> {
+    if client_request_fits(config, packet, false) {
+        return Ok(());
+    }
+
+    let Some(frame_index) = packet
+        .frames
+        .iter()
+        .position(|frame| matches!(frame, Frame::PathResponse { .. }))
+    else {
+        return Err("admission signed challenge cannot fit DNS query name".to_string());
+    };
+
+    let original_padding = match &packet.frames[frame_index] {
+        Frame::PathResponse { bytes, .. } => bytes.len(),
+        _ => 0,
+    };
+    let mut low = 0usize;
+    let mut high = original_padding;
+    while low < high {
+        let mid = (low + high + 1) / 2;
+        resize_path_response_padding(packet, frame_index, mid);
+        if client_request_fits(config, packet, false) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    resize_path_response_padding(packet, frame_index, low);
+    if client_request_fits(config, packet, false) {
+        return Ok(());
+    }
+
+    packet.frames.remove(frame_index);
+    if client_request_fits(config, packet, false) {
+        return Ok(());
+    }
+
+    Err("admission signed challenge cannot fit DNS query name after trimming padding".to_string())
+}
+
+fn resize_path_response_padding(packet: &mut Packet, frame_index: usize, len: usize) {
+    if let Some(Frame::PathResponse { bytes, .. }) = packet.frames.get_mut(frame_index) {
+        bytes.resize(len, 0);
     }
 }
 
@@ -6692,6 +6741,39 @@ mod tests {
         assert!(admission_max_elapsed(true) > admission_max_elapsed(false));
         assert!(admission_min_response_bps(false) > admission_min_response_bps(true));
         assert!(resolver_admission_probe_timeout(true) > resolver_admission_timeout(true));
+    }
+
+    #[test]
+    fn admission_probe_trims_padding_to_dns_name_budget() {
+        let mut config = test_client_config(false, 1232);
+        config.domain = "t.android-smoke".to_string();
+        config.mode = ClientMode::Secure;
+
+        let mut packet = Packet::new(u64::MAX - 1, 7);
+        packet.max_response_bytes = config.dns_max_payload;
+        packet.ack_ranges = vec![AckRange { first: 1, last: 4 }];
+        packet.frames.push(Frame::PathChallenge {
+            nonce: 7,
+            response_bytes: 128,
+        });
+        packet.frames.push(Frame::PathResponse {
+            nonce: 7,
+            bytes: vec![0; 112],
+        });
+
+        assert!(!client_request_fits(&config, &packet, false));
+        fit_admission_probe_packet(&config, &mut packet).unwrap();
+        assert!(client_request_fits(&config, &packet, false));
+
+        let padding_len = packet
+            .frames
+            .iter()
+            .find_map(|frame| match frame {
+                Frame::PathResponse { bytes, .. } => Some(bytes.len()),
+                _ => None,
+            })
+            .unwrap_or(0);
+        assert!(padding_len < 112);
     }
 
     #[test]
