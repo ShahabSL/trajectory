@@ -24,7 +24,7 @@ local_origin_marker=""
 
 wait_for_boot_completed() {
   for _ in $(seq 1 90); do
-    if [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; then
+    if [[ "$(timeout 5s adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == "1" ]]; then
       return 0
     fi
     sleep 1
@@ -33,19 +33,61 @@ wait_for_boot_completed() {
   return 1
 }
 
+record_adb_host_state() {
+  local prefix="$1"
+  local output="$artifact_dir/${prefix}-adb-state.txt"
+  {
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+    echo "--- adb devices -l"
+    timeout 10s adb devices -l || true
+    echo "--- adb get-state"
+    timeout 5s adb get-state || true
+    echo "--- sys.boot_completed"
+    timeout 5s adb shell getprop sys.boot_completed || true
+    echo "--- shell true"
+    timeout 5s adb shell true || true
+  } > "$output" 2>&1
+}
+
 adb_wait_ready() {
+  local label="${1:-}"
+  local log=""
+  if [[ -n "$label" ]]; then
+    log="$artifact_dir/${label}-adb-wait.txt"
+    : > "$log"
+    record_adb_host_state "${label}-before"
+  fi
   local attempt
   for attempt in $(seq 1 20); do
     timeout 10s adb wait-for-device >/dev/null 2>&1 || true
-    if [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]] &&
-      adb shell true >/dev/null 2>&1; then
+    local boot_state
+    local shell_status=0
+    boot_state="$(timeout 5s adb shell getprop sys.boot_completed 2>&1 | tr -d '\r' || true)"
+    timeout 5s adb shell true >/dev/null 2>&1 || shell_status=$?
+    if [[ -n "$log" ]]; then
+      printf 'attempt=%s boot=%q shell_status=%s\n' "$attempt" "$boot_state" "$shell_status" >> "$log"
+    fi
+    if [[ "$boot_state" == "1" && "$shell_status" -eq 0 ]]; then
+      if [[ -n "$label" ]]; then
+        record_adb_host_state "${label}-ready"
+      fi
       return 0
     fi
     if [[ "$attempt" -eq 8 ]]; then
-      adb reconnect >/dev/null 2>&1 || true
+      if [[ -n "$log" ]]; then
+        {
+          echo "--- adb reconnect"
+          timeout 10s adb reconnect || true
+        } >> "$log" 2>&1
+      else
+        timeout 10s adb reconnect >/dev/null 2>&1 || true
+      fi
     fi
     sleep 1
   done
+  if [[ -n "$label" ]]; then
+    record_adb_host_state "${label}-failed"
+  fi
   return 1
 }
 
@@ -217,6 +259,9 @@ run_android_sidecar_help() {
 
 record_failure_artifacts() {
   set +e
+  record_adb_host_state "failure-before-reconnect"
+  timeout 10s adb reconnect > "$artifact_dir/failure-adb-reconnect.txt" 2>&1 || true
+  record_adb_host_state "failure-after-reconnect"
   timeout 10s adb logcat -d > "$artifact_dir/logcat.txt" 2>/dev/null
   timeout 10s adb shell dumpsys window > "$artifact_dir/window.txt" 2>/dev/null
   timeout 10s adb shell dumpsys activity activities > "$artifact_dir/activities.txt" 2>/dev/null
@@ -1081,6 +1126,11 @@ start_live_profile_from_intent() {
   local domain="$1"
   local access_key="$2"
   local resolvers="$3"
+  if ! adb_wait_ready "live-smoke-start"; then
+    echo "ADB was not ready before starting the Android live smoke profile" \
+      > "$artifact_dir/live-smoke-adb-not-ready.txt"
+    return 1
+  fi
   adb shell am force-stop "$package_name"
   adb shell am start -W -n "$activity" \
     --es trajectory_smoke_domain "$domain" \
@@ -1226,6 +1276,10 @@ assert_connected_status_ui() {
   fi
   if ! grep -Fq "$visible_title" "$combined_xml"; then
     echo "Android data path worked, but UI did not visibly show ${visible_title}" >&2
+    return 1
+  fi
+  if grep -Fq "android.widget.ProgressBar" "$combined_xml"; then
+    echo "Android connected UI still showed an indeterminate progress indicator" >&2
     return 1
   fi
   if ! grep -Fq "status.socks.ready" "$combined_xml" ||
@@ -2019,6 +2073,12 @@ assert_texts "$artifact_dir/all.xml" \
   "Start VPN"
 
 run_live_proxy_smoke
+if ! adb_wait_ready "post-proxy"; then
+  echo "ADB did not recover after Android live proxy smoke" \
+    > "$artifact_dir/post-proxy-adb-not-ready.txt"
+  exit 1
+fi
+echo "ADB ready after Android live proxy smoke" > "$artifact_dir/post-proxy-adb-ready.txt"
 run_vpn_smoke
 
 assert_no_android_crash "$artifact_dir/logcat.txt"

@@ -352,6 +352,15 @@ private fun TrajectoryAndroidApp(
         RuntimePhase.DEGRADED,
         RuntimePhase.STOPPING,
     )
+    val showProgress = status.phase in setOf(
+        RuntimePhase.VALIDATING_PROFILE,
+        RuntimePhase.STARTING_SIDECAR,
+        RuntimePhase.ADMITTING_RESOLVERS,
+        RuntimePhase.LISTENERS_READY,
+        RuntimePhase.ESTABLISHING_TUN,
+        RuntimePhase.BRIDGE_STARTING,
+        RuntimePhase.STOPPING,
+    )
 
     TrajectoryTheme {
         Scaffold(
@@ -414,6 +423,7 @@ private fun TrajectoryAndroidApp(
                             StatusCard(
                                 status = status,
                                 isWorking = isWorking,
+                                showProgress = showProgress,
                                 profile = currentProfile,
                                 notice = notice,
                                 profileErrors = profileErrors,
@@ -446,6 +456,7 @@ private fun TrajectoryAndroidApp(
                             CompactStatusCard(
                                 status = status,
                                 isWorking = isWorking,
+                                showProgress = showProgress,
                                 profile = currentProfile,
                                 profileErrors = profileErrors,
                             )
@@ -521,6 +532,7 @@ private fun TrajectoryAndroidApp(
 private fun CompactStatusCard(
     status: RuntimeStatusSnapshot,
     isWorking: Boolean,
+    showProgress: Boolean,
     profile: ClientProfile,
     profileErrors: List<String>,
 ) {
@@ -537,7 +549,7 @@ private fun CompactStatusCard(
                 Text(status.detail, color = TrajectoryColors.Muted, fontSize = 12.sp, maxLines = 2)
             }
         }
-        AnimatedVisibility(isWorking) {
+        AnimatedVisibility(showProgress) {
             LinearProgressIndicator(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -564,6 +576,7 @@ private fun CompactStatusCard(
 private fun StatusCard(
     status: RuntimeStatusSnapshot,
     isWorking: Boolean,
+    showProgress: Boolean,
     profile: ClientProfile,
     notice: String?,
     profileErrors: List<String>,
@@ -611,7 +624,7 @@ private fun StatusCard(
                 }
             }
         }
-        AnimatedVisibility(isWorking) {
+        AnimatedVisibility(showProgress) {
             LinearProgressIndicator(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -761,16 +774,18 @@ private fun RuntimeSteps(status: RuntimeStatusSnapshot) {
                 semanticState = if (status.httpReady) "status.http.ready" else "status.http.waiting",
             )
         }
-        CheckRow(
-            "Android TUN",
-            status.tunReady,
-            semanticState = if (status.tunReady) "status.tun.ready" else "status.tun.waiting",
-        )
-        CheckRow(
-            "Packet bridge",
-            status.bridgeReady,
-            semanticState = if (status.bridgeReady) "status.bridge.ready" else "status.bridge.waiting",
-        )
+        if (status.mode == RuntimeMode.VPN) {
+            CheckRow(
+                "Android TUN",
+                status.tunReady,
+                semanticState = if (status.tunReady) "status.tun.ready" else "status.tun.waiting",
+            )
+            CheckRow(
+                "Packet bridge",
+                status.bridgeReady,
+                semanticState = if (status.bridgeReady) "status.bridge.ready" else "status.bridge.waiting",
+            )
+        }
     }
 }
 
