@@ -377,33 +377,35 @@ def rpm_payload_contents(asset: Path, asset_name: str, failures: list[str]) -> s
         )
         return None
 
-    rpm_result = subprocess.run(
+    rpm_process = subprocess.Popen(
         [rpm2cpio, str(asset)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=30,
     )
-    if rpm_result.returncode != 0:
-        failures.append(
-            f"{asset_name}: rpm2cpio integrity check failed: "
-            + rpm_result.stderr.decode("utf-8", errors="replace").strip()
-        )
-        return None
-
+    assert rpm_process.stdout is not None
     cpio_result = subprocess.run(
         [cpio, "-t"],
-        input=rpm_result.stdout,
+        stdin=rpm_process.stdout,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=30,
     )
+    rpm_process.stdout.close()
+    _, rpm_stderr = rpm_process.communicate(timeout=30)
     if cpio_result.returncode != 0:
+        rpm_detail = rpm_stderr.decode("utf-8", errors="replace").strip()
+        cpio_detail = cpio_result.stderr.decode("utf-8", errors="replace").strip()
         failures.append(
             f"{asset_name}: cpio payload listing failed: "
-            + cpio_result.stderr.decode("utf-8", errors="replace").strip()
+            + cpio_detail
+            + (f"; rpm2cpio: {rpm_detail}" if rpm_detail else "")
         )
         return None
-    return cpio_result.stdout.decode("utf-8", errors="replace")
+    contents = cpio_result.stdout.decode("utf-8", errors="replace")
+    if not contents.strip():
+        failures.append(f"{asset_name}: rpm payload listing was empty")
+        return None
+    return contents
 
 
 def require_payload_members(
