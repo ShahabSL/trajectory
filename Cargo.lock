@@ -2019,7 +2019,7 @@ dependencies = [
 
 [[package]]
 name = "trajectory-cli"
-version = "0.1.51"
+version = "0.1.52"
 dependencies = [
  "anyhow",
  "rand 0.8.5",
@@ -2030,7 +2030,7 @@ dependencies = [
 
 [[package]]
 name = "trajectory-core"
-version = "0.1.51"
+version = "0.1.52"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2043,7 +2043,7 @@ dependencies = [
 
 [[package]]
 name = "trajectory-vpn-bridge"
-version = "0.1.51"
+version = "0.1.52"
 dependencies = [
  "jni",
  "tokio",

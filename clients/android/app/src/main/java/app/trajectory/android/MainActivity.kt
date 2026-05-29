@@ -35,17 +35,17 @@ import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NetworkCheck
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Speed
-import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -63,7 +63,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -235,9 +234,9 @@ class MainActivity : ComponentActivity() {
 
 private enum class AndroidTab(val label: String, val navLabel: String, val icon: ImageVector) {
     STATUS("Status", "Status", Icons.Filled.Home),
-    PROFILE("Profile", "Profile", Icons.Filled.Key),
+    PROFILE("Profile", "Profile", Icons.Filled.Person),
     RESOLVERS("Resolvers", "DNS", Icons.Filled.Dns),
-    VPN("VPN", "VPN", Icons.Filled.VpnKey),
+    VPN("VPN", "VPN", Icons.Filled.Shield),
     DIAGNOSTICS("Diagnostics", "Logs", Icons.Filled.BugReport),
 }
 
@@ -294,6 +293,7 @@ private fun TrajectoryAndroidApp(
     var selectedTab by rememberSaveable { mutableStateOf(AndroidTab.STATUS) }
     var status by remember { mutableStateOf(RuntimeStatusCenter.snapshot()) }
     var notice by rememberSaveable { mutableStateOf<String?>(null) }
+    var activeProfile by remember { mutableStateOf<ClientProfile?>(null) }
 
     var domain by rememberSaveable { mutableStateOf(initialProfile.domain) }
     var accessKey by rememberSaveable { mutableStateOf("") }
@@ -302,6 +302,8 @@ private fun TrajectoryAndroidApp(
     var resolverTransport by rememberSaveable { mutableStateOf(initialProfile.resolverTransport) }
     var transportMode by rememberSaveable { mutableStateOf(initialProfile.transportMode) }
     var resolverCohortSize by rememberSaveable { mutableStateOf(initialProfile.resolverCohortSize?.toString() ?: "") }
+    var socksPort by rememberSaveable { mutableStateOf(initialProfile.socksPort.toString()) }
+    var httpPort by rememberSaveable { mutableStateOf(initialProfile.httpPort.toString()) }
     var resolverAdmissionMin by rememberSaveable { mutableStateOf(initialProfile.resolverAdmissionMin.toString()) }
     var dnsMaxPayload by rememberSaveable { mutableStateOf(initialProfile.dnsMaxPayload.toString()) }
     var pollIntervalMs by rememberSaveable { mutableStateOf(initialProfile.pollIntervalMs.toString()) }
@@ -328,8 +330,8 @@ private fun TrajectoryAndroidApp(
         resolverTransport = resolverTransport,
         transportMode = transportMode,
         resolverCohortSize = resolverCohortSize.toIntOrNull(),
-        socksPort = initialProfile.socksPort,
-        httpPort = initialProfile.httpPort,
+        socksPort = socksPort.toIntOrNull() ?: 0,
+        httpPort = httpPort.toIntOrNull() ?: 0,
         dnsMaxPayload = dnsMaxPayload.toIntOrNull() ?: initialProfile.dnsMaxPayload,
         resolverAdmissionMin = resolverAdmissionMin.toIntOrNull() ?: initialProfile.resolverAdmissionMin,
         pollIntervalMs = pollIntervalMs.toIntOrNull() ?: initialProfile.pollIntervalMs,
@@ -340,6 +342,10 @@ private fun TrajectoryAndroidApp(
         vpnAllowBypass = vpnAllowBypass,
     )
     val profileErrors = currentProfile.validate()
+    val saveCurrentProfile = {
+        val errors = onSaveProfile(currentProfile)
+        notice = if (errors.isEmpty()) "Profile saved." else errors.joinToString("\n")
+    }
     val isWorking = status.phase in setOf(
         RuntimePhase.VALIDATING_PROFILE,
         RuntimePhase.STARTING_SIDECAR,
@@ -361,6 +367,11 @@ private fun TrajectoryAndroidApp(
         RuntimePhase.BRIDGE_STARTING,
         RuntimePhase.STOPPING,
     )
+    val displayProfile = activeProfile.takeIf { isWorking } ?: currentProfile
+    val stopCurrent = {
+        activeProfile = null
+        onStop()
+    }
 
     TrajectoryTheme {
         Scaffold(
@@ -441,56 +452,50 @@ private fun TrajectoryAndroidApp(
                                 status = status,
                                 isWorking = isWorking,
                                 showProgress = showProgress,
-                                profile = currentProfile,
+                                profile = displayProfile,
                                 notice = notice,
                                 profileErrors = profileErrors,
                                 onDismissNotice = { notice = null },
-                                onStop = onStop,
+                                onStop = stopCurrent,
                             )
                         }
                         item {
                             ActionStrip(
                                 canStart = profileErrors.isEmpty() && !isWorking,
                                 isWorking = isWorking,
-                                onSave = {
-                                    val errors = onSaveProfile(currentProfile)
-                                    notice = if (errors.isEmpty()) "Profile saved. Status remains disconnected until a service proves readiness."
-                                    else errors.joinToString("\n")
-                                },
                                 onStartProxy = {
                                     val errors = onStartProxy(currentProfile)
+                                    if (errors.isEmpty()) activeProfile = currentProfile
                                     notice = errors.takeIf { it.isNotEmpty() }?.joinToString("\n")
                                 },
                                 onStartVpn = {
                                     val errors = onStartVpn(currentProfile)
+                                    if (errors.isEmpty()) activeProfile = currentProfile
                                     notice = errors.takeIf { it.isNotEmpty() }?.joinToString("\n")
                                 },
-                                onStop = onStop,
-                            )
-                        }
-                    } else {
-                        item {
-                            CompactStatusCard(
-                                status = status,
-                                isWorking = isWorking,
-                                showProgress = showProgress,
-                                profile = currentProfile,
-                                profileErrors = profileErrors,
+                                onStop = stopCurrent,
                             )
                         }
                     }
                     when (tab) {
                         AndroidTab.STATUS -> {
                             item { RuntimeSteps(status) }
-                            item { EndpointCard(currentProfile) }
+                            item { EndpointCard(displayProfile) }
                         }
                         AndroidTab.PROFILE -> item {
                             ProfileScreen(
                                 domain = domain,
                                 accessKey = accessKey,
                                 accessKeySaved = initialProfile.accessKeySaved,
+                                socksPort = socksPort,
+                                httpPort = httpPort,
+                                profileErrors = profileErrors,
+                                notice = notice,
                                 onDomainChange = { domain = it },
                                 onAccessKeyChange = { accessKey = it },
+                                onSocksPortChange = { socksPort = it },
+                                onHttpPortChange = { httpPort = it },
+                                onSave = saveCurrentProfile,
                             )
                         }
                         AndroidTab.RESOLVERS -> item {
@@ -505,6 +510,8 @@ private fun TrajectoryAndroidApp(
                                 pollIntervalMs = pollIntervalMs,
                                 admitted = status.admittedResolvers,
                                 candidates = status.candidateResolvers,
+                                profileErrors = profileErrors,
+                                notice = notice,
                                 onResolversChange = { resolversText = it },
                                 onGateChange = { resolverGate = it },
                                 onTransportChange = { resolverTransport = it },
@@ -521,6 +528,7 @@ private fun TrajectoryAndroidApp(
                                         "Invalid resolver entries: ${bad.joinToString(", ")}"
                                     }
                                 },
+                                onSave = saveCurrentProfile,
                             )
                         }
                         AndroidTab.VPN -> item {
@@ -530,61 +538,20 @@ private fun TrajectoryAndroidApp(
                                 vpnMaxSessions = vpnMaxSessions,
                                 vpnIpv6Enabled = vpnIpv6Enabled,
                                 vpnAllowBypass = vpnAllowBypass,
+                                profileErrors = profileErrors,
+                                notice = notice,
                                 onMtuChange = { vpnMtu = it },
                                 onDnsChange = { vpnDnsServer = it },
                                 onSessionsChange = { vpnMaxSessions = it },
                                 onIpv6Change = { vpnIpv6Enabled = it },
                                 onBypassChange = { vpnAllowBypass = it },
+                                onSave = saveCurrentProfile,
                             )
                         }
                         AndroidTab.DIAGNOSTICS -> item { DiagnosticsScreen(status) }
                     }
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun CompactStatusCard(
-    status: RuntimeStatusSnapshot,
-    isWorking: Boolean,
-    showProgress: Boolean,
-    profile: ClientProfile,
-    profileErrors: List<String>,
-) {
-    CardShell(
-        modifier = Modifier.semantics {
-            contentDescription = "status.phase.${status.phase.name.lowercase()}"
-        },
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            StatusDot(status.phase, isWorking)
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text(status.title, fontSize = 18.sp, fontWeight = FontWeight.Black)
-                Text(status.detail, color = TrajectoryColors.Muted, fontSize = 12.sp, maxLines = 2)
-            }
-        }
-        AnimatedVisibility(showProgress) {
-            LinearProgressIndicator(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 10.dp)
-                    .clip(RoundedCornerShape(999.dp)),
-                color = TrajectoryColors.Ink,
-                trackColor = TrajectoryColors.Border,
-            )
-        }
-        if (profileErrors.isNotEmpty() || status.lastError != null) {
-            Text(
-                text = status.lastError ?: profileErrors.first(),
-                modifier = Modifier.padding(top = 6.dp),
-                color = TrajectoryColors.WarningInk,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-            )
         }
     }
 }
@@ -718,7 +685,6 @@ private fun StatusCard(
 private fun ActionStrip(
     canStart: Boolean,
     isWorking: Boolean,
-    onSave: () -> Unit,
     onStartProxy: () -> Unit,
     onStartVpn: () -> Unit,
     onStop: () -> Unit,
@@ -740,15 +706,10 @@ private fun ActionStrip(
                     Text("Start proxy")
                 }
                 Button(onClick = onStartVpn, enabled = canStart, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
-                    Icon(Icons.Filled.VpnKey, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Filled.Shield, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("Start VPN")
                 }
-            }
-            OutlinedButton(onClick = onSave, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
-                Icon(Icons.Filled.Save, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("Save profile")
             }
         }
     }
@@ -824,11 +785,18 @@ private fun ProfileScreen(
     domain: String,
     accessKey: String,
     accessKeySaved: Boolean,
+    socksPort: String,
+    httpPort: String,
+    profileErrors: List<String>,
+    notice: String?,
     onDomainChange: (String) -> Unit,
     onAccessKeyChange: (String) -> Unit,
+    onSocksPortChange: (String) -> Unit,
+    onHttpPortChange: (String) -> Unit,
+    onSave: () -> Unit,
 ) {
     CardShell {
-        SectionTitle(Icons.Filled.Key, "Profile")
+        SectionTitle(Icons.Filled.Person, "Profile")
         Spacer(Modifier.height(12.dp))
         AppTextField("Tunnel domain", domain, "t.example.com", onDomainChange, icon = Icons.Filled.Public)
         AppTextField(
@@ -837,8 +805,13 @@ private fun ProfileScreen(
             if (accessKeySaved) "Saved; leave blank to keep" else "traj1_...",
             onAccessKeyChange,
             secret = true,
-            icon = Icons.Filled.Key,
+            icon = Icons.Filled.Lock,
         )
+        Spacer(Modifier.height(16.dp))
+        SectionTitle(Icons.Filled.Router, "Local proxy")
+        AppTextField("SOCKS port", socksPort, "7000", onSocksPortChange, icon = Icons.Filled.Router)
+        AppTextField("HTTP port", httpPort, "7001", onHttpPortChange, icon = Icons.Filled.Router)
+        SaveProfileButton(profileErrors, notice, onSave)
     }
 }
 
@@ -854,6 +827,8 @@ private fun ResolversScreen(
     pollIntervalMs: String,
     admitted: Int,
     candidates: Int,
+    profileErrors: List<String>,
+    notice: String?,
     onResolversChange: (String) -> Unit,
     onGateChange: (String) -> Unit,
     onTransportChange: (String) -> Unit,
@@ -863,6 +838,7 @@ private fun ResolversScreen(
     onPayloadChange: (String) -> Unit,
     onPollChange: (String) -> Unit,
     onCheck: () -> Unit,
+    onSave: () -> Unit,
 ) {
     CardShell {
         SectionTitle(Icons.Filled.Dns, "Resolvers")
@@ -929,6 +905,7 @@ private fun ResolversScreen(
                 color = TrajectoryColors.Muted,
             )
         }
+        SaveProfileButton(profileErrors, notice, onSave)
     }
 }
 
@@ -984,7 +961,7 @@ private fun TransportModeSelector(
                     .fillMaxWidth()
                     .heightIn(min = 84.dp)
                     .semantics {
-                        contentDescription = "${mode.label} ${if (mode.experimental) "experimental " else ""}mode"
+                        contentDescription = "${mode.label} ${if (mode.experimental) "experimental " else ""}mode${if (selected) " selected" else ""}"
                     },
             )
         }
@@ -998,20 +975,55 @@ private fun VpnScreen(
     vpnMaxSessions: String,
     vpnIpv6Enabled: Boolean,
     vpnAllowBypass: Boolean,
+    profileErrors: List<String>,
+    notice: String?,
     onMtuChange: (String) -> Unit,
     onDnsChange: (String) -> Unit,
     onSessionsChange: (String) -> Unit,
     onIpv6Change: (Boolean) -> Unit,
     onBypassChange: (Boolean) -> Unit,
+    onSave: () -> Unit,
 ) {
     CardShell {
-        SectionTitle(Icons.Filled.VpnKey, "VPN")
+        SectionTitle(Icons.Filled.Shield, "VPN")
         Spacer(Modifier.height(12.dp))
         AppTextField("MTU", vpnMtu, "1500", onMtuChange, icon = Icons.Filled.Tune)
         AppTextField("VPN DNS server", vpnDnsServer, "1.1.1.1", onDnsChange, icon = Icons.Filled.Dns)
         AppTextField("Max sessions", vpnMaxSessions, "2048", onSessionsChange, icon = Icons.Filled.NetworkCheck)
         SwitchRow("IPv6 routing", vpnIpv6Enabled, onIpv6Change)
         SwitchRow("Allow Android VPN bypass", vpnAllowBypass, onBypassChange)
+        SaveProfileButton(profileErrors, notice, onSave)
+    }
+}
+
+@Composable
+private fun SaveProfileButton(
+    profileErrors: List<String>,
+    notice: String?,
+    onSave: () -> Unit,
+) {
+    AnimatedVisibility(profileErrors.isNotEmpty() || notice != null) {
+        Text(
+            text = profileErrors.firstOrNull() ?: notice.orEmpty(),
+            modifier = Modifier.padding(top = 10.dp),
+            color = if (profileErrors.isNotEmpty()) TrajectoryColors.WarningInk else TrajectoryColors.Muted,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+    Spacer(Modifier.height(12.dp))
+    Button(
+        onClick = onSave,
+        enabled = profileErrors.isEmpty(),
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = TrajectoryColors.Ink,
+            contentColor = Color.White,
+        ),
+    ) {
+        Icon(Icons.Filled.Save, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text("Save profile")
     }
 }
 

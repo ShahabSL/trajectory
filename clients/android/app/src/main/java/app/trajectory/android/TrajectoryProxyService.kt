@@ -91,14 +91,22 @@ class TrajectoryProxyService : Service() {
         val listenerTimeoutMs = listenerStartupTimeoutMs(profile)
         if (!waitForPort(profile.socksPort, listenerTimeoutMs)) {
             if (!RuntimeStatusCenter.isFailed(RuntimeMode.PROXY)) {
-                RuntimeStatusCenter.markFailed(RuntimeMode.PROXY, "SOCKS listener", "port ${profile.socksPort} did not open")
+                RuntimeStatusCenter.markFailed(
+                    RuntimeMode.PROXY,
+                    "SOCKS listener",
+                    "127.0.0.1:${profile.socksPort} did not open. Edit the SOCKS port in Profile.",
+                )
             }
             stopRuntime(resetStatus = false)
             return
         }
         if (!waitForPort(profile.httpPort, listenerTimeoutMs)) {
             if (!RuntimeStatusCenter.isFailed(RuntimeMode.PROXY)) {
-                RuntimeStatusCenter.markFailed(RuntimeMode.PROXY, "HTTP listener", "port ${profile.httpPort} did not open")
+                RuntimeStatusCenter.markFailed(
+                    RuntimeMode.PROXY,
+                    "HTTP listener",
+                    "127.0.0.1:${profile.httpPort} did not open. Edit the HTTP port in Profile.",
+                )
             }
             stopRuntime(resetStatus = false)
             return

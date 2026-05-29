@@ -99,6 +99,19 @@ class RuntimeStatusCenterTest {
     }
 
     @Test
+    fun connectedVpnDoesNotDegradeOnTxtMissWithoutResolverPrefix() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.markVpnConnectedForTest()
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.VPN,
+            profile(),
+            "packet 1539 failed: DNS response did not contain TXT answer (flags=0x8180, rcode=0)",
+        )
+
+        assertEquals(RuntimePhase.VPN_CONNECTED, RuntimeStatusCenter.snapshot().phase)
+    }
+
+    @Test
     fun connectedProxyDoesNotDegradeOnSingleResolverTimeout() {
         RuntimeStatusCenter.reset()
         RuntimeStatusCenter.markProxyDataPathReady(profile(), "http://127.0.0.1:8080/smoke")
@@ -146,6 +159,24 @@ class RuntimeStatusCenterTest {
         )
 
         assertEquals(RuntimePhase.DEGRADED, RuntimeStatusCenter.snapshot().phase)
+    }
+
+    @Test
+    fun bindFailureNamesEditablePort() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.PROXY,
+            profile(),
+            "Error: bind local SOCKS proxy listener 127.0.0.1:65001",
+        )
+
+        val snapshot = RuntimeStatusCenter.snapshot()
+        assertEquals(RuntimePhase.FAILED, snapshot.phase)
+        assertEquals("SOCKS port unavailable", snapshot.title)
+        assertEquals(
+            "127.0.0.1:65001 could not open. Edit the SOCKS port in Profile and try again.",
+            snapshot.detail,
+        )
     }
 
     private fun profile(): ClientProfile = ClientProfile(

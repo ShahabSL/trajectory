@@ -35,8 +35,9 @@ data class ClientProfile(
         if (resolverCohortSize != null && resolverCohortSize !in 1..10000) {
             errors += "Resolver cohort size must be 1-10000"
         }
-        if (socksPort !in 1..65535) errors += "SOCKS port is invalid"
-        if (httpPort !in 1..65535) errors += "HTTP port is invalid"
+        if (socksPort !in 1024..65535) errors += "SOCKS port must be 1024-65535"
+        if (httpPort !in 1024..65535) errors += "HTTP port must be 1024-65535"
+        if (socksPort == httpPort) errors += "SOCKS and HTTP ports must be different"
         if (dnsMaxPayload !in 512..4096) errors += "DNS payload must be 512-4096"
         if (vpnMtu !in 576..9000) errors += "VPN MTU must be 576-9000"
         if (vpnMaxSessions !in 16..20000) errors += "VPN max sessions must be 16-20000"

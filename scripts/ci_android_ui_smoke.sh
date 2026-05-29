@@ -180,7 +180,7 @@ PY
 install_apk() {
   local attempt
   for attempt in 1 2 3; do
-    if adb install -r "$apk" > "$artifact_dir/install-attempt-${attempt}.txt" 2>&1; then
+    if adb install --no-streaming -r "$apk" > "$artifact_dir/install-attempt-${attempt}.txt" 2>&1; then
       return 0
     fi
     adb uninstall "$package_name" >/dev/null 2>&1 || true
@@ -208,7 +208,7 @@ install_smoke_probe_apk() {
   build_smoke_probe_apk
   local attempt
   for attempt in 1 2 3; do
-    if timeout 60s adb install -r "$smoke_probe_apk" > "$artifact_dir/smokeprobe-install-attempt-${attempt}.txt" 2>&1; then
+    if timeout 60s adb install --no-streaming -r "$smoke_probe_apk" > "$artifact_dir/smokeprobe-install-attempt-${attempt}.txt" 2>&1; then
       return 0
     fi
     adb uninstall "$smoke_probe_package" >/dev/null 2>&1 || true
@@ -922,7 +922,10 @@ tree = ET.parse(sys.argv[1])
 mode_description = sys.argv[2]
 
 def contains_description(node):
-    if node.attrib.get("content-desc") == mode_description:
+    description = node.attrib.get("content-desc", "")
+    if description == f"{mode_description} selected":
+        raise SystemExit(0)
+    if description == mode_description:
         return True
     return any(contains_description(child) for child in list(node))
 
@@ -1123,7 +1126,7 @@ prepare_local_live_proxy_smoke() {
   local origin_port="${TRAJECTORY_ANDROID_SMOKE_LOCAL_ORIGIN_PORT:-$(pick_local_port)}"
   local host_ip="${TRAJECTORY_ANDROID_SMOKE_LOCAL_HOST_IP:-$(pick_host_ip)}"
   local device_host_ip="${TRAJECTORY_ANDROID_SMOKE_DEVICE_HOST_IP:-$(pick_android_device_host_ip "$host_ip")}"
-  local origin_target_host="${TRAJECTORY_ANDROID_SMOKE_LOCAL_ORIGIN_TARGET_HOST:-127.0.0.1}"
+  local origin_target_host="${TRAJECTORY_ANDROID_SMOKE_LOCAL_ORIGIN_TARGET_HOST:-}"
   local is_emulator
   is_emulator="$(adb shell getprop ro.kernel.qemu 2>/dev/null | tr -d '\r' || true)"
   local use_adb_reverse="${TRAJECTORY_ANDROID_SMOKE_USE_ADB_REVERSE:-}"
@@ -1136,6 +1139,7 @@ prepare_local_live_proxy_smoke() {
     device_host_ip="127.0.0.1"
     export TRAJECTORY_ANDROID_SMOKE_RESOLVER_TRANSPORT="${TRAJECTORY_ANDROID_SMOKE_RESOLVER_TRANSPORT:-tcp}"
   fi
+  origin_target_host="${origin_target_host:-$device_host_ip}"
 
   mkdir -p "$origin_dir"
   local_origin_marker="trajectory-android-smoke-${RANDOM}-${RANDOM}"
@@ -1842,7 +1846,6 @@ run_vpn_probe_app() {
   else
     expected_body="${TRAJECTORY_ANDROID_SMOKE_EXPECT_BODY:-}"
   fi
-  install_smoke_probe_apk
   adb shell am force-stop "$smoke_probe_package" >/dev/null 2>&1 || true
   adb shell run-as "$smoke_probe_package" rm -f files/result.txt >/dev/null 2>&1 || true
   if [[ -n "$expected_body" ]]; then
@@ -1891,6 +1894,7 @@ run_vpn_smoke() {
   fi
   local http_fetch_url="${TRAJECTORY_ANDROID_SMOKE_VPN_FETCH_URL:-${TRAJECTORY_ANDROID_SMOKE_FETCH_URL:-}}"
   local expected_body="${TRAJECTORY_ANDROID_SMOKE_EXPECT_BODY:-}"
+  local probe_repeats="${TRAJECTORY_ANDROID_SMOKE_VPN_PROBE_REPEATS:-1}"
   if [[ -n "${TRAJECTORY_ANDROID_SMOKE_VPN_FETCH_URL:-}" ]]; then
     expected_body="${TRAJECTORY_ANDROID_SMOKE_VPN_EXPECT_BODY:-}"
   elif [[ -n "${TRAJECTORY_ANDROID_SMOKE_VPN_EXPECT_BODY:-}" ]]; then
@@ -1901,6 +1905,7 @@ run_vpn_smoke() {
     return 1
   fi
 
+  install_smoke_probe_apk
   start_live_profile_from_intent \
     "$TRAJECTORY_ANDROID_SMOKE_DOMAIN" \
     "$TRAJECTORY_ANDROID_SMOKE_ACCESS_KEY" \
@@ -1919,9 +1924,11 @@ run_vpn_smoke() {
     fi
     if grep -Fq "VPN connected" "$artifact_dir/vpn_live_${pass}.xml" ||
       grep -Fq "status.phase.vpn_connected" "$artifact_dir/vpn_live_${pass}.xml"; then
-      install_smoke_probe_apk
       wait_for_vpn_network_active "$artifact_dir/vpn-connectivity.txt"
-      run_vpn_probe_app "$http_fetch_url" "vpn_probe" "$expected_body"
+      for repeat in $(seq 1 "$probe_repeats"); do
+        run_vpn_probe_app "$http_fetch_url" "vpn_probe_${repeat}" "$expected_body"
+        sleep 1
+      done
       adb shell am start -W -n "$activity" > "$artifact_dir/vpn-return-main.txt" 2>&1
       sleep 1
       dump_screen "vpn_live_proven_${pass}"
@@ -2072,12 +2079,9 @@ for tab in Profile Resolvers VPN Diagnostics; do
   dump_screen "${tab,,}_bottom"
   if [[ "$tab" == "Resolvers" ]]; then
     frontier_selected=0
-    for frontier_xml in "$artifact_dir/${tab,,}_top.xml" "$artifact_dir/${tab,,}_bottom.xml"; do
-      if tap_node "Frontier experimental mode" "$frontier_xml" || tap_node "Frontier" "$frontier_xml"; then
-        frontier_selected=1
-        break
-      fi
-    done
+    if tap_node "Frontier experimental mode" "$artifact_dir/${tab,,}_bottom.xml" || tap_node "Frontier" "$artifact_dir/${tab,,}_bottom.xml"; then
+      frontier_selected=1
+    fi
     for pass in 1 2 3 4 5 6 7 8; do
       if [[ "$frontier_selected" -eq 1 ]]; then
         break
@@ -2118,6 +2122,13 @@ for tab in Profile Resolvers VPN Diagnostics; do
   if [[ "$tab" == "Resolvers" ]]; then
     xml_files+=("$artifact_dir/frontier_selected.xml")
   fi
+  if [[ "$tab" == "Profile" ]]; then
+    assert_texts "$artifact_dir/${tab,,}.xml" "SOCKS port" "HTTP port" "Save profile"
+  fi
+  if grep -Fq "status.phase.disconnected" "$artifact_dir/${tab,,}.xml"; then
+    echo "$tab screen repeated the disconnected status panel" >&2
+    exit 1
+  fi
   adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 600
   adb shell input swipe "$swipe_x" "$swipe_restore_start_y" "$swipe_x" "$swipe_restore_end_y" 600
   sleep 1
@@ -2129,6 +2140,9 @@ cat "${xml_files[@]}" > "$artifact_dir/all.xml"
 assert_texts "$artifact_dir/all.xml" \
   "Profile" \
   "Tunnel domain" \
+  "SOCKS port" \
+  "HTTP port" \
+  "Save profile" \
   "Resolvers" \
   "Check DNS list" \
   "Frontier" \

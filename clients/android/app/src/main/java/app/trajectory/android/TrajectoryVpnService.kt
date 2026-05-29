@@ -103,7 +103,7 @@ class TrajectoryVpnService : VpnService() {
                 RuntimeStatusCenter.markFailed(
                     RuntimeMode.VPN,
                     "SOCKS listener",
-                    "port ${profile.socksPort} did not open",
+                    "127.0.0.1:${profile.socksPort} did not open. Edit the SOCKS port in Profile.",
                 )
             }
             stopRuntime(resetStatus = false)

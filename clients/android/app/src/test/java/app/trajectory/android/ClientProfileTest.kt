@@ -34,6 +34,23 @@ class ClientProfileTest {
         )
     }
 
+    @Test
+    fun validationRejectsUnusableProxyPorts() {
+        val errors = validProfile(
+            socksPort = 80,
+            httpPort = 80,
+        ).validate()
+
+        assertEquals(
+            listOf(
+                "SOCKS port must be 1024-65535",
+                "HTTP port must be 1024-65535",
+                "SOCKS and HTTP ports must be different",
+            ),
+            errors,
+        )
+    }
+
     private fun validProfile(
         vpnMtu: Int = 1500,
         vpnDnsServer: String = "1.1.1.1",
@@ -41,6 +58,8 @@ class ClientProfileTest {
         resolverTransport: String = "auto",
         transportMode: String = "secure",
         resolverCohortSize: Int? = null,
+        socksPort: Int = 7000,
+        httpPort: Int = 7001,
     ): ClientProfile = ClientProfile(
         name = "Test",
         domain = "t.example.com",
@@ -50,8 +69,8 @@ class ClientProfileTest {
         resolverSocksProxy = "",
         resolverTransport = resolverTransport,
         resolverCohortSize = resolverCohortSize,
-        socksPort = 7000,
-        httpPort = 7001,
+        socksPort = socksPort,
+        httpPort = httpPort,
         dnsMaxPayload = 1232,
         resolverAdmissionMin = 1,
         pollIntervalMs = 25,

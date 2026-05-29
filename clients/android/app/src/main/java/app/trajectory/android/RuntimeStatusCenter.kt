@@ -272,6 +272,30 @@ object RuntimeStatusCenter {
             return
         }
 
+        if (lower.contains("bind local socks proxy listener")) {
+            update(
+                mode = mode,
+                phase = RuntimePhase.FAILED,
+                title = "SOCKS port unavailable",
+                detail = "127.0.0.1:${profile.socksPort} could not open. Edit the SOCKS port in Profile and try again.",
+                candidateResolvers = current.candidateResolvers.coerceAtLeast(profile.resolvers.size),
+                lastError = line.take(180),
+            )
+            return
+        }
+
+        if (lower.contains("bind local http proxy listener")) {
+            update(
+                mode = mode,
+                phase = RuntimePhase.FAILED,
+                title = "HTTP port unavailable",
+                detail = "127.0.0.1:${profile.httpPort} could not open. Edit the HTTP port in Profile and try again.",
+                candidateResolvers = current.candidateResolvers.coerceAtLeast(profile.resolvers.size),
+                lastError = line.take(180),
+            )
+            return
+        }
+
         if (lower.contains("trajectory socks proxy listening on")) {
             update(
                 mode = mode,
@@ -336,13 +360,14 @@ object RuntimeStatusCenter {
     }
 
     private fun isTransientResolverPacketFailure(lowercaseLine: String): Boolean {
+        if (lowercaseLine.contains("did not contain txt answer")) return true
+
         val isResolverEvent = lowercaseLine.contains("resolver ")
         if (!isResolverEvent) return false
 
         return lowercaseLine.contains("timed out") ||
             lowercaseLine.contains("read failed") ||
             lowercaseLine.contains("write failed") ||
-            lowercaseLine.contains("did not contain txt answer") ||
             lowercaseLine.contains("early eof") ||
             lowercaseLine.contains("broken pipe") ||
             lowercaseLine.contains("connection reset by peer")
