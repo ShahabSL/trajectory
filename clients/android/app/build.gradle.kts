@@ -157,8 +157,8 @@ android {
         applicationId = "app.trajectory.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 45
-        versionName = "0.1.45"
+        versionCode = 46
+        versionName = "0.1.46"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -209,6 +209,10 @@ android {
             useLegacyPackaging = true
             keepDebugSymbols += "**/libtrajectory_client.so"
         }
+    }
+
+    lint {
+        disable += "NullSafeMutableLiveData"
     }
 }
 
