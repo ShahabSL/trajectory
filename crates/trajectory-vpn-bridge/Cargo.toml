@@ -13,4 +13,4 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 jni = { version = "0.22.4", default-features = false }
 tokio.workspace = true
-tun2proxy = { version = "0.8.0", default-features = false, features = ["udpgw"] }
+tun2proxy = { version = "0.8.1", default-features = false, features = ["udpgw"] }
