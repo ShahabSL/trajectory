@@ -207,6 +207,10 @@ object RuntimeStatusCenter {
         val lower = line.lowercase(Locale.US)
         val current = snapshot()
 
+        if (isClientTransportDiag(lower)) {
+            return
+        }
+
         Regex("only (\\d+) resolver\\(s\\) passed signed tunnel admission; required (\\d+)")
             .find(lower)
             ?.let { match ->
@@ -359,8 +363,12 @@ object RuntimeStatusCenter {
             lowercaseLine.contains("socks client did not offer no-auth method")
     }
 
+    private fun isClientTransportDiag(lowercaseLine: String): Boolean =
+        lowercaseLine.contains("\"kind\":\"client_transport_diag\"")
+
     private fun isTransientResolverPacketFailure(lowercaseLine: String): Boolean {
         if (lowercaseLine.contains("did not contain txt answer")) return true
+        if (lowercaseLine.contains("resolver:") && lowercaseLine.contains("suppressed")) return true
 
         val isResolverEvent = lowercaseLine.contains("resolver ")
         if (!isResolverEvent) return false

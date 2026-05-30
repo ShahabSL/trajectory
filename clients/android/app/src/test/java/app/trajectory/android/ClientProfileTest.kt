@@ -27,7 +27,7 @@ class ClientProfileTest {
                 "Transport mode must be secure, velocity, resilient, or frontier",
                 "Resolver cohort size must be 1-10000",
                 "VPN MTU must be 576-9000",
-                "VPN max sessions must be 16-20000",
+                "VPN max sessions must be 16-256",
                 "VPN DNS server must be an IPv4 address",
             ),
             errors,
@@ -54,7 +54,7 @@ class ClientProfileTest {
     private fun validProfile(
         vpnMtu: Int = 1500,
         vpnDnsServer: String = "1.1.1.1",
-        vpnMaxSessions: Int = 2048,
+        vpnMaxSessions: Int = 256,
         resolverTransport: String = "auto",
         transportMode: String = "secure",
         resolverCohortSize: Int? = null,

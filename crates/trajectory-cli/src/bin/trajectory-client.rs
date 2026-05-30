@@ -31,6 +31,7 @@ async fn run() -> Result<()> {
     let mut admission_report = None::<PathBuf>;
     let mut resolver_cohort_size = None::<usize>;
     let mut resolver_admission_min = 1usize;
+    let mut max_active_streams = None::<usize>;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -143,6 +144,15 @@ async fn run() -> Result<()> {
                     .parse()
                     .context("invalid resolver admission minimum")?;
             }
+            "--max-active-streams" => {
+                max_active_streams = Some(
+                    args.next()
+                        .context("missing max active streams")?
+                        .parse::<usize>()
+                        .context("invalid max active streams")?
+                        .max(1),
+                );
+            }
             "--congestion-control" | "-c" => {
                 let _ = args.next().context("missing congestion control")?;
             }
@@ -187,6 +197,7 @@ async fn run() -> Result<()> {
         resolver_cohort_size,
         resolver_admission_min,
         mode,
+        max_active_streams,
     })
     .await
 }
@@ -212,6 +223,7 @@ Optional:
       --mode <MODE>                  Client transport profile: secure, velocity, resilient, or frontier (default: secure)
       --resolver-cohort-size <N>     Active admitted resolver target when admission is used
       --resolver-admission-min <N>   Minimum admitted resolvers required at startup (default: 1)
+      --max-active-streams <N>       Concurrent local streams accepted into the DNS transport
   -t, --poll-interval-ms <MS>        Delay after resolver failures
       --dns-max-payload <BYTES>      Advertised response payload budget (default: 1232, or 4096 with TCP resolver transport)
       --admission-report <PATH>      Write resolver admission JSONL diagnostics

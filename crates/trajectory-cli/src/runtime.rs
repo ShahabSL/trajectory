@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -81,10 +81,11 @@ const SERVER_DOWNLOAD_ADMISSION_FRAME_MAX: usize = 192;
 const SERVER_DOWNLOAD_ADMISSION_FRAME_MIN: usize = 32;
 const SERVER_DOWNLOAD_FAIR_FRAME_MAX: usize = 512;
 const SERVER_DOWNLOAD_FAIR_FRAME_MIN: usize = 128;
+const SERVER_RESPONSE_SESSION_WORK_LIMIT: usize = 96;
 const SERVER_UDP_QUERY_CONCURRENCY: usize = 1024;
 const SERVER_RESPONSE_CACHE: usize = 512;
 const SERVER_UPLOAD_ACK_REPEAT: Duration = Duration::from_millis(250);
-const SERVER_STATE_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const SERVER_STATE_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const SERVER_STATE_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 const DNS_RESPONSE_SAFETY_MARGIN: usize = 24;
 const RESOLVER_FAILURE_QUARANTINE: Duration = Duration::from_secs(20);
@@ -124,6 +125,8 @@ const FRONTIER_SHORT_ALIAS_READY_NONCE: u64 = u64::MAX;
 const CLIENT_RESET_CLOSE_DELAY: Duration = Duration::from_millis(500);
 const CLIENT_POLL_PROXY_HEADROOM: u32 = 4;
 const CLIENT_POLL_RESOLVER_HEADROOM: u32 = 1;
+const STDERR_LOG_WINDOW: Duration = Duration::from_secs(1);
+const STDERR_LOG_BURST: u32 = 8;
 
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
@@ -141,6 +144,7 @@ pub struct ClientConfig {
     pub resolver_cohort_size: Option<usize>,
     pub resolver_admission_min: usize,
     pub mode: ClientMode,
+    pub max_active_streams: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -338,6 +342,61 @@ pub enum ServerTargetMode {
     Socks5Direct,
 }
 
+#[derive(Clone, Copy)]
+struct StderrLogState {
+    window_start: Instant,
+    emitted: u32,
+    suppressed: u64,
+}
+
+impl Default for StderrLogState {
+    fn default() -> Self {
+        Self {
+            window_start: Instant::now(),
+            emitted: 0,
+            suppressed: 0,
+        }
+    }
+}
+
+fn rate_limited_eprintln(key: impl Into<String>, message: impl Into<String>) {
+    static LIMITER: OnceLock<StdMutex<HashMap<String, StderrLogState>>> = OnceLock::new();
+
+    let key = key.into();
+    let message = message.into();
+    let now = Instant::now();
+    let mut lines = Vec::new();
+    let limiter = LIMITER.get_or_init(|| StdMutex::new(HashMap::new()));
+    if let Ok(mut states) = limiter.lock() {
+        let state = states.entry(key.clone()).or_default();
+        if now.saturating_duration_since(state.window_start) >= STDERR_LOG_WINDOW {
+            if state.suppressed > 0 {
+                lines.push(format!(
+                    "{key}: suppressed {} repeated log line(s)",
+                    state.suppressed
+                ));
+            }
+            *state = StderrLogState {
+                window_start: now,
+                emitted: 0,
+                suppressed: 0,
+            };
+        }
+        if state.emitted < STDERR_LOG_BURST {
+            state.emitted += 1;
+            lines.push(message);
+        } else {
+            state.suppressed = state.suppressed.saturating_add(1);
+        }
+    } else {
+        lines.push(message);
+    }
+
+    for line in lines {
+        eprintln!("{line}");
+    }
+}
+
 struct ClientRuntime {
     config: ClientConfig,
     tcp_pool: Option<Arc<ResolverPool>>,
@@ -384,7 +443,10 @@ impl ClientRuntime {
         let proxy_health = config
             .resolver_socks_proxy
             .map(|_| Mutex::new(ProxyHealth::new(profile.proxy_initial_cwnd)));
-        let stream_capacity = profile.max_active_streams;
+        let stream_capacity = config
+            .max_active_streams
+            .unwrap_or(profile.max_active_streams)
+            .clamp(1, 1024);
         let active_ping_capacity = profile.global_active_ping_inflight;
         let idle_ping_capacity = profile.global_idle_ping_inflight;
         Self {
@@ -2483,7 +2545,10 @@ fn log_proxy_stream_error(kind: &str, stream_id: u64, peer: SocketAddr, error: &
     if is_benign_proxy_stream_error(error) {
         return;
     }
-    eprintln!("{kind} proxy stream {stream_id} from {peer} failed: {error:#}");
+    rate_limited_eprintln(
+        format!("{kind}:proxy-stream-failed"),
+        format!("{kind} proxy stream {stream_id} from {peer} failed: {error:#}"),
+    );
 }
 
 fn is_benign_proxy_stream_error(error: &anyhow::Error) -> bool {
@@ -2492,6 +2557,7 @@ fn is_benign_proxy_stream_error(error: &anyhow::Error) -> bool {
         || text.contains("connection reset by peer")
         || text.contains("early eof")
         || text.contains("client closed before sending headers")
+        || text.contains("socks proxy mode supports connect only")
 }
 
 async fn run_socks_proxy_stream_io(
@@ -3871,9 +3937,12 @@ impl ClientTransport {
                     }
                     MuxSentKind::Data { .. } | MuxSentKind::Ping => {}
                 }
-                eprintln!(
-                    "resolver {} packet {} failed: {error:#}",
-                    result.resolver, result.packet_no
+                rate_limited_eprintln(
+                    format!("resolver:{}:packet-failed", result.resolver),
+                    format!(
+                        "resolver {} packet {} failed: {error:#}",
+                        result.resolver, result.packet_no
+                    ),
                 );
             }
         }
@@ -4132,7 +4201,12 @@ async fn send_dns_packet_inner(
                     runtime.tcp_fallback_pool.remove_sender(resolver).await;
                     return Err(tcp_error.context("DNS-over-TCP resolver query failed"));
                 }
-                eprintln!("resolver {resolver} preferred TCP failed ({tcp_error:#}); retrying UDP");
+                rate_limited_eprintln(
+                    format!("resolver:{resolver}:preferred-tcp-failed"),
+                    format!(
+                        "resolver {resolver} preferred TCP failed ({tcp_error:#}); retrying UDP"
+                    ),
+                );
                 runtime.tcp_fallback_pool.remove_sender(resolver).await;
                 (
                     runtime
@@ -4157,7 +4231,10 @@ async fn send_dns_packet_inner(
                 if let Some(diag) = &runtime.diag {
                     diag.tcp_fallbacks.fetch_add(1, Ordering::Relaxed);
                 }
-                eprintln!("resolver {resolver} UDP failed ({udp_error:#}); retrying over TCP");
+                rate_limited_eprintln(
+                    format!("resolver:{resolver}:udp-failed"),
+                    format!("resolver {resolver} UDP failed ({udp_error:#}); retrying over TCP"),
+                );
                 match runtime
                     .tcp_fallback_pool
                     .query(
@@ -4198,8 +4275,9 @@ async fn send_dns_packet_inner(
                     diag.tcp_fallbacks.fetch_add(1, Ordering::Relaxed);
                 }
                 let udp_response_len = response.len();
-                eprintln!(
-                    "resolver {resolver} returned truncated UDP DNS response; retrying over TCP"
+                rate_limited_eprintln(
+                    format!("resolver:{resolver}:udp-truncated"),
+                    format!("resolver {resolver} returned truncated UDP DNS response; retrying over TCP"),
                 );
                 let tcp_response = runtime
                     .tcp_fallback_pool
@@ -4221,8 +4299,11 @@ async fn send_dns_packet_inner(
                     diag.tcp_fallbacks.fetch_add(1, Ordering::Relaxed);
                 }
                 let udp_response_len = response.len();
-                eprintln!(
-                    "resolver {resolver} returned unusable UDP DNS response ({error:#}); retrying over TCP"
+                rate_limited_eprintln(
+                    format!("resolver:{resolver}:udp-unusable"),
+                    format!(
+                        "resolver {resolver} returned unusable UDP DNS response ({error:#}); retrying over TCP"
+                    ),
                 );
                 match runtime
                     .tcp_fallback_pool
@@ -4371,7 +4452,10 @@ fn dns_response_is_truncated(response: &[u8]) -> bool {
 
 async fn run_udp_resolver_actor(resolver: SocketAddr, mut requests: mpsc::Receiver<DnsUdpRequest>) {
     if let Err(error) = serve_udp_resolver(resolver, &mut requests).await {
-        eprintln!("resolver {resolver} persistent UDP worker failed: {error:#}");
+        rate_limited_eprintln(
+            format!("resolver:{resolver}:udp-worker-failed"),
+            format!("resolver {resolver} persistent UDP worker failed: {error:#}"),
+        );
     }
 }
 
@@ -4505,7 +4589,10 @@ async fn run_tcp_resolver_actor(
                     serve_tcp_resolver_connection(resolver, stream, &mut requests, first_request)
                         .await
                 {
-                    eprintln!("resolver {resolver} persistent TCP connection failed: {error:#}");
+                    rate_limited_eprintln(
+                        format!("resolver:{resolver}:tcp-connection-failed"),
+                        format!("resolver {resolver} persistent TCP connection failed: {error:#}"),
+                    );
                     tokio::time::sleep(TCP_RECONNECT_DELAY).await;
                 }
             }
@@ -4513,7 +4600,10 @@ async fn run_tcp_resolver_actor(
                 let _ = first_request.response.send(Err(anyhow::anyhow!(
                     "DNS-over-TCP connect failed: {error:#}"
                 )));
-                eprintln!("resolver {resolver} DNS-over-TCP connect failed: {error:#}");
+                rate_limited_eprintln(
+                    format!("resolver:{resolver}:tcp-connect-failed"),
+                    format!("resolver {resolver} DNS-over-TCP connect failed: {error:#}"),
+                );
                 tokio::time::sleep(TCP_RECONNECT_DELAY).await;
             }
         }
@@ -5020,9 +5110,6 @@ impl ServerState {
             .collect::<Vec<_>>();
         rest.sort_by_key(|(stream_id, _)| *stream_id);
         out.extend(rest);
-        for (_, session) in &out {
-            session.touch();
-        }
         out
     }
 
@@ -5855,6 +5942,7 @@ async fn handle_dns_query(state: Arc<ServerState>, query_bytes: &[u8]) -> Result
         .sessions_for_connection(key.client_id, packet.conn_id, &active_streams)
         .await;
     let sessions = connection.rotate_download_sessions(sessions).await;
+    let sessions = bound_sessions_for_response(sessions, &active_streams);
     for (stream_id, session) in &sessions {
         let upload_ack = {
             let upload = session.upload_recv.lock().await;
@@ -5910,6 +5998,34 @@ fn push_unique_stream(streams: &mut Vec<u64>, stream_id: u64) {
     if !streams.contains(&stream_id) {
         streams.push(stream_id);
     }
+}
+
+fn bound_sessions_for_response(
+    sessions: Vec<(u64, Arc<SessionHandle>)>,
+    active_streams: &[u64],
+) -> Vec<(u64, Arc<SessionHandle>)> {
+    let limit = SERVER_RESPONSE_SESSION_WORK_LIMIT.max(active_streams.len());
+    if sessions.len() <= limit {
+        return sessions;
+    }
+
+    let mut out = Vec::with_capacity(limit);
+    let mut seen = HashSet::new();
+    for (stream_id, session) in &sessions {
+        if active_streams.contains(stream_id) {
+            out.push((*stream_id, Arc::clone(session)));
+            seen.insert(*stream_id);
+        }
+    }
+    for (stream_id, session) in sessions {
+        if out.len() >= limit {
+            break;
+        }
+        if seen.insert(stream_id) {
+            out.push((stream_id, session));
+        }
+    }
+    out
 }
 
 async fn should_send_upload_ack(
@@ -6098,12 +6214,15 @@ async fn stage_download_frames(session: &SessionHandle) -> Result<()> {
     let mut download_rx = session.download_rx.lock().await;
     while send.retained_len() < SERVER_RETAINED_BYTE_LIMIT {
         match download_rx.try_recv() {
-            Ok(download) => send
-                .append(download.offset, download.fin, download.bytes)
-                .context("retain target download bytes")?,
+            Ok(download) => {
+                send.append(download.offset, download.fin, download.bytes)
+                    .context("retain target download bytes")?;
+                session.touch();
+            }
             Err(mpsc::error::TryRecvError::Empty) => break,
             Err(mpsc::error::TryRecvError::Disconnected) => {
                 send.mark_fin_at_end();
+                session.touch();
                 break;
             }
         }
@@ -6131,6 +6250,7 @@ async fn append_one_download_frame(
         };
         response.frames.push(frame);
         send.mark_sent(&slice);
+        session.touch();
         return Ok(true);
     }
 
@@ -6138,6 +6258,7 @@ async fn append_one_download_frame(
         let frame = Frame::Close { stream_id, code: 0 };
         if response_frame_fits(query, key, response, &frame)? || response.frames.is_empty() {
             response.frames.push(frame);
+            session.touch();
             return Ok(true);
         }
     }
@@ -6628,6 +6749,7 @@ mod tests {
             resolver_cohort_size: None,
             resolver_admission_min: 1,
             mode: ClientMode::Secure,
+            max_active_streams: None,
         }
     }
 
@@ -7105,6 +7227,75 @@ mod tests {
         let (_, opened, used_short) = open_client_packet(&state, &short).await.unwrap();
         assert_eq!(opened, short_packet);
         assert!(used_short);
+    }
+
+    #[tokio::test]
+    async fn session_scan_does_not_refresh_idle_sessions() {
+        let key = ClientAccessKey::generate();
+        let state = ServerState::new(ServerConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            domain: "t.example.test".to_string(),
+            target: "127.0.0.1:1".parse().unwrap(),
+            target_mode: ServerTargetMode::Tcp,
+            authorized_clients: Arc::new(HashMap::from([(key.client_id, key.clone())])),
+        });
+        let old_activity = Instant::now() - SERVER_STATE_IDLE_TIMEOUT - Duration::from_secs(1);
+        for stream_id in [1, 2] {
+            let (upload_tx, _upload_rx) = mpsc::channel(1);
+            let (_download_tx, download_rx) = mpsc::channel(1);
+            let session = Arc::new(SessionHandle::new(upload_tx, download_rx));
+            *session.last_activity.lock().unwrap() = old_activity;
+            state
+                .sessions
+                .lock()
+                .await
+                .insert((key.client_id, 7, stream_id), session);
+        }
+
+        let sessions = state
+            .sessions_for_connection(key.client_id, 7, &[1, 2])
+            .await;
+        assert_eq!(sessions.len(), 2);
+
+        *state.next_cleanup_at.lock().unwrap() = Instant::now() - Duration::from_secs(1);
+        state.cleanup_idle(Instant::now()).await;
+        assert!(state.sessions.lock().await.is_empty());
+    }
+
+    #[test]
+    fn response_session_work_bound_preserves_active_streams() {
+        let sessions = (0..150)
+            .map(|stream_id| {
+                let (upload_tx, _upload_rx) = mpsc::channel(1);
+                let (_download_tx, download_rx) = mpsc::channel(1);
+                (
+                    stream_id,
+                    Arc::new(SessionHandle::new(upload_tx, download_rx)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let active_streams = [3, 120, 149];
+
+        let bounded = bound_sessions_for_response(sessions, &active_streams);
+        let stream_ids = bounded
+            .iter()
+            .map(|(stream_id, _)| *stream_id)
+            .collect::<HashSet<_>>();
+
+        assert_eq!(bounded.len(), SERVER_RESPONSE_SESSION_WORK_LIMIT);
+        assert_eq!(stream_ids.len(), SERVER_RESPONSE_SESSION_WORK_LIMIT);
+        for active in active_streams {
+            assert!(stream_ids.contains(&active));
+        }
+    }
+
+    #[test]
+    fn max_active_streams_override_controls_stream_slots() {
+        let mut config = test_client_config(false, 1232);
+        config.max_active_streams = Some(256);
+        let runtime = ClientRuntime::new(config);
+
+        assert_eq!(runtime.stream_slots.available_permits(), 256);
     }
 
     #[test]

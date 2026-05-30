@@ -393,6 +393,7 @@ async fn raw_tcp_stream_roundtrips_through_dns_udp() {
         resolver_cohort_size: None,
         resolver_admission_min: 1,
         mode: ClientMode::Secure,
+        max_active_streams: None,
     }));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -456,6 +457,7 @@ async fn all_client_modes_echo_through_dns_udp() {
             resolver_cohort_size: None,
             resolver_admission_min: 1,
             mode,
+            max_active_streams: None,
         }));
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -549,6 +551,7 @@ async fn socks_handshake_survives_dns_chunking() {
         resolver_cohort_size: None,
         resolver_admission_min: 1,
         mode: ClientMode::Secure,
+        max_active_streams: None,
     }));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -625,6 +628,7 @@ async fn server_direct_socks5_mode_connects_without_external_proxy() {
         resolver_cohort_size: None,
         resolver_admission_min: 1,
         mode: ClientMode::Secure,
+        max_active_streams: None,
     }));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -702,6 +706,7 @@ async fn socks_proxy_mode_uses_direct_tunnel_open() {
         resolver_cohort_size: None,
         resolver_admission_min: 1,
         mode: ClientMode::Secure,
+        max_active_streams: None,
     }));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -779,6 +784,7 @@ async fn http_connect_proxy_mode_uses_direct_tunnel_open() {
         resolver_cohort_size: None,
         resolver_admission_min: 1,
         mode: ClientMode::Secure,
+        max_active_streams: None,
     }));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -852,6 +858,7 @@ async fn dns_tcp_over_socks_reuses_persistent_connection() {
         resolver_cohort_size: None,
         resolver_admission_min: 1,
         mode: ClientMode::Secure,
+        max_active_streams: None,
     }));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -931,6 +938,7 @@ async fn regression_closed_streams_do_not_starve_followup_stream() {
         resolver_cohort_size: None,
         resolver_admission_min: 1,
         mode: ClientMode::Secure,
+        max_active_streams: None,
     }));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -993,6 +1001,7 @@ async fn acceptance_concurrent_streams_share_one_transport_conn_id() {
         resolver_cohort_size: None,
         resolver_admission_min: 1,
         mode: ClientMode::Secure,
+        max_active_streams: None,
     }));
     sleep(Duration::from_millis(50)).await;
 

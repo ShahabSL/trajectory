@@ -989,7 +989,7 @@ private fun VpnScreen(
         Spacer(Modifier.height(12.dp))
         AppTextField("MTU", vpnMtu, "1500", onMtuChange, icon = Icons.Filled.Tune)
         AppTextField("VPN DNS server", vpnDnsServer, "1.1.1.1", onDnsChange, icon = Icons.Filled.Dns)
-        AppTextField("Max sessions", vpnMaxSessions, "2048", onSessionsChange, icon = Icons.Filled.NetworkCheck)
+        AppTextField("Max sessions", vpnMaxSessions, "256", onSessionsChange, icon = Icons.Filled.NetworkCheck)
         SwitchRow("IPv6 routing", vpnIpv6Enabled, onIpv6Change)
         SwitchRow("Allow Android VPN bypass", vpnAllowBypass, onBypassChange)
         SaveProfileButton(profileErrors, notice, onSave)

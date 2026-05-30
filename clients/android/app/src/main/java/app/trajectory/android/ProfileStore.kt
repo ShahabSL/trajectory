@@ -4,6 +4,7 @@ import android.content.Context
 
 object ProfileStore {
     private const val NAME = "trajectory_profile"
+    const val DEFAULT_VPN_MAX_SESSIONS = 256
 
     fun load(context: Context, includeSecret: Boolean = true): ClientProfile {
         val prefs = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -34,7 +35,8 @@ object ProfileStore {
             pollIntervalMs = prefs.getInt("pollIntervalMs", 25),
             vpnMtu = prefs.getInt("vpnMtu", 1500),
             vpnDnsServer = prefs.getString("vpnDnsServer", "1.1.1.1") ?: "1.1.1.1",
-            vpnMaxSessions = prefs.getInt("vpnMaxSessions", 2048),
+            vpnMaxSessions = prefs.getInt("vpnMaxSessions", DEFAULT_VPN_MAX_SESSIONS)
+                .coerceIn(16, DEFAULT_VPN_MAX_SESSIONS),
             vpnIpv6Enabled = prefs.getBoolean("vpnIpv6Enabled", false),
             vpnAllowBypass = prefs.getBoolean("vpnAllowBypass", false),
         )

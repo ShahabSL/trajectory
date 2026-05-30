@@ -43,6 +43,7 @@ class TrajectoryRuntimeProcess(
             .redirectErrorStream(true)
         builder.environment()["TRAJECTORY_ACCESS_KEY"] = profile.accessKey
         builder.environment()["TRAJECTORY_ADMISSION_DIAG"] = "1"
+        builder.environment()["TRAJECTORY_DIAG"] = "1"
         val child = try {
             builder.start()
         } catch (error: IOException) {
@@ -133,6 +134,8 @@ class TrajectoryRuntimeProcess(
                 profile.dnsMaxPayload.toString(),
                 "--resolver-admission-min",
                 profile.resolverAdmissionMin.toString(),
+                "--max-active-streams",
+                profile.vpnMaxSessions.toString(),
                 "--poll-interval-ms",
                 profile.pollIntervalMs.toString(),
                 "--resolver-transport",

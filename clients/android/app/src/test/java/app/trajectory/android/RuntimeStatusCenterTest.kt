@@ -112,6 +112,32 @@ class RuntimeStatusCenterTest {
     }
 
     @Test
+    fun connectedVpnDoesNotDegradeOnClientTransportDiagCounters() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.markVpnConnectedForTest()
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.VPN,
+            profile(),
+            "{\"kind\":\"client_transport_diag\",\"queries_failed\":209,\"queries_ok\":40853}",
+        )
+
+        assertEquals(RuntimePhase.VPN_CONNECTED, RuntimeStatusCenter.snapshot().phase)
+    }
+
+    @Test
+    fun connectedVpnDoesNotDegradeOnResolverSuppressionSummary() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.markVpnConnectedForTest()
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.VPN,
+            profile(),
+            "resolver:8.8.8.8:53:preferred-tcp-failed: suppressed 7 repeated log line(s)",
+        )
+
+        assertEquals(RuntimePhase.VPN_CONNECTED, RuntimeStatusCenter.snapshot().phase)
+    }
+
+    @Test
     fun connectedProxyDoesNotDegradeOnSingleResolverTimeout() {
         RuntimeStatusCenter.reset()
         RuntimeStatusCenter.markProxyDataPathReady(profile(), "http://127.0.0.1:8080/smoke")
@@ -195,7 +221,7 @@ class RuntimeStatusCenterTest {
         pollIntervalMs = 25,
         vpnMtu = 1500,
         vpnDnsServer = "1.1.1.1",
-        vpnMaxSessions = 2048,
+        vpnMaxSessions = 256,
         vpnIpv6Enabled = false,
         vpnAllowBypass = false,
     )

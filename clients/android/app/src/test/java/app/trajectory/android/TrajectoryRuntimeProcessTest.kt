@@ -22,6 +22,7 @@ class TrajectoryRuntimeProcessTest {
         assertTrue(args.containsAll(listOf("--resolver-transport", "tcp")))
         assertTrue(args.containsAll(listOf("--mode", "secure")))
         assertTrue(args.containsAll(listOf("--resolver-cohort-size", "8")))
+        assertTrue(args.containsAll(listOf("--max-active-streams", "256")))
         assertTrue(args.containsAll(listOf("--admission-report", "/data/user/0/app.trajectory.android/cache/admission.jsonl")))
         assertTrue("access key must only be passed through env", args.none { it.contains("traj1_") })
     }
@@ -42,7 +43,7 @@ class TrajectoryRuntimeProcessTest {
         pollIntervalMs = 25,
         vpnMtu = 1500,
         vpnDnsServer = "1.1.1.1",
-        vpnMaxSessions = 2048,
+        vpnMaxSessions = 256,
         vpnIpv6Enabled = false,
         vpnAllowBypass = false,
     )

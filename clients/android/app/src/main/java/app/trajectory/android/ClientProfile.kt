@@ -40,7 +40,9 @@ data class ClientProfile(
         if (socksPort == httpPort) errors += "SOCKS and HTTP ports must be different"
         if (dnsMaxPayload !in 512..4096) errors += "DNS payload must be 512-4096"
         if (vpnMtu !in 576..9000) errors += "VPN MTU must be 576-9000"
-        if (vpnMaxSessions !in 16..20000) errors += "VPN max sessions must be 16-20000"
+        if (vpnMaxSessions !in 16..ProfileStore.DEFAULT_VPN_MAX_SESSIONS) {
+            errors += "VPN max sessions must be 16-${ProfileStore.DEFAULT_VPN_MAX_SESSIONS}"
+        }
         if (!isIpv4Address(vpnDnsServer)) {
             errors += "VPN DNS server must be an IPv4 address"
         }

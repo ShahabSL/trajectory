@@ -151,7 +151,7 @@ fn build_args(
 
     let mut args = Args {
         proxy,
-        dns: ArgDns::OverTcp,
+        dns: ArgDns::Virtual,
         dns_addr,
         mtu: mtu as u16,
         max_sessions: max_sessions as usize,
@@ -173,9 +173,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bridge_args_route_dns_over_tcp_through_local_socks() {
+    fn bridge_args_use_virtual_dns_by_default() {
         let args = build_args(7, 7000, "1.1.1.1", 1500, 512, false).unwrap();
-        assert_eq!(args.dns, ArgDns::OverTcp);
+        assert_eq!(args.dns, ArgDns::Virtual);
         assert_eq!(args.dns_addr, "1.1.1.1".parse::<IpAddr>().unwrap());
         assert_eq!(
             args.proxy.addr,
