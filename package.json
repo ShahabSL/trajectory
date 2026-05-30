@@ -1,6 +1,6 @@
 {
   "name": "trajectory",
-  "version": "0.1.55",
+  "version": "0.1.56",
   "description": "Restricted-license Rust DNS transport",
   "private": true,
   "directories": {
