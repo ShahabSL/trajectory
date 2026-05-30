@@ -1126,7 +1126,7 @@ prepare_local_live_proxy_smoke() {
   local origin_port="${TRAJECTORY_ANDROID_SMOKE_LOCAL_ORIGIN_PORT:-$(pick_local_port)}"
   local host_ip="${TRAJECTORY_ANDROID_SMOKE_LOCAL_HOST_IP:-$(pick_host_ip)}"
   local device_host_ip="${TRAJECTORY_ANDROID_SMOKE_DEVICE_HOST_IP:-$(pick_android_device_host_ip "$host_ip")}"
-  local origin_target_host="${TRAJECTORY_ANDROID_SMOKE_LOCAL_ORIGIN_TARGET_HOST:-}"
+  local origin_target_host="${TRAJECTORY_ANDROID_SMOKE_LOCAL_ORIGIN_TARGET_HOST:-127.0.0.1}"
   local is_emulator
   is_emulator="$(adb shell getprop ro.kernel.qemu 2>/dev/null | tr -d '\r' || true)"
   local use_adb_reverse="${TRAJECTORY_ANDROID_SMOKE_USE_ADB_REVERSE:-}"
@@ -1139,8 +1139,6 @@ prepare_local_live_proxy_smoke() {
     device_host_ip="127.0.0.1"
     export TRAJECTORY_ANDROID_SMOKE_RESOLVER_TRANSPORT="${TRAJECTORY_ANDROID_SMOKE_RESOLVER_TRANSPORT:-tcp}"
   fi
-  origin_target_host="${origin_target_host:-$device_host_ip}"
-
   mkdir -p "$origin_dir"
   local_origin_marker="trajectory-android-smoke-${RANDOM}-${RANDOM}"
   printf '%s\n' "$local_origin_marker" > "$origin_dir/trajectory-smoke.txt"
@@ -1190,7 +1188,7 @@ prepare_local_live_proxy_smoke() {
   if [[ -z "${TRAJECTORY_ANDROID_SMOKE_VPN_FETCH_URL:-}" ]]; then
     export TRAJECTORY_ANDROID_SMOKE_VPN_FETCH_URL="${TRAJECTORY_ANDROID_SMOKE_DEFAULT_VPN_FETCH_URL:-http://example.com/}"
   fi
-  echo "Android local live proxy smoke server ready on host DNS port ${dns_port}; device host ${device_host_ip}; resolver transport ${TRAJECTORY_ANDROID_SMOKE_RESOLVER_TRANSPORT:-auto}; origin target http://${origin_target_host}:${origin_port}/trajectory-smoke.txt; vpn target ${TRAJECTORY_ANDROID_SMOKE_VPN_FETCH_URL}" \
+  echo "Android local live proxy smoke server ready on host DNS port ${dns_port}; device host ${device_host_ip}; resolver transport ${TRAJECTORY_ANDROID_SMOKE_RESOLVER_TRANSPORT:-auto}; proxy origin target http://${origin_target_host}:${origin_port}/trajectory-smoke.txt; vpn target ${TRAJECTORY_ANDROID_SMOKE_VPN_FETCH_URL}" \
     > "$artifact_dir/local-live-server-ready.txt"
 }
 
