@@ -15,9 +15,11 @@ exposes local SOCKS and HTTP proxy ports on `127.0.0.1`.
 - packaged `trajectory-client` arm64 sidecar
 - packaged `trajectory-client` x86_64 sidecar for emulator CI
 - experimental Android VPN mode through `VpnService`
-- TUN-to-SOCKS packet bridge through the packaged Rust `trajectory_vpn_bridge`
-  JNI library
-- DNS over TCP through the Trajectory tunnel while VPN mode is active
+- TUN-to-HTTP-CONNECT packet bridge through the packaged Rust
+  `trajectory_vpn_bridge` JNI library
+- DNS and app UDP through the Trajectory tunnel while VPN mode is active; UDP is
+  carried by tun2proxy's UDPGW protocol over the local HTTP proxy and the
+  server-side `127.0.0.1:7300` UDP gateway
 - loop protection through Android `addDisallowedApplication(packageName)` so
   the sidecar's resolver/control sockets bypass the TUN
 - SOCKS listener on `127.0.0.1:7000`
@@ -31,7 +33,9 @@ exposes local SOCKS and HTTP proxy ports on `127.0.0.1`.
 
 Android VPN mode is real but still intentionally conservative:
 
-- non-DNS UDP is not claimed until Trajectory has a tested UDP gateway path
+- UDP is enabled through the server UDP gateway, but weak networks and
+  UDP-heavy apps still need device-lab soak testing before always-on/lockdown
+  VPN is claimed
 - IPv6 is disabled by default until leak tests pass on devices
 - always-on/lockdown VPN is opted out in the manifest until kill-switch behavior
   is tested on real devices
@@ -96,10 +100,12 @@ fails on Android crash/ANR dialogs or `AndroidRuntime` crashes. In live mode it
 starts a local Trajectory server and HTTP origin, proves HTTP and SOCKS proxy
 fetches over the tunnel, starts VPN mode, verifies the separate smokeprobe app
 UID is routed through the Android VPN network, and makes that app fetch through
-the VPN data path.
+the VPN data path. Public CI artifacts intentionally exclude logcat and local
+server log files when live secrets are present.
 
 ## Product Boundary
 
 Proxy mode is stream-level and opt-in per app. VPN mode is packet-level and must
 not be called a complete privacy VPN until route, DNS, UDP, IPv6,
-loop-protection, and kill-switch behavior are tested on real Android devices.
+loop-protection, and kill-switch behavior pass repeatable soak tests on real
+Android devices.

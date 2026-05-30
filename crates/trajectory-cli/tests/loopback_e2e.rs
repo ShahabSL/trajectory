@@ -373,6 +373,7 @@ async fn raw_tcp_stream_roundtrips_through_dns_udp() {
         domain: domain.clone(),
         target: target_addr,
         target_mode: ServerTargetMode::Tcp,
+        udp_gateway_listen: None,
         authorized_clients: Arc::new(registry),
     }));
 
@@ -430,6 +431,7 @@ async fn all_client_modes_echo_through_dns_udp() {
         domain: domain.clone(),
         target: target_addr,
         target_mode: ServerTargetMode::Tcp,
+        udp_gateway_listen: None,
         authorized_clients: Arc::new(registry),
     }));
 
@@ -531,6 +533,7 @@ async fn socks_handshake_survives_dns_chunking() {
         domain: domain.clone(),
         target: target_addr,
         target_mode: ServerTargetMode::Tcp,
+        udp_gateway_listen: None,
         authorized_clients: Arc::new(registry),
     }));
 
@@ -608,6 +611,7 @@ async fn server_direct_socks5_mode_connects_without_external_proxy() {
         domain: domain.clone(),
         target: target_addr,
         target_mode: ServerTargetMode::Socks5Direct,
+        udp_gateway_listen: None,
         authorized_clients: Arc::new(registry),
     }));
 
@@ -686,6 +690,7 @@ async fn socks_proxy_mode_uses_direct_tunnel_open() {
         domain: domain.clone(),
         target: target_addr,
         target_mode: ServerTargetMode::Socks5Direct,
+        udp_gateway_listen: None,
         authorized_clients: Arc::new(registry),
     }));
 
@@ -764,6 +769,7 @@ async fn http_connect_proxy_mode_uses_direct_tunnel_open() {
         domain: domain.clone(),
         target: target_addr,
         target_mode: ServerTargetMode::Socks5Direct,
+        udp_gateway_listen: None,
         authorized_clients: Arc::new(registry),
     }));
 
@@ -838,6 +844,7 @@ async fn dns_tcp_over_socks_reuses_persistent_connection() {
         domain: domain.clone(),
         target: target_addr,
         target_mode: ServerTargetMode::Tcp,
+        udp_gateway_listen: None,
         authorized_clients: Arc::new(registry),
     }));
 
@@ -918,6 +925,7 @@ async fn regression_closed_streams_do_not_starve_followup_stream() {
         domain: domain.clone(),
         target: target_addr,
         target_mode: ServerTargetMode::Tcp,
+        udp_gateway_listen: None,
         authorized_clients: Arc::new(registry),
     }));
 
@@ -1058,6 +1066,7 @@ async fn acceptance_server_packs_control_for_multiple_streams_in_one_response() 
         domain: domain.clone(),
         target: target_addr,
         target_mode: ServerTargetMode::Tcp,
+        udp_gateway_listen: None,
         authorized_clients: Arc::new(registry),
     }));
     sleep(Duration::from_millis(50)).await;
@@ -1113,6 +1122,7 @@ async fn acceptance_small_stream_is_not_starved_by_large_stream_backlog() {
         domain: domain.clone(),
         target: target_addr,
         target_mode: ServerTargetMode::Tcp,
+        udp_gateway_listen: None,
         authorized_clients: Arc::new(registry),
     }));
     sleep(Duration::from_millis(50)).await;

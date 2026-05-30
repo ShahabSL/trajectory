@@ -131,6 +131,7 @@ Release and client gates are documented in [RELEASING.md](RELEASING.md). Live ne
 - [Desktop client](docs/DESKTOP_CLIENT.md)
 - [Android client](docs/ANDROID_CLIENT.md)
 - [Client app roadmap](docs/CLIENT_APPS.md)
+- [DNS path discovery](docs/DNS_PATH_DISCOVERY.md)
 - [CI e2e and secrets](docs/CI_E2E.md)
 - [Benchmark observability](docs/BENCHMARK_OBSERVABILITY.md)
 - [Security policy](SECURITY.md)

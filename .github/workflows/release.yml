@@ -554,7 +554,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: android-x86-release-ui-smoke-${{ matrix.name }}
-          path: ${{ runner.temp }}/${{ matrix.smoke_dir }}
+          path: |
+            ${{ runner.temp }}/${{ matrix.smoke_dir }}
+            !${{ runner.temp }}/${{ matrix.smoke_dir }}/*logcat*.txt
+            !${{ runner.temp }}/${{ matrix.smoke_dir }}/*.log
           if-no-files-found: error
           retention-days: 14
 

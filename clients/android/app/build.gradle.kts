@@ -1,4 +1,3 @@
-import java.io.ByteArrayOutputStream
 import java.util.Properties
 
 plugins {
@@ -60,18 +59,6 @@ fun androidNdkDir(): File {
     return ndkRoot.listFiles { candidate -> candidate.isDirectory }
         ?.maxByOrNull { it.name }
         ?: throw GradleException("Android NDK was not found under ${ndkRoot.absolutePath}")
-}
-
-fun commandOutput(vararg command: String): String {
-    val stdout = ByteArrayOutputStream()
-    val stderr = ByteArrayOutputStream()
-    val result = exec {
-        commandLine(*command)
-        standardOutput = stdout
-        errorOutput = stderr
-        isIgnoreExitValue = true
-    }
-    return if (result.exitValue == 0) stdout.toString().trim() else ""
 }
 
 val buildTrajectorySidecar = tasks.register("buildTrajectorySidecar") {
@@ -157,8 +144,8 @@ android {
         applicationId = "app.trajectory.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 54
-        versionName = "0.1.54"
+        versionCode = 55
+        versionName = "0.1.55"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -211,9 +198,6 @@ android {
         }
     }
 
-    lint {
-        disable += "NullSafeMutableLiveData"
-    }
 }
 
 dependencies {
@@ -221,13 +205,13 @@ dependencies {
 
     implementation(composeBom)
     implementation("androidx.activity:activity-compose:1.10.1")
+    implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.compose.animation:animation")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.graphics:graphics-path:1.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
 

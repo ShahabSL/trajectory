@@ -10,8 +10,11 @@ import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.URI
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -97,13 +100,13 @@ class TrajectoryVpnService : VpnService() {
             stopRuntime(resetStatus = false)
             return
         }
-        if (!waitForPort(profile.socksPort, listenerStartupTimeoutMs(profile))) {
+        if (!waitForPort(profile.httpPort, listenerStartupTimeoutMs(profile))) {
             if (!RuntimeStatusCenter.isFailed(RuntimeMode.VPN)) {
-                android.util.Log.e("TrajectoryVpn", "local Trajectory SOCKS listener did not become ready")
+                android.util.Log.e("TrajectoryVpn", "local Trajectory HTTP listener did not become ready")
                 RuntimeStatusCenter.markFailed(
                     RuntimeMode.VPN,
-                    "SOCKS listener",
-                    "127.0.0.1:${profile.socksPort} did not open. Edit the SOCKS port in Profile.",
+                    "HTTP listener",
+                    "127.0.0.1:${profile.httpPort} did not open. Edit the HTTP port in Profile.",
                 )
             }
             stopRuntime(resetStatus = false)
@@ -125,14 +128,19 @@ class TrajectoryVpnService : VpnService() {
         val rawFd = tun.detachFd()
         running = true
         RuntimeStatusCenter.markTunEstablished()
-        startVpnForeground("VPN bridge starting via SOCKS 127.0.0.1:${profile.socksPort}")
+        startVpnForeground("VPN bridge starting via HTTP 127.0.0.1:${profile.httpPort}")
         bridgeExecutor.execute {
             val bridgeExited = AtomicBoolean(false)
             val readinessMarker = Thread {
                 try {
-                    Thread.sleep(1_000)
-                    if (running && !requestedStop && !bridgeExited.get() && RuntimeStatusCenter.markVpnConnectedIfActive()) {
-                        startVpnForeground("VPN connected via SOCKS 127.0.0.1:${profile.socksPort}")
+                    val probeUrl = ConnectivityProbeConfig.loadHttpUrl(this)
+                    if (waitForHttpProxyDataPath(profile, probeUrl, 15_000) &&
+                        running &&
+                        !requestedStop &&
+                        !bridgeExited.get() &&
+                        RuntimeStatusCenter.markVpnDataPathReady(profile, probeUrl)
+                    ) {
+                        startVpnForeground("VPN connected via HTTP 127.0.0.1:${profile.httpPort}")
                     }
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
@@ -141,7 +149,7 @@ class TrajectoryVpnService : VpnService() {
             readinessMarker.start()
             val code = TrajectoryVpnBridge.run(
                 rawFd,
-                profile.socksPort,
+                profile.httpPort,
                 profile.vpnDnsServer,
                 profile.vpnMtu,
                 profile.vpnMaxSessions,
@@ -235,6 +243,51 @@ class TrajectoryVpnService : VpnService() {
             }
         }
         return false
+    }
+
+    private fun waitForHttpProxyDataPath(profile: ClientProfile, probeUrl: String, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (requestedStop || !running || RuntimeStatusCenter.isFailed(RuntimeMode.VPN)) return false
+            if (probeHttpProxy(profile.httpPort, probeUrl)) return true
+            try {
+                Thread.sleep(250)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+        }
+        return probeHttpProxy(profile.httpPort, probeUrl)
+    }
+
+    private fun probeHttpProxy(httpPort: Int, probeUrl: String): Boolean {
+        return try {
+            val uri = URI(probeUrl)
+            if (uri.scheme != "http" || uri.host.isNullOrBlank()) {
+                return false
+            }
+            val hostHeader = if (uri.port > 0) "${uri.host}:${uri.port}" else uri.host
+            Socket().use { socket ->
+                socket.soTimeout = 3_000
+                socket.connect(InetSocketAddress("127.0.0.1", httpPort), 1_000)
+                val request = buildString {
+                    append("GET ")
+                    append(uri.toASCIIString())
+                    append(" HTTP/1.1\r\nHost: ")
+                    append(hostHeader)
+                    append("\r\nConnection: close\r\nUser-Agent: TrajectoryAndroidVpnProbe/0.1\r\n\r\n")
+                }
+                socket.getOutputStream().write(request.toByteArray(Charsets.US_ASCII))
+                socket.getOutputStream().flush()
+                val status = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.US_ASCII)).readLine()
+                    ?: return false
+                val code = status.split(' ').getOrNull(1)?.toIntOrNull()
+                    ?: return false
+                code in 200..499
+            }
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun startVpnForeground(text: String) {

@@ -163,7 +163,7 @@ class TrajectoryRuntimeProcess(
         }
 
         private fun redact(line: String): String =
-            line.replace(Regex("traj1_[A-Za-z0-9_=-]+"), "[redacted]")
+            redactDiagnosticText(line)
     }
 
     private fun failStart(reason: String): Boolean {

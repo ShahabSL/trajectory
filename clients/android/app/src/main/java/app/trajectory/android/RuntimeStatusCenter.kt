@@ -43,26 +43,25 @@ data class RuntimeStatusSnapshot(
 )
 
 object RuntimeStatusCenter {
-    private const val LOG_LIMIT = 160
+    private const val LOG_LIMIT = 600
     private val lock = Any()
     private var snapshot = RuntimeStatusSnapshot()
 
     fun snapshot(): RuntimeStatusSnapshot = synchronized(lock) { snapshot }
 
     fun reset(detail: String = "Proxy and VPN services are stopped.") {
-        update(
-            mode = RuntimeMode.NONE,
-            phase = RuntimePhase.DISCONNECTED,
-            title = "Disconnected",
-            detail = detail,
-            socksReady = false,
-            httpReady = false,
-            tunReady = false,
-            bridgeReady = false,
-            admittedResolvers = 0,
-            candidateResolvers = 0,
-            lastError = null,
-        )
+        synchronized(lock) {
+            snapshot = RuntimeStatusSnapshot(detail = redactDiagnosticText(detail))
+        }
+    }
+
+    fun clearLogs() {
+        synchronized(lock) {
+            snapshot = snapshot.copy(
+                logs = emptyList(),
+                updatedAtMillis = System.currentTimeMillis(),
+            )
+        }
     }
 
     fun starting(mode: RuntimeMode, detail: String) {
@@ -102,14 +101,15 @@ object RuntimeStatusCenter {
     }
 
     fun markFailed(mode: RuntimeMode, step: String, error: String) {
+        val safeError = redactDiagnosticText(error)
         update(
             mode = mode,
             phase = RuntimePhase.FAILED,
             title = "Failed",
-            detail = "$step: $error",
-            lastError = error,
+            detail = "$step: $safeError",
+            lastError = safeError,
         )
-        appendLog("failed at $step: $error")
+        appendLog("failed at $step: $safeError")
     }
 
     fun markSidecarExited(mode: RuntimeMode, error: String) {
@@ -135,28 +135,29 @@ object RuntimeStatusCenter {
             mode = RuntimeMode.VPN,
             phase = RuntimePhase.BRIDGE_STARTING,
             title = "Starting bridge",
-            detail = "Android TUN is established; starting the packet bridge through local SOCKS.",
+            detail = "Android TUN is established; starting the TCP packet bridge through local HTTP CONNECT.",
             tunReady = true,
         )
     }
 
-    fun markVpnConnectedIfActive(): Boolean = synchronized(lock) {
+    fun markVpnDataPathReady(profile: ClientProfile, probeUrl: String): Boolean = synchronized(lock) {
         val current = snapshot
         if (current.mode != RuntimeMode.VPN ||
             current.phase == RuntimePhase.FAILED ||
             current.phase == RuntimePhase.STOPPING ||
             current.phase == RuntimePhase.DISCONNECTED ||
             !current.tunReady ||
-            !current.socksReady
+            !current.httpReady
         ) {
             return@synchronized false
         }
         snapshot = current.copy(
             phase = RuntimePhase.VPN_CONNECTED,
             title = "VPN connected",
-            detail = "TUN is established, local SOCKS is accepting connections, and the packet bridge stayed alive past startup guard.",
+            detail = "Android TUN is established and HTTP data path proof passed through ${probeUrl.take(96)}.",
             tunReady = true,
             bridgeReady = true,
+            candidateResolvers = current.candidateResolvers.coerceAtLeast(profile.resolvers.size),
             lastError = null,
             updatedAtMillis = System.currentTimeMillis(),
         )
@@ -169,7 +170,7 @@ object RuntimeStatusCenter {
             phase = RuntimePhase.VPN_CONNECTED,
             title = "VPN connected",
             detail = "Test-only connected state.",
-            socksReady = true,
+            httpReady = true,
             tunReady = true,
             bridgeReady = true,
         )
@@ -206,6 +207,7 @@ object RuntimeStatusCenter {
         appendLog(line)
         val lower = line.lowercase(Locale.US)
         val current = snapshot()
+        val safeLine = redactDiagnosticText(line)
 
         if (isClientTransportDiag(lower)) {
             return
@@ -223,7 +225,7 @@ object RuntimeStatusCenter {
                     detail = "Resolver admission: $admitted DNS path(s) passed; $required required. Check resolver transport, domain NS records, and access key.",
                     admittedResolvers = admitted,
                     candidateResolvers = current.candidateResolvers.coerceAtLeast(profile.resolvers.size),
-                    lastError = line.take(180),
+                    lastError = safeLine.take(180),
                 )
                 return
             }
@@ -283,7 +285,7 @@ object RuntimeStatusCenter {
                 title = "SOCKS port unavailable",
                 detail = "127.0.0.1:${profile.socksPort} could not open. Edit the SOCKS port in Profile and try again.",
                 candidateResolvers = current.candidateResolvers.coerceAtLeast(profile.resolvers.size),
-                lastError = line.take(180),
+                lastError = safeLine.take(180),
             )
             return
         }
@@ -295,7 +297,7 @@ object RuntimeStatusCenter {
                 title = "HTTP port unavailable",
                 detail = "127.0.0.1:${profile.httpPort} could not open. Edit the HTTP port in Profile and try again.",
                 candidateResolvers = current.candidateResolvers.coerceAtLeast(profile.resolvers.size),
-                lastError = line.take(180),
+                lastError = safeLine.take(180),
             )
             return
         }
@@ -341,8 +343,8 @@ object RuntimeStatusCenter {
                     mode = mode,
                     phase = RuntimePhase.DEGRADED,
                     title = "Degraded",
-                    detail = line.take(180),
-                    lastError = line.take(180),
+                    detail = safeLine.take(180),
+                    lastError = safeLine.take(180),
                 )
             }
         }
@@ -358,7 +360,6 @@ object RuntimeStatusCenter {
             lowercaseLine.contains("broken pipe") ||
             lowercaseLine.contains("connection reset by peer") ||
             lowercaseLine.contains("early eof") ||
-            lowercaseLine.contains("socks proxy mode supports connect only") ||
             lowercaseLine.contains("socks client used unsupported version") ||
             lowercaseLine.contains("socks client did not offer no-auth method")
     }
@@ -416,6 +417,7 @@ object RuntimeStatusCenter {
         val socksReady = current.socksReady || isPortOpen(profile.socksPort)
         val httpReady = current.httpReady || isPortOpen(profile.httpPort)
         val proxyReady = socksReady && httpReady
+        val vpnProxyReady = httpReady
         val tunnelReady = current.admittedResolvers > 0
 
         when {
@@ -428,22 +430,22 @@ object RuntimeStatusCenter {
                 httpReady = true,
                 lastError = null,
             )
-            mode == RuntimeMode.VPN && socksReady && tunnelReady -> update(
+            mode == RuntimeMode.VPN && vpnProxyReady && tunnelReady -> update(
                 mode = RuntimeMode.VPN,
                 phase = RuntimePhase.ESTABLISHING_TUN,
                 title = "Establishing VPN",
                 detail = "Signed DNS path admission passed; creating the Android TUN interface.",
-                socksReady = true,
-                httpReady = httpReady,
+                socksReady = socksReady,
+                httpReady = true,
                 lastError = null,
             )
-            mode == RuntimeMode.VPN && socksReady -> update(
+            mode == RuntimeMode.VPN && vpnProxyReady -> update(
                 mode = RuntimeMode.VPN,
                 phase = RuntimePhase.LISTENERS_READY,
                 title = "Waiting for DNS proof",
-                detail = "Local SOCKS is open; waiting for a signed resolver admission proof before creating VPN.",
-                socksReady = true,
-                httpReady = httpReady,
+                detail = "Local HTTP CONNECT is open; waiting for a signed resolver admission proof before creating VPN.",
+                socksReady = socksReady,
+                httpReady = true,
                 lastError = null,
             )
         }
@@ -451,7 +453,7 @@ object RuntimeStatusCenter {
 
     private fun appendLog(line: String) {
         synchronized(lock) {
-            val nextLogs = (snapshot.logs + line).takeLast(LOG_LIMIT)
+            val nextLogs = (snapshot.logs + redactDiagnosticText(line)).takeLast(LOG_LIMIT)
             snapshot = snapshot.copy(
                 logs = nextLogs,
                 updatedAtMillis = System.currentTimeMillis(),

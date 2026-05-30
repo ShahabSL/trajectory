@@ -20,11 +20,19 @@ sudo ss -tulpn | grep ':53'
 
 | Mode | Use When | Client Behavior |
 | --- | --- | --- |
-| `socks5-direct` | easiest first install | clients can point SOCKS5-capable apps at `trajectory-client` |
+| `socks5-direct` | easiest first install, required for Android VPN UDP | clients can point SOCKS5-capable apps at `trajectory-client`; Android VPN can open the server UDP gateway |
 | `127.0.0.1:1080` | a SOCKS5 daemon already runs on the server | clients can point SOCKS5-capable apps at `trajectory-client` |
 | `HOST:PORT` | you want a fixed raw TCP upstream | clients must speak that upstream protocol |
 
 For a first install, use `socks5-direct`.
+
+Android VPN mode also needs the server-side UDP gateway. `trajectory-server`
+binds it on `127.0.0.1:7300` by default and fails startup if that local port is
+unavailable. Disable it only for proxy-only deployments:
+
+```bash
+trajectory-server ... --disable-udp-gateway
+```
 
 ## Build
 
@@ -115,6 +123,11 @@ proxy settings. It supports HTTPS `CONNECT` and absolute-form `http://...`
 requests, and it requires the server egress target to be `socks5-direct` or a
 SOCKS5 upstream.
 
+Android VPN mode uses the HTTP listener internally. UDP-heavy apps such as
+Telegram calls, speed-test clients, YouTube, and Instagram should be validated
+against a server installed with `--target-address socks5-direct` so tunneled
+HTTP CONNECT streams can reach the server's local UDP gateway.
+
 `--socks-listen` is the optimized browser/client path. It parses the local
 SOCKS5 CONNECT target and carries `host:port` in the tunnel open frame, instead
 of spending DNS round trips on an inner SOCKS handshake. `--listen` is still the
@@ -197,6 +210,11 @@ Client starts but `curl` hangs
 
 `connect target 127.0.0.1:1080`
 : The server is configured for a local upstream that is not running. Reinstall with `--target-address socks5-direct` or start the upstream SOCKS daemon.
+
+`bind UDP gateway 127.0.0.1:7300`
+: Another process owns the Android VPN UDP gateway port. Stop that process,
+choose a different gateway listen address with `--udp-gateway-listen`, or start
+the server with `--disable-udp-gateway` for proxy-only use.
 
 Local `curl` says connection refused
 : `trajectory-client` is not running or the command points at the wrong `--listen` port.

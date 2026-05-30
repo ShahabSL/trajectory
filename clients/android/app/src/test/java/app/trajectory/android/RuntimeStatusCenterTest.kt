@@ -73,6 +73,55 @@ class RuntimeStatusCenterTest {
     }
 
     @Test
+    fun connectedVpnDegradesWhenHttpBridgeRejectsUdp() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.markVpnConnectedForTest()
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.VPN,
+            profile(),
+            "Failed to create UDP connection: Protocol not supported by HTTP proxy",
+        )
+
+        assertEquals(RuntimePhase.DEGRADED, RuntimeStatusCenter.snapshot().phase)
+    }
+
+    @Test
+    fun connectedVpnDegradesOnUnsupportedSocksCommand() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.markVpnConnectedForTest()
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.VPN,
+            profile(),
+            "SOCKS proxy stream 12 from 127.0.0.1:56442 failed: SOCKS proxy mode supports CONNECT only",
+        )
+
+        assertEquals(RuntimePhase.DEGRADED, RuntimeStatusCenter.snapshot().phase)
+    }
+
+    @Test
+    fun vpnConnectedRequiresTunAndDataPathProof() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.VPN,
+            profile(),
+            "trajectory HTTP proxy listening on 127.0.0.1:65002",
+        )
+
+        assertEquals(
+            false,
+            RuntimeStatusCenter.markVpnDataPathReady(profile(), "http://example.com/"),
+        )
+
+        RuntimeStatusCenter.markTunEstablished()
+
+        assertEquals(
+            true,
+            RuntimeStatusCenter.markVpnDataPathReady(profile(), "http://example.com/"),
+        )
+        assertEquals(RuntimePhase.VPN_CONNECTED, RuntimeStatusCenter.snapshot().phase)
+    }
+
+    @Test
     fun connectedProxyDoesNotDegradeOnNormalHttpClientClose() {
         RuntimeStatusCenter.reset()
         RuntimeStatusCenter.markProxyDataPathReady(profile(), "http://127.0.0.1:8080/smoke")
@@ -203,6 +252,29 @@ class RuntimeStatusCenterTest {
             "127.0.0.1:65001 could not open. Edit the SOCKS port in Profile and try again.",
             snapshot.detail,
         )
+    }
+
+    @Test
+    fun runtimeLogsAreRedactedAndClearable() {
+        RuntimeStatusCenter.reset()
+        RuntimeStatusCenter.markProxyDataPathReady(profile(), "http://127.0.0.1:8080/smoke")
+        RuntimeStatusCenter.observeRuntimeLine(
+            RuntimeMode.PROXY,
+            profile(),
+            "failed with access key traj1_secret_key_=",
+        )
+
+        var snapshot = RuntimeStatusCenter.snapshot()
+        assertEquals(RuntimePhase.DEGRADED, snapshot.phase)
+        assertEquals("failed with access key traj1_REDACTED", snapshot.logs.single())
+        assertEquals("failed with access key traj1_REDACTED", snapshot.lastError)
+
+        RuntimeStatusCenter.clearLogs()
+        snapshot = RuntimeStatusCenter.snapshot()
+        assertEquals(emptyList<String>(), snapshot.logs)
+
+        RuntimeStatusCenter.reset()
+        assertEquals(emptyList<String>(), RuntimeStatusCenter.snapshot().logs)
     }
 
     private fun profile(): ClientProfile = ClientProfile(

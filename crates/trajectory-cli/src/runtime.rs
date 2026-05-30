@@ -333,6 +333,7 @@ pub struct ServerConfig {
     pub domain: String,
     pub target: SocketAddr,
     pub target_mode: ServerTargetMode,
+    pub udp_gateway_listen: Option<SocketAddr>,
     pub authorized_clients: Arc<HashMap<u32, ClientAccessKey>>,
 }
 
@@ -2557,7 +2558,6 @@ fn is_benign_proxy_stream_error(error: &anyhow::Error) -> bool {
         || text.contains("connection reset by peer")
         || text.contains("early eof")
         || text.contains("client closed before sending headers")
-        || text.contains("socks proxy mode supports connect only")
 }
 
 async fn run_socks_proxy_stream_io(
@@ -4900,9 +4900,24 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
     let tcp = TcpListener::bind(config.bind)
         .await
         .with_context(|| format!("bind TCP DNS {}", config.bind))?;
+    let udp_gateway = match config.udp_gateway_listen {
+        Some(bind) => Some(
+            TcpListener::bind(bind)
+                .await
+                .with_context(|| format!("bind UDP gateway {bind}"))?,
+        ),
+        None => None,
+    };
     let shared = Arc::new(ServerState::new(config));
 
     eprintln!("trajectory server listening on {}", udp.local_addr()?);
+    if let Some(udp_gateway) = udp_gateway {
+        tokio::spawn(async move {
+            if let Err(error) = run_udp_gateway_server(udp_gateway).await {
+                eprintln!("UDP gateway failed: {error:#}");
+            }
+        });
+    }
     let udp_state = Arc::clone(&shared);
     tokio::spawn(async move {
         if let Err(error) = run_udp_server(udp_state, udp).await {
@@ -5029,7 +5044,9 @@ impl ServerState {
                 },
             };
             if let Err(error) = result {
-                eprintln!("server target session failed: {error:#}");
+                if !is_benign_server_target_error(&error) {
+                    eprintln!("server target session failed: {error:#}");
+                }
             }
         });
         handle
@@ -5628,6 +5645,7 @@ async fn run_server_socks5_direct_session(
     Ok(())
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum SocketTarget {
     Ip(SocketAddr),
     Domain(String, u16),
@@ -5657,6 +5675,421 @@ async fn connect_socket_target(target: SocketTarget) -> Result<TcpStream> {
             .await
             .with_context(|| format!("connect SOCKS target {host}:{port}")),
     }
+}
+
+const UDPGW_FLAG_KEEPALIVE: u8 = 0x01;
+const UDPGW_FLAG_DATA: u8 = 0x02;
+const UDPGW_FLAG_ERROR: u8 = 0x20;
+const SERVER_UDPGW_RESPONSE_CHANNEL: usize = 128;
+const SERVER_UDPGW_RESPONSE_MTU: usize = 4096;
+const SERVER_UDPGW_CLIENT_IDLE: Duration = Duration::from_secs(60);
+const SERVER_UDPGW_SOCKET_IDLE: Duration = Duration::from_secs(60);
+
+#[derive(Clone)]
+struct UdpGatewayAssociation {
+    socket: Arc<UdpSocket>,
+    target: SocketTarget,
+    generation: u64,
+}
+
+#[derive(Clone, Debug)]
+struct UdpGatewayPacket {
+    flags: u8,
+    conn_id: u16,
+    target: Option<SocketTarget>,
+    data: Vec<u8>,
+}
+
+impl UdpGatewayPacket {
+    fn keepalive(conn_id: u16) -> Self {
+        Self {
+            flags: UDPGW_FLAG_KEEPALIVE,
+            conn_id,
+            target: None,
+            data: Vec::new(),
+        }
+    }
+
+    fn error(conn_id: u16) -> Self {
+        Self {
+            flags: UDPGW_FLAG_ERROR,
+            conn_id,
+            target: None,
+            data: Vec::new(),
+        }
+    }
+
+    fn data(conn_id: u16, target: SocketTarget, data: Vec<u8>) -> Self {
+        Self {
+            flags: UDPGW_FLAG_DATA,
+            conn_id,
+            target: Some(target),
+            data,
+        }
+    }
+}
+
+async fn run_udp_gateway_server(listener: TcpListener) -> Result<()> {
+    eprintln!(
+        "trajectory UDP gateway listening on {}",
+        listener.local_addr()?
+    );
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        tokio::spawn(async move {
+            if let Err(error) = run_udp_gateway_client(stream).await {
+                if !is_benign_udp_gateway_error(&error) {
+                    eprintln!("UDP gateway connection from {peer} failed: {error:#}");
+                }
+            }
+        });
+    }
+}
+
+fn is_benign_server_target_error(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    text.contains("channel closed")
+        || text.contains("broken pipe")
+        || text.contains("connection reset by peer")
+        || text.contains("early eof")
+}
+
+fn is_benign_udp_gateway_error(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    text.contains("early eof")
+        || text.contains("broken pipe")
+        || text.contains("connection reset by peer")
+        || text.contains("unsupported address type")
+}
+
+async fn run_udp_gateway_client(stream: TcpStream) -> Result<()> {
+    let (mut reader, mut writer) = stream.into_split();
+    let (tx, mut rx) = mpsc::channel::<UdpGatewayPacket>(SERVER_UDPGW_RESPONSE_CHANNEL);
+    let associations = Arc::new(Mutex::new(HashMap::<u16, UdpGatewayAssociation>::new()));
+    let next_generation = Arc::new(AtomicU64::new(1));
+
+    let read_tx = tx.clone();
+    let read_associations = Arc::clone(&associations);
+    let read_generations = Arc::clone(&next_generation);
+    let read_task = tokio::spawn(async move {
+        let mut last_activity = Instant::now();
+        loop {
+            let packet =
+                match timeout(Duration::from_secs(2), read_udp_gateway_packet(&mut reader)).await {
+                    Ok(Ok(packet)) => packet,
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) if last_activity.elapsed() >= SERVER_UDPGW_CLIENT_IDLE => return Ok(()),
+                    Err(_) => continue,
+                };
+            last_activity = Instant::now();
+
+            if packet.flags & UDPGW_FLAG_KEEPALIVE == UDPGW_FLAG_KEEPALIVE {
+                let _ = read_tx
+                    .send(UdpGatewayPacket::keepalive(packet.conn_id))
+                    .await;
+                continue;
+            }
+            if packet.flags & UDPGW_FLAG_DATA != UDPGW_FLAG_DATA {
+                let _ = read_tx.send(UdpGatewayPacket::error(packet.conn_id)).await;
+                continue;
+            }
+
+            let tx = read_tx.clone();
+            let associations = Arc::clone(&read_associations);
+            let generations = Arc::clone(&read_generations);
+            tokio::spawn(async move {
+                if handle_udp_gateway_data_packet(
+                    packet.clone(),
+                    associations,
+                    generations,
+                    tx.clone(),
+                )
+                .await
+                .is_err()
+                {
+                    let _ = tx.send(UdpGatewayPacket::error(packet.conn_id)).await;
+                }
+            });
+        }
+    });
+
+    let write_task = tokio::spawn(async move {
+        while let Some(packet) = rx.recv().await {
+            write_udp_gateway_packet(&mut writer, &packet).await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    });
+
+    tokio::select! {
+        result = read_task => result.context("UDP gateway reader task panicked")??,
+        result = write_task => result.context("UDP gateway writer task panicked")??,
+    }
+    Ok(())
+}
+
+async fn handle_udp_gateway_data_packet(
+    packet: UdpGatewayPacket,
+    associations: Arc<Mutex<HashMap<u16, UdpGatewayAssociation>>>,
+    next_generation: Arc<AtomicU64>,
+    tx: mpsc::Sender<UdpGatewayPacket>,
+) -> Result<()> {
+    let target = packet
+        .target
+        .clone()
+        .context("UDP gateway data packet missing target")?;
+    let association = {
+        let existing = associations.lock().await.get(&packet.conn_id).cloned();
+        match existing {
+            Some(association) if association.target == target => association,
+            _ => {
+                let generation = next_generation.fetch_add(1, Ordering::Relaxed);
+                let association = create_udp_gateway_association(
+                    packet.conn_id,
+                    target.clone(),
+                    generation,
+                    Arc::clone(&associations),
+                    tx,
+                )
+                .await?;
+                associations
+                    .lock()
+                    .await
+                    .insert(packet.conn_id, association.clone());
+                association
+            }
+        }
+    };
+    association
+        .socket
+        .send(&packet.data)
+        .await
+        .context("send UDP gateway datagram")?;
+    Ok(())
+}
+
+async fn create_udp_gateway_association(
+    conn_id: u16,
+    target: SocketTarget,
+    generation: u64,
+    associations: Arc<Mutex<HashMap<u16, UdpGatewayAssociation>>>,
+    tx: mpsc::Sender<UdpGatewayPacket>,
+) -> Result<UdpGatewayAssociation> {
+    let destination = resolve_udp_gateway_target(&target).await?;
+    let bind = match destination {
+        SocketAddr::V4(_) => "0.0.0.0:0",
+        SocketAddr::V6(_) => "[::]:0",
+    };
+    let socket = Arc::new(
+        UdpSocket::bind(bind)
+            .await
+            .with_context(|| format!("bind UDP gateway socket for {destination}"))?,
+    );
+    socket
+        .connect(destination)
+        .await
+        .with_context(|| format!("connect UDP gateway target {destination}"))?;
+
+    let reader_socket = Arc::clone(&socket);
+    let response_target = target.clone();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; SERVER_UDPGW_RESPONSE_MTU];
+        loop {
+            let len = match timeout(SERVER_UDPGW_SOCKET_IDLE, reader_socket.recv(&mut buf)).await {
+                Ok(Ok(len)) => len,
+                Ok(Err(_)) | Err(_) => break,
+            };
+            let current = associations.lock().await.get(&conn_id).cloned();
+            if !matches!(
+                current,
+                Some(association)
+                    if association.generation == generation && association.target == response_target
+            ) {
+                break;
+            }
+            if tx
+                .send(UdpGatewayPacket::data(
+                    conn_id,
+                    response_target.clone(),
+                    buf[..len].to_vec(),
+                ))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+        let mut associations = associations.lock().await;
+        if matches!(
+            associations.get(&conn_id),
+            Some(association) if association.generation == generation
+        ) {
+            associations.remove(&conn_id);
+        }
+    });
+
+    Ok(UdpGatewayAssociation {
+        socket,
+        target,
+        generation,
+    })
+}
+
+async fn resolve_udp_gateway_target(target: &SocketTarget) -> Result<SocketAddr> {
+    match target {
+        SocketTarget::Ip(addr) => Ok(*addr),
+        SocketTarget::Domain(host, port) => {
+            let mut addrs = tokio::net::lookup_host((host.as_str(), *port))
+                .await
+                .with_context(|| format!("resolve UDP gateway target {host}:{port}"))?;
+            addrs
+                .next()
+                .with_context(|| format!("no UDP gateway target address for {host}:{port}"))
+        }
+    }
+}
+
+async fn read_udp_gateway_packet<R>(reader: &mut R) -> Result<UdpGatewayPacket>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut len = [0u8; 2];
+    reader
+        .read_exact(&mut len)
+        .await
+        .context("read UDP gateway packet length")?;
+    let len = u16::from_be_bytes(len) as usize;
+    if len < 3 {
+        bail!("UDP gateway packet is shorter than header");
+    }
+    let mut body = vec![0u8; len];
+    reader
+        .read_exact(&mut body)
+        .await
+        .context("read UDP gateway packet body")?;
+    decode_udp_gateway_packet_body(&body)
+}
+
+fn decode_udp_gateway_packet_body(body: &[u8]) -> Result<UdpGatewayPacket> {
+    if body.len() < 3 {
+        bail!("UDP gateway packet is shorter than header");
+    }
+    let flags = body[0];
+    let conn_id = u16::from_be_bytes([body[1], body[2]]);
+    let mut index = 3;
+    let target = if flags & UDPGW_FLAG_DATA == UDPGW_FLAG_DATA {
+        Some(decode_udp_gateway_address(body, &mut index)?)
+    } else {
+        None
+    };
+    Ok(UdpGatewayPacket {
+        flags,
+        conn_id,
+        target,
+        data: body[index..].to_vec(),
+    })
+}
+
+fn decode_udp_gateway_address(body: &[u8], index: &mut usize) -> Result<SocketTarget> {
+    let atyp = *body
+        .get(*index)
+        .context("UDP gateway packet missing address type")?;
+    *index += 1;
+    match atyp {
+        0x01 => {
+            let octets = read_udp_gateway_bytes(body, index, 4)?;
+            let port = read_udp_gateway_port(body, index)?;
+            Ok(SocketTarget::Ip(SocketAddr::from((
+                std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]),
+                port,
+            ))))
+        }
+        0x03 => {
+            let len = *body
+                .get(*index)
+                .context("UDP gateway packet missing domain length")?
+                as usize;
+            *index += 1;
+            let name = String::from_utf8(read_udp_gateway_bytes(body, index, len)?.to_vec())
+                .context("UDP gateway domain is not valid UTF-8")?;
+            let port = read_udp_gateway_port(body, index)?;
+            Ok(SocketTarget::Domain(name, port))
+        }
+        0x04 => {
+            let octets = read_udp_gateway_bytes(body, index, 16)?;
+            let mut ip = [0u8; 16];
+            ip.copy_from_slice(octets);
+            let port = read_udp_gateway_port(body, index)?;
+            Ok(SocketTarget::Ip(SocketAddr::from((
+                std::net::Ipv6Addr::from(ip),
+                port,
+            ))))
+        }
+        _ => bail!("UDP gateway packet used unsupported address type {atyp}"),
+    }
+}
+
+fn read_udp_gateway_bytes<'a>(body: &'a [u8], index: &mut usize, len: usize) -> Result<&'a [u8]> {
+    let end = index.saturating_add(len);
+    let bytes = body
+        .get(*index..end)
+        .context("UDP gateway packet truncated")?;
+    *index = end;
+    Ok(bytes)
+}
+
+fn read_udp_gateway_port(body: &[u8], index: &mut usize) -> Result<u16> {
+    let bytes = read_udp_gateway_bytes(body, index, 2)?;
+    Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+async fn write_udp_gateway_packet<W>(writer: &mut W, packet: &UdpGatewayPacket) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut body = Vec::with_capacity(3 + packet.data.len() + 32);
+    body.push(packet.flags);
+    body.extend_from_slice(&packet.conn_id.to_be_bytes());
+    if let Some(target) = &packet.target {
+        encode_udp_gateway_address(&mut body, target)?;
+    }
+    body.extend_from_slice(&packet.data);
+    if body.len() > u16::MAX as usize {
+        bail!("UDP gateway packet exceeds wire length limit");
+    }
+    writer
+        .write_all(&(body.len() as u16).to_be_bytes())
+        .await
+        .context("write UDP gateway packet length")?;
+    writer
+        .write_all(&body)
+        .await
+        .context("write UDP gateway packet body")?;
+    Ok(())
+}
+
+fn encode_udp_gateway_address(out: &mut Vec<u8>, target: &SocketTarget) -> Result<()> {
+    match target {
+        SocketTarget::Ip(SocketAddr::V4(addr)) => {
+            out.push(0x01);
+            out.extend_from_slice(&addr.ip().octets());
+            out.extend_from_slice(&addr.port().to_be_bytes());
+        }
+        SocketTarget::Ip(SocketAddr::V6(addr)) => {
+            out.push(0x04);
+            out.extend_from_slice(&addr.ip().octets());
+            out.extend_from_slice(&addr.port().to_be_bytes());
+        }
+        SocketTarget::Domain(host, port) => {
+            if host.len() > u8::MAX as usize {
+                bail!("UDP gateway domain is too long");
+            }
+            out.push(0x03);
+            out.push(host.len() as u8);
+            out.extend_from_slice(host.as_bytes());
+            out.extend_from_slice(&port.to_be_bytes());
+        }
+    }
+    Ok(())
 }
 
 async fn send_socks5_reply(
@@ -6339,7 +6772,10 @@ fn response_frame_fits(
     frame: &Frame,
 ) -> Result<bool> {
     let budget = dns_response_budget(response.max_response_bytes);
-    let envelope_len = sealed_packet_len_with_extra_frame(response, frame)?;
+    let envelope_len = match sealed_packet_len_with_extra_frame(response, frame) {
+        Ok(len) => len,
+        Err(_) => return Ok(false),
+    };
     Ok(txt_response_wire_len(query, envelope_len) <= budget)
 }
 
@@ -6349,7 +6785,10 @@ fn response_packet_fits(
     response: &Packet,
 ) -> Result<bool> {
     let budget = dns_response_budget(response.max_response_bytes);
-    let envelope_len = sealed_packet_len(response)?;
+    let envelope_len = match sealed_packet_len(response) {
+        Ok(len) => len,
+        Err(_) => return Ok(false),
+    };
     Ok(txt_response_wire_len(query, envelope_len) <= budget)
 }
 
@@ -6790,8 +7229,148 @@ mod tests {
             "read SOCKS greeting: early eof"
         )));
         assert!(!is_benign_proxy_stream_error(&anyhow::anyhow!(
+            "SOCKS proxy mode supports CONNECT only"
+        )));
+        assert!(!is_benign_proxy_stream_error(&anyhow::anyhow!(
             "register local stream with client transport"
         )));
+    }
+
+    #[test]
+    fn normal_server_stream_shutdowns_are_not_logged_as_failures() {
+        assert!(is_benign_server_target_error(&anyhow::anyhow!(
+            "queue target download bytes: channel closed"
+        )));
+        assert!(is_benign_udp_gateway_error(&anyhow::anyhow!(
+            "read UDP gateway packet length: early eof"
+        )));
+        assert!(is_benign_udp_gateway_error(&anyhow::anyhow!(
+            "UDP gateway packet used unsupported address type 99"
+        )));
+        assert!(!is_benign_udp_gateway_error(&anyhow::anyhow!(
+            "resolve UDP gateway target failed"
+        )));
+    }
+
+    #[test]
+    fn udp_gateway_packet_codec_round_trips_domain_targets() {
+        let target = SocketTarget::Domain("example.com".to_string(), 443);
+        let packet = UdpGatewayPacket::data(42, target.clone(), b"hello".to_vec());
+        let mut body = Vec::new();
+        body.push(packet.flags);
+        body.extend_from_slice(&packet.conn_id.to_be_bytes());
+        encode_udp_gateway_address(&mut body, packet.target.as_ref().unwrap()).unwrap();
+        body.extend_from_slice(&packet.data);
+
+        let decoded = decode_udp_gateway_packet_body(&body).unwrap();
+
+        assert_eq!(decoded.flags, UDPGW_FLAG_DATA);
+        assert_eq!(decoded.conn_id, 42);
+        assert_eq!(decoded.target, Some(target));
+        assert_eq!(decoded.data, b"hello");
+    }
+
+    #[tokio::test]
+    async fn udp_gateway_forwards_datagrams_over_tcp_connection() {
+        let echo_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo_socket.local_addr().unwrap();
+        let echo_task = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (len, peer) = echo_socket.recv_from(&mut buf).await.unwrap();
+            echo_socket.send_to(&buf[..len], peer).await.unwrap();
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            run_udp_gateway_client(stream).await
+        });
+
+        let mut stream = TcpStream::connect(listen_addr).await.unwrap();
+        write_udp_gateway_packet(
+            &mut stream,
+            &UdpGatewayPacket::data(7, SocketTarget::Ip(echo_addr), b"ping".to_vec()),
+        )
+        .await
+        .unwrap();
+
+        let response = timeout(Duration::from_secs(2), read_udp_gateway_packet(&mut stream))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(response.flags, UDPGW_FLAG_DATA);
+        assert_eq!(response.conn_id, 7);
+        assert_eq!(response.target, Some(SocketTarget::Ip(echo_addr)));
+        assert_eq!(response.data, b"ping");
+
+        echo_task.await.unwrap();
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn udp_gateway_ignores_stale_responses_after_conn_id_retarget() {
+        let old_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let old_addr = old_socket.local_addr().unwrap();
+        let old_task = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (len, peer) = old_socket.recv_from(&mut buf).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            old_socket.send_to(&buf[..len], peer).await.unwrap();
+        });
+
+        let new_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let new_addr = new_socket.local_addr().unwrap();
+        let new_task = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (len, peer) = new_socket.recv_from(&mut buf).await.unwrap();
+            new_socket.send_to(&buf[..len], peer).await.unwrap();
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            run_udp_gateway_client(stream).await
+        });
+
+        let mut stream = TcpStream::connect(listen_addr).await.unwrap();
+        write_udp_gateway_packet(
+            &mut stream,
+            &UdpGatewayPacket::data(9, SocketTarget::Ip(old_addr), b"old".to_vec()),
+        )
+        .await
+        .unwrap();
+        write_udp_gateway_packet(
+            &mut stream,
+            &UdpGatewayPacket::data(9, SocketTarget::Ip(new_addr), b"new".to_vec()),
+        )
+        .await
+        .unwrap();
+
+        let response = timeout(Duration::from_secs(2), read_udp_gateway_packet(&mut stream))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(response.flags, UDPGW_FLAG_DATA);
+        assert_eq!(response.conn_id, 9);
+        assert_eq!(response.target, Some(SocketTarget::Ip(new_addr)));
+        assert_eq!(response.data, b"new");
+        assert!(
+            timeout(
+                Duration::from_millis(350),
+                read_udp_gateway_packet(&mut stream)
+            )
+            .await
+            .is_err(),
+            "stale response from previous UDP target was forwarded"
+        );
+
+        old_task.await.unwrap();
+        new_task.await.unwrap();
+        server_task.abort();
     }
 
     #[test]
@@ -7191,6 +7770,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn response_budget_shrinks_packets_over_frame_limit() {
+        let key = ClientAccessKey::generate();
+        let query_bytes = build_query(9, "t-aa.t.example.test", 4096).unwrap();
+        let query = parse_query(&query_bytes).unwrap();
+        let mut packet = Packet::new(11, 3);
+        packet.max_response_bytes = 4096;
+        for nonce in 0..65 {
+            packet.frames.push(Frame::Ping { nonce });
+        }
+
+        assert!(!response_packet_fits(&query, &key, &packet).unwrap());
+        assert!(!response_frame_fits(&query, &key, &packet, &Frame::Ping { nonce: 99 }).unwrap());
+
+        ensure_response_packet_fits(&query, &key, &mut packet, 123).unwrap();
+
+        assert!(packet.frames.len() <= 64);
+        assert!(response_packet_fits(&query, &key, &packet).unwrap());
+    }
+
     #[tokio::test]
     async fn server_opens_frontier_short_packet_after_alias_registration() {
         let key = ClientAccessKey::generate();
@@ -7199,6 +7798,7 @@ mod tests {
             domain: "t.example.test".to_string(),
             target: "127.0.0.1:1".parse().unwrap(),
             target_mode: ServerTargetMode::Tcp,
+            udp_gateway_listen: None,
             authorized_clients: Arc::new(HashMap::from([(key.client_id, key.clone())])),
         });
         let mut full_packet = Packet::new(0x123456, 0);
@@ -7237,6 +7837,7 @@ mod tests {
             domain: "t.example.test".to_string(),
             target: "127.0.0.1:1".parse().unwrap(),
             target_mode: ServerTargetMode::Tcp,
+            udp_gateway_listen: None,
             authorized_clients: Arc::new(HashMap::from([(key.client_id, key.clone())])),
         });
         let old_activity = Instant::now() - SERVER_STATE_IDLE_TIMEOUT - Duration::from_secs(1);

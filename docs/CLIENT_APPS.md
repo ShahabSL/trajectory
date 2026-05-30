@@ -43,7 +43,7 @@ listener and an HTTP proxy listener.
 | Windows | desktop proxy client implemented; VPN planned | Tauri desktop shell + Rust service/helper | Wintun or WireGuardNT-style adapter | SOCKS5 + HTTP CONNECT |
 | macOS | desktop proxy client implemented; VPN planned | Tauri shell + Network Extension target later | Network Extension packet tunnel | SOCKS5 + HTTP CONNECT |
 | Linux | desktop proxy client implemented; VPN planned | Tauri shell + Rust daemon/helper | `/dev/net/tun` with `CAP_NET_ADMIN` | SOCKS5 + HTTP CONNECT |
-| Android | proxy client implemented; experimental TCP+DNS VPN implemented | Kotlin app + Rust sidecar + Rust JNI bridge | `VpnService` + tun2proxy bridge to local SOCKS | SOCKS5 + HTTP CONNECT |
+| Android | proxy client implemented; experimental TCP+DNS+UDP VPN implemented | Kotlin app + Rust sidecar + Rust JNI bridge | `VpnService` + tun2proxy bridge to local HTTP CONNECT plus server UDPGW | SOCKS5 + HTTP CONNECT |
 
 VPN mode is not just a UI toggle. It changes the product from stream proxying to
 IP packet handling, platform permissions, signing, installers, and routing

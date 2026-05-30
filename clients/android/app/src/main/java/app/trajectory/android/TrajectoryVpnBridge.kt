@@ -7,7 +7,7 @@ object TrajectoryVpnBridge {
 
     external fun run(
         tunFd: Int,
-        socksPort: Int,
+        httpPort: Int,
         dnsServer: String,
         mtu: Int,
         maxSessions: Int,

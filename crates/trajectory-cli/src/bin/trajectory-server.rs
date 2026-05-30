@@ -18,6 +18,7 @@ async fn run() -> Result<()> {
     let mut bind_host = "0.0.0.0".to_string();
     let mut target = "127.0.0.1:1080".parse::<SocketAddr>().unwrap();
     let mut target_mode = ServerTargetMode::Tcp;
+    let mut udp_gateway_listen = Some("127.0.0.1:7300".parse::<SocketAddr>().unwrap());
     let mut domain = None::<String>;
     let mut client_db = None::<PathBuf>;
 
@@ -46,6 +47,15 @@ async fn run() -> Result<()> {
                     target_mode = ServerTargetMode::Tcp;
                 }
             }
+            "--udp-gateway-listen" => {
+                udp_gateway_listen = Some(
+                    args.next()
+                        .context("missing UDP gateway listen address")?
+                        .parse()
+                        .context("invalid UDP gateway listen address")?,
+                );
+            }
+            "--disable-udp-gateway" => udp_gateway_listen = None,
             "--domain" | "-d" => domain = Some(args.next().context("missing domain")?),
             "--client-db" => {
                 client_db = Some(PathBuf::from(
@@ -75,6 +85,7 @@ async fn run() -> Result<()> {
         domain,
         target,
         target_mode,
+        udp_gateway_listen,
         authorized_clients: Arc::new(active_keys),
     })
     .await
@@ -94,6 +105,8 @@ Optional:
   -l, --dns-listen-port <PORT>       DNS UDP/TCP listen port (default: 53)
   -6, --dns-listen-ipv6              Bind to :: instead of IPv4
   -a, --target-address <HOST:PORT>   Upstream TCP target, or socks5-direct (default: 127.0.0.1:1080)
+      --udp-gateway-listen <ADDR>    Local UDP gateway for Android VPN UDP-over-TCP (default: 127.0.0.1:7300)
+      --disable-udp-gateway          Disable the local UDP gateway
   -h, --help                         Show this help"
     );
 }

@@ -13,6 +13,7 @@ use std::{
 use tun2proxy::{general_run_async, ArgDns, ArgProxy, ArgVerbosity, Args, CancellationToken};
 
 static RUNNING: Mutex<Option<CancellationToken>> = Mutex::new(None);
+const UDP_GATEWAY_SERVER: &str = "127.0.0.1:7300";
 
 /// Runs the TUN-to-SOCKS bridge on an Android `VpnService` file descriptor.
 ///
@@ -26,7 +27,7 @@ pub unsafe extern "system" fn Java_app_trajectory_android_TrajectoryVpnBridge_ru
     mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     tun_fd: jint,
-    socks_port: jint,
+    http_port: jint,
     dns_server: JString<'_>,
     mtu: jint,
     max_sessions: jint,
@@ -36,7 +37,7 @@ pub unsafe extern "system" fn Java_app_trajectory_android_TrajectoryVpnBridge_ru
         let dns_server = dns_server.try_to_string(env)?;
         Ok(run_bridge(
             tun_fd,
-            socks_port,
+            http_port,
             &dns_server,
             mtu,
             max_sessions,
@@ -62,7 +63,7 @@ pub unsafe extern "system" fn Java_app_trajectory_android_TrajectoryVpnBridge_st
 
 fn run_bridge(
     tun_fd: i32,
-    socks_port: i32,
+    http_port: i32,
     dns_server: &str,
     mtu: i32,
     max_sessions: i32,
@@ -70,7 +71,7 @@ fn run_bridge(
 ) -> i32 {
     let Ok(args) = build_args(
         tun_fd,
-        socks_port,
+        http_port,
         dns_server,
         mtu,
         max_sessions,
@@ -124,7 +125,7 @@ fn stop_bridge() -> i32 {
 
 fn build_args(
     tun_fd: i32,
-    socks_port: i32,
+    http_port: i32,
     dns_server: &str,
     mtu: i32,
     max_sessions: i32,
@@ -133,8 +134,8 @@ fn build_args(
     if tun_fd < 0 {
         return Err("invalid TUN file descriptor".to_string());
     }
-    if !(1..=65535).contains(&socks_port) {
-        return Err("invalid SOCKS port".to_string());
+    if !(1..=65535).contains(&http_port) {
+        return Err("invalid HTTP proxy port".to_string());
     }
     if !(576..=9000).contains(&mtu) {
         return Err("invalid VPN MTU".to_string());
@@ -145,8 +146,8 @@ fn build_args(
     let dns_addr = dns_server
         .parse::<IpAddr>()
         .map_err(|_| "invalid DNS server address".to_string())?;
-    let proxy_addr = SocketAddr::from(([127, 0, 0, 1], socks_port as u16));
-    let proxy = ArgProxy::try_from(format!("socks5://{proxy_addr}").as_str())
+    let proxy_addr = SocketAddr::from(([127, 0, 0, 1], http_port as u16));
+    let proxy = ArgProxy::try_from(format!("http://{proxy_addr}").as_str())
         .map_err(|error| format!("invalid proxy address: {error}"))?;
 
     let mut args = Args {
@@ -160,6 +161,12 @@ fn build_args(
         setup: false,
         ..Args::default()
     };
+    args.udpgw_server = Some(
+        UDP_GATEWAY_SERVER
+            .parse()
+            .map_err(|_| "invalid UDP gateway address".to_string())?,
+    );
+    args.udpgw_connections = Some(8);
     #[cfg(unix)]
     {
         args.tun_fd = Some(tun_fd);
@@ -180,6 +187,11 @@ mod tests {
         assert_eq!(
             args.proxy.addr,
             "127.0.0.1:7000".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(args.proxy.proxy_type.to_string(), "http");
+        assert_eq!(
+            args.udpgw_server,
+            Some(UDP_GATEWAY_SERVER.parse::<SocketAddr>().unwrap())
         );
         assert_eq!(args.mtu, 1500);
         assert_eq!(args.max_sessions, 512);

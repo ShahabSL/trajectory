@@ -1,10 +1,15 @@
 package app.trajectory.android
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,10 +33,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Home
@@ -43,9 +51,10 @@ import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -83,6 +92,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -92,6 +102,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
+import java.io.File
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
@@ -664,7 +676,9 @@ private fun StatusCard(
                     .padding(12.dp),
             ) {
                 Text(
-                    text = status.lastError ?: notice ?: profileErrors.firstOrNull().orEmpty(),
+                    text = redactDiagnosticText(
+                        status.lastError ?: notice ?: profileErrors.firstOrNull().orEmpty(),
+                    ),
                     color = if (status.lastError != null || profileErrors.isNotEmpty()) TrajectoryColors.WarningInk else TrajectoryColors.Ink,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -1029,30 +1043,156 @@ private fun SaveProfileButton(
 
 @Composable
 private fun DiagnosticsScreen(status: RuntimeStatusSnapshot) {
+    val context = LocalContext.current
+    var query by rememberSaveable { mutableStateOf("") }
+    var filter by rememberSaveable { mutableStateOf("all") }
+    val visibleLogs = remember(status.logs, query, filter) {
+        status.logs.filter { diagnosticLineMatches(it, filter, query) }
+    }
+    val fullReport = remember(status) { diagnosticReportText(status) }
+    val visibleReport = remember(visibleLogs, status) {
+        diagnosticReportText(status, visibleLogs)
+    }
+
     CardShell {
         SectionTitle(Icons.Filled.BugReport, "Diagnostics")
         Spacer(Modifier.height(8.dp))
         KeyValue("Mode", status.mode.name.lowercase())
         KeyValue("Phase", status.phase.name.lowercase())
         KeyValue("Last update", "${(System.currentTimeMillis() - status.updatedAtMillis).coerceAtLeast(0)} ms ago")
+        KeyValue("Resolvers", "${status.admittedResolvers}/${status.candidateResolvers}")
+        KeyValue("Listeners", "SOCKS ${if (status.socksReady) "ready" else "waiting"} / HTTP ${if (status.httpReady) "ready" else "waiting"}")
+        KeyValue("Bridge", if (status.bridgeReady) "ready" else if (status.tunReady) "starting" else "waiting")
+        status.lastError?.let { KeyValue("Last error", redactDiagnosticText(it).take(120)) }
         HorizontalDivider(Modifier.padding(vertical = 10.dp), DividerDefaults.Thickness, TrajectoryColors.Border)
         Text("Runtime log", color = TrajectoryColors.Muted, fontWeight = FontWeight.Bold, fontSize = 12.sp)
         Spacer(Modifier.height(8.dp))
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xFF0B0F19))
-                .padding(12.dp),
-        ) {
-            if (status.logs.isEmpty()) {
-                Text("No runtime output yet.", color = Color(0xFFE5E7EB), fontFamily = FontFamily.Monospace)
-            } else {
-                status.logs.takeLast(40).forEach { line ->
-                    Text(line, color = Color(0xFFE5E7EB), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            label = { Text("Search logs") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+            listOf("all", "errors", "transport").forEach { option ->
+                FilterChip(
+                    selected = filter == option,
+                    onClick = { filter = option },
+                    label = { Text(option.replaceFirstChar { it.titlecase() }, fontSize = 11.sp, maxLines = 1) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = TrajectoryColors.Ink,
+                        selectedLabelColor = Color.White,
+                    ),
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+            TextButton(
+                onClick = { copyDiagnostics(context, "Trajectory visible logs", visibleReport) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Copy visible logs", fontSize = 12.sp)
+            }
+            TextButton(
+                onClick = { copyDiagnostics(context, "Trajectory diagnostics", fullReport) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Copy full diagnostics", fontSize = 12.sp)
+            }
+            TextButton(
+                onClick = { shareDiagnostics(context, fullReport) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Filled.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Share diagnostics file", fontSize = 12.sp)
+            }
+            TextButton(
+                onClick = { RuntimeStatusCenter.clearLogs() },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Filled.StopCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Clear logs", fontSize = 12.sp)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        SelectionContainer {
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(420.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF0B0F19))
+                    .padding(12.dp),
+            ) {
+                if (visibleLogs.isEmpty()) {
+                    item {
+                        Text(
+                            if (status.logs.isEmpty()) "No runtime output yet." else "No logs match this filter.",
+                            color = Color(0xFFE5E7EB),
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                } else {
+                    items(visibleLogs) { line ->
+                        Text(
+                            line,
+                            color = diagnosticLineColor(line),
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
                 }
             }
         }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "${visibleLogs.size}/${status.logs.size} lines shown",
+            color = TrajectoryColors.Muted,
+            fontSize = 11.sp,
+        )
+    }
+}
+
+private fun copyDiagnostics(context: Context, label: String, text: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+    Toast.makeText(context, "Diagnostics copied", Toast.LENGTH_SHORT).show()
+}
+
+private fun shareDiagnostics(context: Context, text: String) {
+    val file = File(context.cacheDir, "trajectory-diagnostics.txt")
+    file.writeText(text)
+    val uri = FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.diagnostics",
+        file,
+    )
+    val intent = Intent(Intent.ACTION_SEND)
+        .setType("text/plain")
+        .putExtra(Intent.EXTRA_SUBJECT, "Trajectory diagnostics")
+        .putExtra(Intent.EXTRA_TEXT, "Trajectory diagnostics are attached.")
+        .putExtra(Intent.EXTRA_STREAM, uri)
+        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    context.startActivity(Intent.createChooser(intent, "Share Trajectory diagnostics"))
+}
+
+private fun diagnosticLineColor(line: String): Color {
+    val lower = line.lowercase()
+    return when {
+        lower.contains("failed") || lower.contains("error") || lower.contains("timed out") -> Color(0xFFFCA5A5)
+        lower.contains("client_transport_diag") || lower.contains("admitted resolver") -> Color(0xFF93C5FD)
+        else -> Color(0xFFE5E7EB)
     }
 }
 
