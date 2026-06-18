@@ -507,13 +507,13 @@ jobs:
         run: sdkmanager "build-tools;35.0.0" "ndk;29.0.14206865"
 
       - name: Download signed Android release APK
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: android-release-apk
           path: ${{ runner.temp }}/android-release-apk
 
       - name: Download Android smoke probe APK
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: android-smokeprobe-apk
           path: ${{ runner.temp }}/android-smokeprobe-apk
@@ -611,7 +611,7 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Download signed Android release APK
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: android-release-apk
           path: ${{ runner.temp }}/android-release-apk
@@ -704,28 +704,28 @@ jobs:
         run: python scripts/validate_release_versions.py --release-tag "$RELEASE_TAG"
 
       - name: Download CLI release bundles
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: dist/release
           merge-multiple: true
 
       - name: Download desktop release bundles
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: desktop-x86_64-*
           path: dist/release
           merge-multiple: true
 
       - name: Download Apple Silicon desktop release bundles
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: desktop-aarch64-*
           path: dist/release
           merge-multiple: true
 
       - name: Download Android release APK
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: android-release-apk
           path: dist/release
