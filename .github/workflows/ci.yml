@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Run local protocol integration tests
         run: |
@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Run clippy
         run: cargo clippy -p trajectory-core -p trajectory-cli -p trajectory-vpn-bridge --all-targets -- -D warnings
@@ -65,7 +65,7 @@ jobs:
             target: aarch64-apple-darwin
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -103,7 +103,7 @@ jobs:
             target: aarch64-apple-darwin
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Tauri Linux dependencies
         if: runner.os == 'Linux'
@@ -242,7 +242,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -364,7 +364,7 @@ jobs:
             compact: "false"
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -436,7 +436,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -484,7 +484,7 @@ jobs:
           - os: macos-15
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Build workspace
         run: cargo build --release --workspace
@@ -500,7 +500,7 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Run protected live e2e
         env:
